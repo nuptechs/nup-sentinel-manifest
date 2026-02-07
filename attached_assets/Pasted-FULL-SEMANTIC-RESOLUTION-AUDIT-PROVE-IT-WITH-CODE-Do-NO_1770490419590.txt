@@ -1,0 +1,108 @@
+FULL SEMANTIC RESOLUTION AUDIT — PROVE IT WITH CODE
+
+Do NOT explain what you did.
+Do NOT summarize.
+
+You must PROVE with code excerpts that the system is truly using semantic symbol resolution and NOT string-based heuristics.
+
+This is a forensic audit.
+
+========================================================
+PART 1 — JAVA SYMBOL SOLVER PROOF
+========================================================
+
+Show the EXACT code where:
+
+1) CombinedTypeSolver is created
+2) ReflectionTypeSolver is added
+3) JavaParserTypeSolver is added with the temp source root
+4) JavaSymbolSolver is registered in ParserConfiguration
+
+Show the real code.
+
+--------------------------------------------------------
+
+Show the EXACT code where:
+
+MethodCallExpr is processed using:
+
+    callExpr.resolve()
+
+and from the resolved symbol you extract:
+
+- Declaring class
+- Qualified signature
+- Parameter types
+
+Show the real code.
+
+--------------------------------------------------------
+
+Show the EXACT code where field injections are resolved via symbol types (NOT field name matching).
+
+========================================================
+PART 2 — PROVE NO STRING MATCHING EXISTS (JAVA)
+========================================================
+
+Search the entire Java analyzer and show any code that still uses:
+
+- method name string comparison
+- class name string comparison
+- injected field name matching
+
+If any exists, show it.
+
+========================================================
+PART 3 — FRONTEND SYMBOL TABLE PROOF
+========================================================
+
+Show the EXACT ScriptSymbolTable implementation.
+
+Show:
+
+1) Where functions/methods are indexed as ts.Node references
+2) Where HTTP calls are extracted from AST traversal
+3) Where called symbols are extracted from AST traversal
+
+--------------------------------------------------------
+
+Show the EXACT code where a template handler:
+
+@click="salvarUsuario"
+
+is resolved to the real function declaration node.
+
+--------------------------------------------------------
+
+Show the EXACT code where call chains are followed via node references, NOT string names.
+
+========================================================
+PART 4 — PROVE NO STRING MATCHING EXISTS (FRONTEND)
+========================================================
+
+Search the entire frontend analyzer and show any code that still uses:
+
+- handler name strings to find functions
+- string matching to find HTTP calls
+
+If any exists, show it.
+
+========================================================
+PART 5 — GRAPH PROVENANCE
+========================================================
+
+Show the code where ApplicationGraph edges are created.
+
+Prove that the source and target nodes come from resolved symbols / AST nodes, not inferred names.
+
+========================================================
+STRICT RULE
+========================================================
+
+You are not allowed to explain.
+
+Only show code excerpts that prove the points above.
+
+If something does not exist yet, say:
+
+"MISSING — NOT IMPLEMENTED"
