@@ -1,12 +1,13 @@
 com/permacat/model/GraphNodeDTO.class
-com/permacat/analyzer/JavaASTAnalyzer.class
 com/permacat/analyzer/JavaASTAnalyzer$1.class
-com/permacat/analyzer/JavaASTAnalyzer$ClassInfo.class
-com/permacat/analyzer/JavaASTAnalyzer$EntityField.class
 com/permacat/analyzer/AnalyzerServer$1.class
-com/permacat/analyzer/JavaASTAnalyzer$MethodInfo.class
 com/permacat/analyzer/AnalyzerServer.class
 com/permacat/model/AnalysisResult.class
 com/permacat/model/GraphEdgeDTO.class
 com/permacat/analyzer/JavaASTAnalyzer$2.class
+com/permacat/analyzer/JavaASTAnalyzer$SymbolMap.class
+com/permacat/analyzer/JavaASTAnalyzer.class
+com/permacat/analyzer/JavaASTAnalyzer$ClassInfo.class
+com/permacat/analyzer/JavaASTAnalyzer$EntityField.class
+com/permacat/analyzer/JavaASTAnalyzer$MethodInfo.class
 com/permacat/analyzer/JavaASTAnalyzer$MethodCallInfo.class

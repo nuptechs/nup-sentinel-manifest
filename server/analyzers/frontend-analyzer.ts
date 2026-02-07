@@ -32,35 +32,126 @@ interface SymbolDeclaration {
   name: string;
   node: ts.Node;
   httpCalls: HttpCall[];
-  calledSymbols: string[];
+  calledNodes: ts.Node[];
+}
+
+class ImportedHttpClients {
+  private httpIdentifiers = new Set<string>();
+  private fetchIdentifier = "fetch";
+  private importSources = new Set<string>();
+
+  static build(sourceFile: ts.SourceFile): ImportedHttpClients {
+    const clients = new ImportedHttpClients();
+    clients.indexImports(sourceFile);
+    return clients;
+  }
+
+  private indexImports(sourceFile: ts.SourceFile): void {
+    const visit = (node: ts.Node) => {
+      if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+        const source = node.moduleSpecifier.text.toLowerCase();
+        this.importSources.add(source);
+
+        const httpModules = ["axios", "@angular/common/http", "@angular/http"];
+        const isHttpModule = httpModules.some(m => source === m || source.startsWith(m + "/"));
+
+        if (isHttpModule && node.importClause) {
+          if (node.importClause.name) {
+            this.httpIdentifiers.add(node.importClause.name.text);
+          }
+          if (node.importClause.namedBindings) {
+            if (ts.isNamedImports(node.importClause.namedBindings)) {
+              for (const spec of node.importClause.namedBindings.elements) {
+                this.httpIdentifiers.add(spec.name.text);
+              }
+            } else if (ts.isNamespaceImport(node.importClause.namedBindings)) {
+              this.httpIdentifiers.add(node.importClause.namedBindings.name.text);
+            }
+          }
+        }
+
+        if (source.includes("api") || source.includes("http") || source.includes("request") || source.includes("service")) {
+          if (node.importClause) {
+            if (node.importClause.name) {
+              this.httpIdentifiers.add(node.importClause.name.text);
+            }
+            if (node.importClause.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
+              for (const spec of node.importClause.namedBindings.elements) {
+                const lowerName = spec.name.text.toLowerCase();
+                if (lowerName.includes("api") || lowerName.includes("http") ||
+                    lowerName.includes("request") || lowerName.includes("client") ||
+                    lowerName.includes("instance")) {
+                  this.httpIdentifiers.add(spec.name.text);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+        if (ts.isCallExpression(node.initializer)) {
+          const callText = node.initializer.expression;
+          if (ts.isPropertyAccessExpression(callText) && callText.name.text === "create") {
+            const obj = callText.expression;
+            if (ts.isIdentifier(obj) && this.httpIdentifiers.has(obj.text)) {
+              this.httpIdentifiers.add(node.name.text);
+            }
+          }
+          if (ts.isIdentifier(callText) && this.httpIdentifiers.has(callText.text)) {
+            this.httpIdentifiers.add(node.name.text);
+          }
+        }
+      }
+
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+
+  isHttpClient(identifierText: string): boolean {
+    if (this.httpIdentifiers.has(identifierText)) return true;
+    if (identifierText === "fetch") return true;
+    const lower = identifierText.toLowerCase();
+    if (lower === "axios") return true;
+    return false;
+  }
+
+  isHttpExpression(expressionText: string): boolean {
+    const lower = expressionText.toLowerCase();
+    if (this.httpIdentifiers.has(expressionText)) return true;
+    for (const id of this.httpIdentifiers) {
+      if (lower === id.toLowerCase()) return true;
+      if (lower.endsWith("." + id.toLowerCase())) return true;
+    }
+    if (lower === "this.http" || lower === "this.$http" || lower === "this.httpclient") return true;
+    return false;
+  }
 }
 
 class ScriptSymbolTable {
-  private declarations = new Map<string, SymbolDeclaration>();
+  private nodeMap = new Map<ts.Node, SymbolDeclaration>();
+  private nameIndex = new Map<string, ts.Node>();
+  private httpClients: ImportedHttpClients;
 
   static build(sourceFile: ts.SourceFile): ScriptSymbolTable {
     const table = new ScriptSymbolTable();
+    table.httpClients = ImportedHttpClients.build(sourceFile);
     table.indexDeclarations(sourceFile);
     table.extractCallInfo(sourceFile);
     return table;
   }
 
+  private constructor() {
+    this.httpClients = new ImportedHttpClients();
+  }
+
   private indexDeclarations(sourceFile: ts.SourceFile): void {
     const visit = (node: ts.Node) => {
       if (ts.isFunctionDeclaration(node) && node.name) {
-        this.declarations.set(node.name.text, {
-          name: node.name.text,
-          node,
-          httpCalls: [],
-          calledSymbols: [],
-        });
+        this.registerDeclaration(node.name.text, node);
       } else if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) {
-        this.declarations.set(node.name.text, {
-          name: node.name.text,
-          node,
-          httpCalls: [],
-          calledSymbols: [],
-        });
+        this.registerDeclaration(node.name.text, node);
       } else if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
         const parent = node.parent;
         let declName: string | null = null;
@@ -72,12 +163,7 @@ class ScriptSymbolTable {
           declName = parent.name.text;
         }
         if (declName) {
-          this.declarations.set(declName, {
-            name: declName,
-            node,
-            httpCalls: [],
-            calledSymbols: [],
-          });
+          this.registerDeclaration(declName, node);
         }
       }
       ts.forEachChild(node, visit);
@@ -85,11 +171,21 @@ class ScriptSymbolTable {
     visit(sourceFile);
   }
 
+  private registerDeclaration(name: string, node: ts.Node): void {
+    const decl: SymbolDeclaration = {
+      name,
+      node,
+      httpCalls: [],
+      calledNodes: [],
+    };
+    this.nodeMap.set(node, decl);
+    this.nameIndex.set(name, node);
+  }
+
   private extractCallInfo(sourceFile: ts.SourceFile): void {
-    this.declarations.forEach((decl) => {
+    this.nodeMap.forEach((decl) => {
       const body = this.getFunctionBody(decl.node);
       if (!body) return;
-
       this.walkBodyForCalls(body, sourceFile, decl);
     });
   }
@@ -111,9 +207,9 @@ class ScriptSymbolTable {
         if (httpCall) {
           decl.httpCalls.push(httpCall);
         } else {
-          const calledName = this.resolveCallTarget(node);
-          if (calledName && calledName !== decl.name) {
-            decl.calledSymbols.push(calledName);
+          const targetNode = this.resolveCallTargetNode(node);
+          if (targetNode && targetNode !== decl.node) {
+            decl.calledNodes.push(targetNode);
           }
         }
       }
@@ -122,22 +218,17 @@ class ScriptSymbolTable {
     walk(body);
   }
 
-  private resolveCallTarget(node: ts.CallExpression): string | null {
+  private resolveCallTargetNode(node: ts.CallExpression): ts.Node | null {
     const expr = node.expression;
     if (ts.isIdentifier(expr)) {
-      if (this.declarations.has(expr.text)) {
-        return expr.text;
-      }
-      return expr.text;
+      const targetNode = this.nameIndex.get(expr.text);
+      return targetNode || null;
     }
     if (ts.isPropertyAccessExpression(expr)) {
       const obj = expr.expression;
       if (obj.kind === ts.SyntaxKind.ThisKeyword || (ts.isIdentifier(obj) && obj.text === "this")) {
-        const methodName = expr.name.text;
-        if (this.declarations.has(methodName)) {
-          return methodName;
-        }
-        return methodName;
+        const targetNode = this.nameIndex.get(expr.name.text);
+        return targetNode || null;
       }
     }
     return null;
@@ -151,15 +242,15 @@ class ScriptSymbolTable {
       const httpMethods = ["get", "post", "put", "delete", "patch"];
 
       if (httpMethods.includes(methodName)) {
-        const objectText = expr.expression.getText(sourceFile).toLowerCase();
-        const httpPatterns = [
-          "axios", "http", "httpclient", "api", "apirequest",
-          "apiservice", "instance", "client", "request", "this.http",
-          "this.$http", "this.httpclient",
-        ];
-        const isHttp = httpPatterns.some(
-          (p) => objectText === p || objectText.endsWith("." + p) || objectText.includes(p)
-        );
+        const calleeObj = expr.expression;
+        let isHttp = false;
+
+        if (ts.isIdentifier(calleeObj)) {
+          isHttp = this.httpClients.isHttpClient(calleeObj.text);
+        } else {
+          const expressionText = calleeObj.getText(sourceFile);
+          isHttp = this.httpClients.isHttpExpression(expressionText);
+        }
 
         if (isHttp && node.arguments.length > 0) {
           const url = extractUrlFromNode(node.arguments[0]);
@@ -202,23 +293,28 @@ class ScriptSymbolTable {
       }
     }
 
-    if (ts.isIdentifier(expr)) {
-      const fnName = expr.text.toLowerCase();
-      if (fnName === "apirequest" || fnName === "request") {
-        if (node.arguments.length >= 2) {
-          const methodArg = node.arguments[0];
-          const urlArg = node.arguments[1];
-          if (ts.isStringLiteral(methodArg)) {
-            const url = extractUrlFromNode(urlArg);
-            if (url) {
-              return {
-                method: methodArg.text.toUpperCase(),
-                url,
-                lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
-                callerFunction: callerName,
-              };
-            }
+    if (ts.isIdentifier(expr) && this.httpClients.isHttpClient(expr.text)) {
+      if (node.arguments.length >= 1) {
+        const firstArg = node.arguments[0];
+        if (ts.isStringLiteral(firstArg) && node.arguments.length >= 2) {
+          const possibleUrl = extractUrlFromNode(node.arguments[1]);
+          if (possibleUrl) {
+            return {
+              method: firstArg.text.toUpperCase(),
+              url: possibleUrl,
+              lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
+              callerFunction: callerName,
+            };
           }
+        }
+        const url = extractUrlFromNode(firstArg);
+        if (url && url.startsWith("/")) {
+          return {
+            method: "GET",
+            url,
+            lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            callerFunction: callerName,
+          };
         }
       }
     }
@@ -226,19 +322,19 @@ class ScriptSymbolTable {
     return null;
   }
 
-  resolveHandler(handlerName: string): SymbolDeclaration | null {
-    return this.declarations.get(handlerName) || null;
+  resolveHandlerNode(handlerName: string): ts.Node | null {
+    return this.nameIndex.get(handlerName) || null;
   }
 
-  resolveHttpCallsForHandler(handlerName: string): HttpCall[] {
-    const visited = new Set<string>();
+  traceHttpCalls(startNode: ts.Node): HttpCall[] {
+    const visited = new Set<ts.Node>();
     const results: HttpCall[] = [];
 
-    const trace = (name: string) => {
-      if (visited.has(name)) return;
-      visited.add(name);
+    const trace = (node: ts.Node) => {
+      if (visited.has(node)) return;
+      visited.add(node);
 
-      const decl = this.declarations.get(name);
+      const decl = this.nodeMap.get(node);
       if (!decl) return;
 
       if (decl.httpCalls.length > 0) {
@@ -246,18 +342,18 @@ class ScriptSymbolTable {
         return;
       }
 
-      for (const calledName of decl.calledSymbols) {
-        trace(calledName);
+      for (const calledNode of decl.calledNodes) {
+        trace(calledNode);
       }
     };
 
-    trace(handlerName);
+    trace(startNode);
     return results;
   }
 
   getAllHttpCalls(): HttpCall[] {
     const calls: HttpCall[] = [];
-    this.declarations.forEach((decl) => {
+    this.nodeMap.forEach((decl) => {
       calls.push(...decl.httpCalls);
     });
     return calls;
@@ -267,8 +363,8 @@ class ScriptSymbolTable {
     const calls: HttpCall[] = [];
     const visit = (node: ts.Node) => {
       if (ts.isCallExpression(node)) {
-        const enclosing = this.getEnclosingDeclaration(node);
-        if (!enclosing) {
+        const enclosingNode = this.getEnclosingDeclNode(node);
+        if (!enclosingNode) {
           const httpCall = this.tryExtractHttpCall(node, sourceFile, "__top_level__");
           if (httpCall) {
             calls.push(httpCall);
@@ -281,26 +377,15 @@ class ScriptSymbolTable {
     return calls;
   }
 
-  private getEnclosingDeclaration(node: ts.Node): string | null {
+  private getEnclosingDeclNode(node: ts.Node): ts.Node | null {
     let current = node.parent;
     while (current) {
-      if (ts.isFunctionDeclaration(current) && current.name) {
-        return current.name.text;
+      if (this.nodeMap.has(current)) {
+        return current;
       }
-      if (ts.isMethodDeclaration(current) && ts.isIdentifier(current.name)) {
-        return current.name.text;
-      }
-      if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
-        const parent = current.parent;
-        if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
-          return parent.name.text;
-        }
-        if (ts.isPropertyAssignment(parent) && ts.isIdentifier(parent.name)) {
-          return parent.name.text;
-        }
-        if (ts.isPropertyDeclaration(parent) && ts.isIdentifier(parent.name)) {
-          return parent.name.text;
-        }
+      if (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current) ||
+          ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
+        if (this.nodeMap.has(current)) return current;
       }
       current = current.parent;
     }
@@ -485,7 +570,7 @@ function parseJSXTemplate(sourceFile: ts.SourceFile): TemplateBinding[] {
               } else if (ts.isPropertyAccessExpression(expr)) {
                 handlerName = expr.name.text;
               } else if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) {
-                handlerName = extractInlineHandlerTarget(expr, sourceFile);
+                handlerName = extractInlineHandlerTarget(expr);
               } else if (ts.isCallExpression(expr)) {
                 if (ts.isIdentifier(expr.expression)) {
                   handlerName = expr.expression.text;
@@ -515,7 +600,7 @@ function parseJSXTemplate(sourceFile: ts.SourceFile): TemplateBinding[] {
   return bindings;
 }
 
-function extractInlineHandlerTarget(node: ts.ArrowFunction | ts.FunctionExpression, sourceFile: ts.SourceFile): string {
+function extractInlineHandlerTarget(node: ts.ArrowFunction | ts.FunctionExpression): string {
   let result = "";
   function visit(n: ts.Node) {
     if (result) return;
@@ -630,7 +715,7 @@ function endpointMatchScore(frontendUrl: string, backendPath: string): number {
   return (matchCount / frontParts.length) * 100;
 }
 
-function resolveBindingsViaSymbolTable(
+function resolveBindingsViaNodes(
   bindings: TemplateBinding[],
   symbolTable: ScriptSymbolTable,
   component: string,
@@ -640,10 +725,10 @@ function resolveBindingsViaSymbolTable(
   const interactions: FrontendInteraction[] = [];
 
   for (const binding of bindings) {
-    const resolved = symbolTable.resolveHandler(binding.handlerName);
+    const handlerNode = symbolTable.resolveHandlerNode(binding.handlerName);
 
-    if (resolved) {
-      const httpCalls = symbolTable.resolveHttpCallsForHandler(binding.handlerName);
+    if (handlerNode) {
+      const httpCalls = symbolTable.traceHttpCalls(handlerNode);
       if (httpCalls.length > 0) {
         for (const call of httpCalls) {
           const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
@@ -671,33 +756,16 @@ function resolveBindingsViaSymbolTable(
         });
       }
     } else {
-      const httpCalls = symbolTable.resolveHttpCallsForHandler(binding.handlerName);
-      if (httpCalls.length > 0) {
-        for (const call of httpCalls) {
-          const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
-          interactions.push({
-            component,
-            elementType: binding.elementType,
-            actionName: binding.handlerName,
-            httpMethod: call.method,
-            url: call.url,
-            mappedBackendNode: backendNode,
-            sourceFile: filePath,
-            lineNumber: binding.lineNumber,
-          });
-        }
-      } else {
-        interactions.push({
-          component,
-          elementType: binding.elementType,
-          actionName: binding.handlerName,
-          httpMethod: null,
-          url: null,
-          mappedBackendNode: null,
-          sourceFile: filePath,
-          lineNumber: binding.lineNumber,
-        });
-      }
+      interactions.push({
+        component,
+        elementType: binding.elementType,
+        actionName: binding.handlerName,
+        httpMethod: null,
+        url: null,
+        mappedBackendNode: null,
+        sourceFile: filePath,
+        lineNumber: binding.lineNumber,
+      });
     }
   }
 
@@ -712,7 +780,7 @@ function analyzeVueFile(
   const component = getComponentName(filePath);
   const { bindings: templateBindings, scriptContent } = parseVueTemplateAST(content);
 
-  let symbolTable = new ScriptSymbolTable() as ScriptSymbolTable;
+  let symbolTable: ScriptSymbolTable | null = null;
   let allHttpCalls: HttpCall[] = [];
 
   if (scriptContent.trim()) {
@@ -721,9 +789,18 @@ function analyzeVueFile(
     allHttpCalls = [...symbolTable.getAllHttpCalls(), ...symbolTable.getTopLevelHttpCalls(scriptSource)];
   }
 
-  const interactions = resolveBindingsViaSymbolTable(
-    templateBindings, symbolTable, component, filePath, graph
-  );
+  const interactions = symbolTable
+    ? resolveBindingsViaNodes(templateBindings, symbolTable, component, filePath, graph)
+    : templateBindings.map(b => ({
+        component,
+        elementType: b.elementType,
+        actionName: b.handlerName,
+        httpMethod: null as string | null,
+        url: null as string | null,
+        mappedBackendNode: null as GraphNode | null,
+        sourceFile: filePath,
+        lineNumber: b.lineNumber,
+      }));
 
   addUnmappedHttpCalls(interactions, allHttpCalls, component, filePath, graph);
 
@@ -741,7 +818,7 @@ function analyzeReactFile(
   const jsxBindings = parseJSXTemplate(sourceFile);
   const allHttpCalls = [...symbolTable.getAllHttpCalls(), ...symbolTable.getTopLevelHttpCalls(sourceFile)];
 
-  const interactions = resolveBindingsViaSymbolTable(
+  const interactions = resolveBindingsViaNodes(
     jsxBindings, symbolTable, component, filePath, graph
   );
 
@@ -804,7 +881,7 @@ function analyzeAngularFile(
 
   if (templateContent) {
     const templateBindings = parseAngularTemplateAST(templateContent);
-    const resolved = resolveBindingsViaSymbolTable(
+    const resolved = resolveBindingsViaNodes(
       templateBindings, symbolTable, component, filePath, graph
     );
     interactions.push(...resolved);

@@ -51,10 +51,10 @@ server/
   db.ts                         - Database connection
   seed.ts                       - Sample project seed data
   analyzers/
-    application-graph.ts        - ApplicationGraph model (GraphNode, GraphEdge, analyzeEndpoints) — UNCHANGED
+    application-graph.ts        - ApplicationGraph model (GraphNode, GraphEdge, analyzeEndpoints)
     backend-java-client.ts      - Node.js client that spawns/communicates with Java engine
     frontend-analyzer.ts        - AST-based frontend analyzer (Vue/React/Angular)
-    graph-connector.ts          - Converts FrontendInteractions to catalog entries — UNCHANGED
+    graph-connector.ts          - Converts FrontendInteractions to catalog entries
     semantic-engine.ts          - LLM classification of operations
 
 shared/
@@ -63,25 +63,32 @@ shared/
 
 ## Analyzer Architecture
 
-### Java Backend Analyzer (JVM-based)
+### Java Backend Analyzer (JVM-based) — PURE SYMBOL RESOLUTION
 - Uses **JavaParser** library with **JavaSymbolSolver** for semantic AST analysis
 - **CombinedTypeSolver**: ReflectionTypeSolver (JDK types) + JavaParserTypeSolver (project source types)
 - Writes source files to temp directory for JavaParserTypeSolver filesystem access
-- Uses `callExpr.resolve()` for type-resolved method call resolution with graceful fallback to heuristics when framework JARs unavailable
+- **SymbolMap**: Maps `ResolvedReferenceTypeDeclaration` → `ClassInfo` (qualified-name-keyed internally for proper identity across resolve() calls)
+- `cls.resolve()` binds each `ClassOrInterfaceDeclaration` to its resolved symbol during class scanning phase
+- `callExpr.resolve()` resolves method calls; `resolved.declaringType()` used as primary key into SymbolMap to find target ClassInfo
+- **Scope type fallback**: when `declaringType()` resolves to a framework class (e.g., JpaRepository), falls back to `callExpr.getScope().calculateResolvedType()` to find the actual field type (e.g., UserRepository) in SymbolMap — enables service→repository edges for inherited methods
+- **MethodCallInfo** stores both `resolvedDeclaringType` (declaring class) and `resolvedScopeType` (callee field type) for two-level lookup
+- **No heuristic fallback**: if `callExpr.resolve()` fails, the edge is silently skipped (no processHeuristicCall, no resolveTargetType, no isInjectableType)
+- **Repository→Entity via generics**: extracts entity type from `JpaRepository<Entity, ID>` generic type parameters using `typeArgs.get(0).resolve()` through symbol solver — no naming convention (`UserRepository→User` removed)
+- **ClassInfo** stores `ResolvedReferenceTypeDeclaration resolvedSymbol` and `resolvedEntitySymbol` for repositories
+- **ReflectionTypeSolver(false)**: includes full classpath (Spring framework JARs) for resolving inherited framework methods
 - Runs as a standalone HTTP service on port 9876 (auto-started by Node.js client)
 - Detects: @RestController, @Service, @Repository, @Entity annotations via AST
-- Resolves: constructor injection, @Autowired fields, method call chains across classes
-- Detects: entity mutations (.setX), persistence operations (save/delete/findAll)
-- Returns JSON matching ApplicationGraph node/edge format
+- Returns JSON matching ApplicationGraph node/edge format with WRITES_ENTITY/READS_ENTITY edges from repository→entity resolution
 
-### Frontend Analyzer (Node.js-based)
-- **ScriptSymbolTable**: Maps function/method names to AST declaration nodes (ts.Node references), not string lookups
-- **Symbol resolution**: Template handlers resolved to actual declaration nodes, call chains traced through node references
+### Frontend Analyzer (Node.js-based) — PURE NODE REFERENCE RESOLUTION
+- **ScriptSymbolTable**: `nodeMap: Map<ts.Node, SymbolDeclaration>` (node-keyed), `nameIndex: Map<string, ts.Node>` (thin name→node index for initial template binding)
+- **SymbolDeclaration**: `calledNodes: ts.Node[]` (node references, not string names)
+- **Handler resolution**: `resolveHandlerNode(name) → ts.Node` resolves template handler name to AST node ONCE; all subsequent tracing uses node references
+- **Call chain tracing**: `traceHttpCalls(node: ts.Node)` follows `calledNodes: ts.Node[]` graph — no string-based trace
+- **ImportedHttpClients**: Indexes import declarations to identify HTTP client identifiers (axios, @angular/common/http, api/service imports); CallExpression callee objects verified against imported identifiers instead of pattern-matching against string lists
 - **React/JSX/TSX**: TypeScript compiler API (ts.createSourceFile) for full AST parsing
 - **Vue SFCs**: @vue/compiler-sfc for SFC parsing + template AST walking, TypeScript compiler API for script blocks
 - **Angular**: @angular/compiler (parseTemplate) for template AST, TypeScript compiler API for component files
-- **HTTP call detection**: AST-based detection of axios, fetch, httpClient patterns via CallExpression nodes within symbol-resolved function bodies
-- **Indirect call tracing**: Symbol-table-driven call graph traversal (resolveHttpCallsForHandler traces through calledSymbols)
 - **URL matching**: Segment-by-segment URL scoring against ApplicationGraph controller nodes
 
 ## Application Graph Model
@@ -90,7 +97,7 @@ The backend is represented as a navigable in-memory graph:
 - **GraphEdge** (fromNode, toNode, relationType: CALLS|WRITES_ENTITY|READS_ENTITY, metadata)
 - **ApplicationGraph** class with addNode/addEdge, getNodesByType, reachableFrom(nodeId), toJSON
 - **buildApplicationGraphAsync(files)** calls Java engine then reconstructs graph from JSON
-- **analyzeGraphEndpoints(graph)** traverses the graph to produce EndpointImpact[]
+- **analyzeGraphEndpoints(graph)** traverses the graph per controller endpoint to produce EndpointImpact
 - **EndpointImpact** contains endpoint, involvedNodes, entitiesTouched, callDepth, fullCallChain, persistenceOperations
 
 ## Data Flow

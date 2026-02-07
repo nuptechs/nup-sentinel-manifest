@@ -1,0 +1,137 @@
+FINAL REFACTOR — REMOVE ALL STRING-BASED RESOLUTION
+
+We are one step away from true compiler-level analysis.
+
+Currently the system does:
+
+    resolve() → extract class/method name → lookup in classMap/declarations by string
+
+This is NOT acceptable.
+
+We must now refactor to operate ONLY on symbols and AST nodes.
+
+NO string-based lookup is allowed anymore for graph construction.
+
+========================================================
+PART 1 — JAVA: BIND ClassInfo DIRECTLY TO SYMBOLS
+========================================================
+
+During class parsing phase, you MUST:
+
+1) For each ClassOrInterfaceDeclaration, resolve its symbol:
+
+       ResolvedReferenceTypeDeclaration resolved = cls.resolve();
+
+2) Store ClassInfo in a map:
+
+       Map<ResolvedReferenceTypeDeclaration, ClassInfo> symbolClassMap
+
+NOT Map<String, ClassInfo>.
+
+3) When processing MethodCallExpr:
+
+       ResolvedMethodDeclaration resolved = callExpr.resolve();
+       ResolvedReferenceTypeDeclaration declaringType = resolved.declaringType();
+
+4) Retrieve target class via:
+
+       ClassInfo target = symbolClassMap.get(declaringType);
+
+NO classMap.get(simpleName)
+NO fqnClassMap.get(string)
+
+Remove them from graph logic.
+
+========================================================
+PART 2 — REMOVE HEURISTIC CALL PATH
+========================================================
+
+Delete:
+
+    processHeuristicCall
+    resolveTargetType
+    isInjectableType suffix checks
+
+If resolve() fails, DO NOT attempt heuristics.
+Just skip the edge.
+
+This system must be 100% symbol-driven.
+
+========================================================
+PART 3 — REPOSITORY → ENTITY VIA GENERICS (NO NAME TRICK)
+========================================================
+
+When detecting Repository, you MUST:
+
+1) Resolve its implemented interfaces via symbol solver
+2) Detect JpaRepository<Entity, ID>
+3) Extract Entity type from generics using resolved types
+
+NO "UserRepository → User" naming.
+
+========================================================
+PART 4 — FRONTEND: REMOVE STRING KEYS FROM SYMBOL TABLE
+========================================================
+
+Current:
+
+    Map<string, SymbolDeclaration>
+
+Must become:
+
+    Map<ts.Node, SymbolDeclaration>
+
+AND
+
+calledSymbols: ts.Node[]
+
+NOT string[].
+
+========================================================
+PART 5 — CALL CHAIN VIA NODE REFERENCES
+========================================================
+
+Change:
+
+    trace(name: string)
+
+To:
+
+    trace(node: ts.Node)
+
+Following actual AST node references.
+
+NO resolveHandler by string.
+
+Template handler resolution must:
+
+    handlerName → find declaration node → use node from then on.
+
+========================================================
+PART 6 — HTTP CALL DETECTION VIA IMPORT RESOLUTION
+========================================================
+
+Instead of string patterns like "axios", "http", etc:
+
+1) Inspect import declarations
+2) Track imported identifiers
+3) Detect if CallExpression uses imported HTTP client
+
+========================================================
+EXPECTED FINAL STATE
+========================================================
+
+After this refactor:
+
+- No classMap by string
+- No declarations Map by string
+- No heuristic fallback
+- Graph built ONLY from:
+    Java symbols
+    TypeScript AST nodes
+
+This is the final step to reach compiler-level reliability.
+
+Refactor now.
+Do not patch.
+Remove the old logic completely.

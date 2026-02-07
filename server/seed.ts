@@ -149,6 +149,8 @@ const SAMPLE_USER_CONTROLLER = `package com.example.app.controller;
 
 import com.example.app.model.User;
 import com.example.app.service.UserService;
+import java.util.List;
+import java.util.Map;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -161,33 +163,33 @@ public class UserController {
     private UserService userService;
 
     @GetMapping("")
-    public ResponseEntity<?> getAllUsers() {
+    public ResponseEntity<List<User>> getAllUsers() {
         return ResponseEntity.ok(userService.findAll());
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<?> getUserById(@PathVariable Long id) {
+    public ResponseEntity<User> getUserById(@PathVariable Long id) {
         return ResponseEntity.ok(userService.findById(id));
     }
 
     @PostMapping("")
-    public ResponseEntity<?> createUser(@RequestBody User user) {
+    public ResponseEntity<User> createUser(@RequestBody User user) {
         return ResponseEntity.ok(userService.createUser(user));
     }
 
     @PutMapping("/{id}")
-    public ResponseEntity<?> updateUser(@PathVariable Long id, @RequestBody User user) {
+    public ResponseEntity<User> updateUser(@PathVariable Long id, @RequestBody User user) {
         return ResponseEntity.ok(userService.updateUser(id, user));
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<?> deleteUser(@PathVariable Long id) {
+    public ResponseEntity<Void> deleteUser(@PathVariable Long id) {
         userService.deleteUser(id);
         return ResponseEntity.noContent().build();
     }
 
     @PatchMapping("/{id}/status")
-    public ResponseEntity<?> toggleUserStatus(@PathVariable Long id, @RequestBody Map<String, Boolean> body) {
+    public ResponseEntity<User> toggleUserStatus(@PathVariable Long id, @RequestBody Map<String, Boolean> body) {
         return ResponseEntity.ok(userService.toggleStatus(id, body.get("active")));
     }
 }`;
@@ -238,6 +240,7 @@ public class OrderController {
 const SAMPLE_NOTIFICATION_SERVICE = `package com.example.app.service;
 
 import com.example.app.model.Notification;
+import com.example.app.model.Order;
 import com.example.app.repository.NotificationRepository;
 import com.example.app.repository.OrderRepository;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -272,7 +275,7 @@ public class NotificationService {
     }
 
     private void logOrderEvent(Long orderId, String event) {
-        var order = orderRepository.findById(orderId).orElseThrow();
+        Order order = orderRepository.findById(orderId).orElseThrow();
         order.setLastEvent(event);
         orderRepository.save(order);
     }
@@ -280,9 +283,11 @@ public class NotificationService {
 
 const SAMPLE_USER_SERVICE = `package com.example.app.service;
 
+import com.example.app.model.AuditLog;
 import com.example.app.model.User;
-import com.example.app.repository.UserRepository;
 import com.example.app.repository.AuditLogRepository;
+import com.example.app.repository.UserRepository;
+import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -335,6 +340,7 @@ const SAMPLE_ORDER_SERVICE = `package com.example.app.service;
 import com.example.app.model.Order;
 import com.example.app.repository.OrderRepository;
 import com.example.app.repository.PaymentRepository;
+import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -372,7 +378,7 @@ public class OrderService {
 
 const SAMPLE_USER_ENTITY = `package com.example.app.model;
 
-import javax.persistence.*;
+import jakarta.persistence.*;
 
 @Entity
 @Table(name = "users")
@@ -392,11 +398,22 @@ public class User {
 
     @Column
     private String role;
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public String getEmail() { return email; }
+    public void setEmail(String email) { this.email = email; }
+    public boolean isActive() { return active; }
+    public void setActive(boolean active) { this.active = active; }
+    public String getRole() { return role; }
+    public void setRole(String role) { this.role = role; }
 }`;
 
 const SAMPLE_ORDER_ENTITY = `package com.example.app.model;
 
-import javax.persistence.*;
+import jakarta.persistence.*;
 import java.math.BigDecimal;
 
 @Entity
@@ -417,6 +434,126 @@ public class Order {
 
     @Column
     private Long userId;
+
+    @Column
+    private String lastEvent;
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getOrderId() { return orderId; }
+    public void setOrderId(String orderId) { this.orderId = orderId; }
+    public BigDecimal getTotal() { return total; }
+    public void setTotal(BigDecimal total) { this.total = total; }
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+    public Long getUserId() { return userId; }
+    public void setUserId(Long userId) { this.userId = userId; }
+    public String getLastEvent() { return lastEvent; }
+    public void setLastEvent(String event) { this.lastEvent = event; }
+}`;
+
+const SAMPLE_NOTIFICATION_ENTITY = `package com.example.app.model;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "notifications")
+public class Notification {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column
+    private String type;
+
+    @Column
+    private Long orderId;
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getType() { return type; }
+    public void setType(String type) { this.type = type; }
+    public Long getOrderId() { return orderId; }
+    public void setOrderId(Long orderId) { this.orderId = orderId; }
+}`;
+
+const SAMPLE_AUDIT_LOG_ENTITY = `package com.example.app.model;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "audit_logs")
+public class AuditLog {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column
+    private String action;
+
+    @Column
+    private Long entityId;
+
+    public AuditLog() {}
+
+    public AuditLog(String action, Long entityId) {
+        this.action = action;
+        this.entityId = entityId;
+    }
+
+    public Long getId() { return id; }
+    public String getAction() { return action; }
+    public Long getEntityId() { return entityId; }
+}`;
+
+const SAMPLE_USER_REPOSITORY = `package com.example.app.repository;
+
+import com.example.app.model.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface UserRepository extends JpaRepository<User, Long> {
+}`;
+
+const SAMPLE_ORDER_REPOSITORY = `package com.example.app.repository;
+
+import com.example.app.model.Order;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface OrderRepository extends JpaRepository<Order, Long> {
+}`;
+
+const SAMPLE_PAYMENT_REPOSITORY = `package com.example.app.repository;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface PaymentRepository extends JpaRepository<Object, Long> {
+    void deleteByOrderId(Long orderId);
+}`;
+
+const SAMPLE_NOTIFICATION_REPOSITORY = `package com.example.app.repository;
+
+import com.example.app.model.Notification;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface NotificationRepository extends JpaRepository<Notification, Long> {
+}`;
+
+const SAMPLE_AUDIT_LOG_REPOSITORY = `package com.example.app.repository;
+
+import com.example.app.model.AuditLog;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface AuditLogRepository extends JpaRepository<AuditLog, Long> {
 }`;
 
 export async function seedDatabase() {
@@ -441,6 +578,13 @@ export async function seedDatabase() {
     { path: "src/main/java/com/app/service/NotificationService.java", type: "java", content: SAMPLE_NOTIFICATION_SERVICE },
     { path: "src/main/java/com/app/model/User.java", type: "java", content: SAMPLE_USER_ENTITY },
     { path: "src/main/java/com/app/model/Order.java", type: "java", content: SAMPLE_ORDER_ENTITY },
+    { path: "src/main/java/com/app/model/Notification.java", type: "java", content: SAMPLE_NOTIFICATION_ENTITY },
+    { path: "src/main/java/com/app/model/AuditLog.java", type: "java", content: SAMPLE_AUDIT_LOG_ENTITY },
+    { path: "src/main/java/com/app/repository/UserRepository.java", type: "java", content: SAMPLE_USER_REPOSITORY },
+    { path: "src/main/java/com/app/repository/OrderRepository.java", type: "java", content: SAMPLE_ORDER_REPOSITORY },
+    { path: "src/main/java/com/app/repository/PaymentRepository.java", type: "java", content: SAMPLE_PAYMENT_REPOSITORY },
+    { path: "src/main/java/com/app/repository/NotificationRepository.java", type: "java", content: SAMPLE_NOTIFICATION_REPOSITORY },
+    { path: "src/main/java/com/app/repository/AuditLogRepository.java", type: "java", content: SAMPLE_AUDIT_LOG_REPOSITORY },
   ];
 
   for (const file of files) {
