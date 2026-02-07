@@ -1,0 +1,74 @@
+FINAL RELEASE SEAL — BUILD, TEST, BENCHMARK & DELIVER ARTIFACTS
+
+Do NOT explain. Provide only artifacts, commands, logs and structured evidence as requested.
+
+GOAL: produce release artifacts, run heavy integration tests (large codebases), run performance benchmarks, and produce an immutable verification bundle with checksums and a final PASS/FAIL release verdict.
+
+REQUIREMENTS & OUTPUTS (all must be present):
+
+1) BUILD ARTIFACTS
+- Build java-analyzer-engine into a runnable JAR: output /tmp/java-analyzer-engine.jar
+- Build a Docker image that runs the Java engine and exposes /analyze: image tag permacat/java-analyzer-engine:stable
+- Build server (Node) production bundle: /tmp/permacat-server.tar.gz
+- Provide sha256 for each artifact.
+
+Commands to run, full stdout/stderr, and resulting file paths must be shown.
+
+2) INTEGRATION TEST SUITE (run these sequentially)
+- Run full pipeline on three large test codebases (use these order options; pick available local projects, or if none, clone the listed public repos into /tmp/testrepos/):
+  a) spring-petclinic (or local equivalent) -> /tmp/testrepos/petclinic
+  b) another medium-to-large Spring sample (or /tmp/testrepos/sample2)
+  c) a large monolith-like sample from workspace (or /tmp/testrepos/sample3)
+- For each project: run frontend-analyze -> call java engine -> reconstruct graph -> analyzeEndpoints -> save outputs to:
+  /tmp/full-run-project-<name>-graph.json
+  /tmp/full-run-project-<name>-endpoints.json
+- For each run, provide:
+  - exact commands
+  - start/end timestamps
+  - execution time
+  - nodes/edges counts
+  - any RESOLVE-FAIL lines (if present)
+  - system CPU and memory peak used (top/ps or /usr/bin/time output)
+
+3) PERFORMANCE BENCHMARK
+- Run a synthetic stress test: analyze the largest of the three projects 10x in a row (or in parallel if system supports), and report:
+  - average time, median, 95th percentile
+  - peak memory
+  - throughput (projects/hour)
+- Save benchmark JSON to /tmp/benchmark-results.json and sha256.
+
+4) SECURITY & SANDBOX EVIDENCE
+- Show how the Java engine is sandboxed: Docker run command or user isolation. Provide the exact docker run/create commands used in tests.
+- Show that temp directories are cleaned after each run (prove by listing temp dir content before and after a run).
+
+5) UI / E2E SNAPSHOT
+- Open the UI for one of the analyzed projects and capture a screenshot showing an endpoint with `entitiesTouched` populated.
+- Save to /tmp/ui-screenshot-<project>.png and provide sha256.
+- Provide the exact URL path used in the UI (e.g., http://localhost:PORT/projects/4/catalog) and the HTTP GET used to retrieve the page if UI is server-rendered.
+
+6) FINAL VERIFIED REPORT
+- Produce /tmp/release-verification-bundle.zip containing:
+   - all analysis JSONs
+   - forensic-verification.md
+   - artifacts (JAR, tar.gz)
+   - benchmark results
+   - UI screenshot(s)
+   - a signed text file release-declaration.txt containing:
+      - UTC timestamp
+      - artifacts paths + sha256
+      - final verdict: either "RELEASE READY" or "RELEASE BLOCKED"
+      - if BLOCKED, list the exact MISSING items (plain list)
+- Provide sha256 of the zip.
+
+7) FINAL OUTPUT (single-line)
+- At the end of the response print ONLY one of:
+   "RELEASE READY — ARTIFACTS AT /tmp/release-verification-bundle.zip"
+   or
+   "RELEASE BLOCKED — SEE /tmp/release-verification-bundle.zip FOR DETAILS"
+
+ADDITIONAL RULES:
+- No heuristics allowed in verification evidence. If a fallback was used during analysis, include explicit justification-only evidence lines showing where fallback occurred (file/line) and the command/log that shows why it was necessary.
+- Every file produced must include sha256.
+- Show all exact shell commands executed.
+
+Start now and return only the required artifacts, logs, and the final single-line verdict.
