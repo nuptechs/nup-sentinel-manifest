@@ -1,207 +1,154 @@
 import type { FrontendInteraction } from "./frontend-analyzer";
-import type { JavaEndpoint, JavaServiceMethod, JavaEntity } from "./java-analyzer";
-import { inferOperationType } from "./java-analyzer";
+import type { ApplicationGraph } from "./application-graph";
 import type { InsertCatalogEntry } from "@shared/schema";
 
-interface GraphNode {
-  interaction: FrontendInteraction;
-  matchedEndpoint: JavaEndpoint | null;
-  resolvedServiceMethods: string[];
-  resolvedRepositoryMethods: string[];
-  resolvedEntities: string[];
-  fullCallChain: string[];
-  persistenceOperations: string[];
-  inferredOperation: string;
-}
-
-function normalizeEndpoint(endpoint: string): string {
-  return endpoint
-    .replace(/\$\{[^}]+\}/g, "{param}")
-    .replace(/`/g, "")
-    .replace(/\+\s*\w+/g, "")
-    .replace(/\/+/g, "/")
-    .trim();
-}
-
-function endpointMatchScore(frontendUrl: string, backendPath: string): number {
-  const normFront = normalizeEndpoint(frontendUrl);
-  const normBack = backendPath.replace(/\/+/g, "/");
-
-  if (normFront === normBack) return 100;
-
-  const frontParts = normFront.split("/").filter(Boolean);
-  const backParts = normBack.split("/").filter(Boolean);
-
-  if (frontParts.length !== backParts.length) {
-    if (normFront.includes(normBack) || normBack.includes(normFront)) return 60;
-    return 0;
-  }
-
-  let matchCount = 0;
-  for (let i = 0; i < frontParts.length; i++) {
-    const fp = frontParts[i];
-    const bp = backParts[i];
-    if (fp === bp) {
-      matchCount++;
-    } else if (bp.startsWith("{") || fp === "{param}" || fp.startsWith(":")) {
-      matchCount += 0.8;
-    }
-  }
-
-  return (matchCount / frontParts.length) * 100;
-}
-
-function resolveServiceCallChain(
-  serviceCalls: string[],
-  allServiceMethods: JavaServiceMethod[]
-): { resolvedMethods: string[]; resolvedRepos: string[]; resolvedEntities: string[] } {
-  const resolvedMethods = new Set<string>();
-  const resolvedRepos = new Set<string>();
-  const resolvedEntities = new Set<string>();
-  const visited = new Set<string>();
-
-  function trace(calls: string[], depth: number) {
-    if (depth > 10) return;
-
-    for (const call of calls) {
-      if (visited.has(call)) continue;
-      visited.add(call);
-      resolvedMethods.add(call);
-
-      const [serviceName, methodName] = call.split(".");
-      const matchingMethod = allServiceMethods.find(
-        (sm) =>
-          (sm.className === serviceName ||
-            sm.className.toLowerCase() === serviceName.replace(/^[a-z]/, "").toLowerCase()) &&
-          sm.methodName === methodName
-      );
-
-      if (matchingMethod) {
-        for (const repo of matchingMethod.repositoryCalls) {
-          resolvedRepos.add(repo);
-        }
-        for (const entity of matchingMethod.entitiesTouched) {
-          resolvedEntities.add(entity);
-        }
-        if (matchingMethod.nestedServiceCalls.length > 0) {
-          trace(matchingMethod.nestedServiceCalls, depth + 1);
-        }
-      }
-    }
-  }
-
-  trace(serviceCalls, 0);
-  return {
-    resolvedMethods: Array.from(resolvedMethods),
-    resolvedRepos: Array.from(resolvedRepos),
-    resolvedEntities: Array.from(resolvedEntities),
-  };
-}
-
-export function buildGraph(
+export function interactionsToCatalogEntries(
   interactions: FrontendInteraction[],
-  endpoints: JavaEndpoint[],
-  serviceMethods: JavaServiceMethod[],
-  entities: JavaEntity[]
-): GraphNode[] {
-  const nodes: GraphNode[] = [];
-
-  for (const interaction of interactions) {
-    let bestMatch: JavaEndpoint | null = null;
-    let bestScore = 0;
-
-    if (interaction.endpoint) {
-      for (const endpoint of endpoints) {
-        if (interaction.httpMethod && endpoint.httpMethod !== interaction.httpMethod) {
-          continue;
-        }
-
-        const score = endpointMatchScore(interaction.endpoint, endpoint.fullPath);
-        if (score > bestScore && score >= 50) {
-          bestScore = score;
-          bestMatch = endpoint;
-        }
-      }
-
-      if (!bestMatch && interaction.httpMethod) {
-        for (const endpoint of endpoints) {
-          const score = endpointMatchScore(interaction.endpoint, endpoint.fullPath);
-          if (score > bestScore && score >= 40) {
-            bestScore = score;
-            bestMatch = endpoint;
-          }
-        }
-      }
-    }
-
-    let resolvedServiceMethods: string[] = [];
-    let resolvedRepositoryMethods: string[] = [];
-    let resolvedEntities: string[] = [];
-    let fullCallChain: string[] = [];
-    let persistenceOperations: string[] = [];
-
-    if (bestMatch) {
-      fullCallChain = bestMatch.fullCallChain || [];
-      persistenceOperations = bestMatch.persistenceOperations || [];
-
-      const allServiceCalls = bestMatch.serviceCalls.slice();
-      const resolved = resolveServiceCallChain(allServiceCalls, serviceMethods);
-
-      resolvedServiceMethods = resolved.resolvedMethods;
-      resolvedRepositoryMethods = Array.from(
-        new Set(bestMatch.repositoryCalls.concat(resolved.resolvedRepos))
-      );
-      resolvedEntities = Array.from(
-        new Set(bestMatch.entitiesTouched.concat(resolved.resolvedEntities))
-      );
-    }
-
-    const inferredOperation = bestMatch
-      ? inferOperationType(resolvedServiceMethods, resolvedRepositoryMethods, bestMatch.httpMethod, persistenceOperations)
-      : interaction.interactionType === "navigation"
-      ? "NAVIGATION"
-      : inferOperationType([], [], interaction.httpMethod);
-
-    nodes.push({
-      interaction,
-      matchedEndpoint: bestMatch,
-      resolvedServiceMethods,
-      resolvedRepositoryMethods,
-      resolvedEntities,
-      fullCallChain,
-      persistenceOperations,
-      inferredOperation,
-    });
-  }
-
-  return nodes;
-}
-
-export function graphToCatalogEntries(
-  nodes: GraphNode[],
+  graph: ApplicationGraph,
   analysisRunId: number,
   projectId: number
 ): InsertCatalogEntry[] {
-  return nodes.map((node) => ({
-    analysisRunId,
-    projectId,
-    screen: node.interaction.screen,
-    interaction: node.interaction.interaction,
-    interactionType: node.interaction.interactionType,
-    endpoint: node.matchedEndpoint?.fullPath || node.interaction.endpoint,
-    httpMethod: node.matchedEndpoint?.httpMethod || node.interaction.httpMethod,
-    controllerClass: node.matchedEndpoint?.className || null,
-    controllerMethod: node.matchedEndpoint?.methodName || null,
-    serviceMethods: node.resolvedServiceMethods,
-    repositoryMethods: node.resolvedRepositoryMethods,
-    entitiesTouched: node.resolvedEntities,
-    fullCallChain: node.fullCallChain,
-    persistenceOperations: node.persistenceOperations,
-    technicalOperation: node.inferredOperation,
-    criticalityScore: null,
-    suggestedMeaning: null,
-    humanClassification: null,
-    sourceFile: node.interaction.sourceFile,
-    lineNumber: node.interaction.lineNumber,
-  }));
+  return interactions.map((interaction) => {
+    const backendNode = interaction.mappedBackendNode;
+    let controllerClass: string | null = null;
+    let controllerMethod: string | null = null;
+    let serviceMethods: string[] = [];
+    let repositoryMethods: string[] = [];
+    let entitiesTouched: string[] = [];
+    let fullCallChain: string[] = [];
+    let persistenceOperations: string[] = [];
+    let technicalOperation = "UNKNOWN";
+
+    if (backendNode) {
+      controllerClass = backendNode.className;
+      controllerMethod = backendNode.methodName;
+
+      const reachable = graph.reachableFrom(backendNode.id);
+      const visited = new Set<string>();
+      const entityNames = new Set<string>();
+      const persistenceOps = new Set<string>();
+      const serviceMethodNames: string[] = [];
+      const repoMethodNames: string[] = [];
+      const callChain: string[] = [];
+
+      const walkChain = (nodeId: string, depth: number) => {
+        if (depth > 15 || visited.has(nodeId)) return;
+        visited.add(nodeId);
+
+        const n = graph.getNode(nodeId);
+        if (!n) return;
+
+        if (n.methodName) {
+          callChain.push(`${n.className}.${n.methodName}`);
+        }
+
+        if (n.type === "SERVICE" && n.methodName) {
+          serviceMethodNames.push(`${n.className}.${n.methodName}`);
+        }
+        if (n.type === "REPOSITORY" && n.methodName) {
+          repoMethodNames.push(`${n.className}.${n.methodName}`);
+        }
+        if (n.type === "ENTITY") {
+          entityNames.add(n.className);
+          return;
+        }
+
+        for (const edge of graph.getOutgoingEdges(nodeId)) {
+          if (edge.relationType === "WRITES_ENTITY" || edge.relationType === "READS_ENTITY") {
+            const targetNode = graph.getNode(edge.toNode);
+            if (targetNode) {
+              entityNames.add(targetNode.className);
+              const opType = edge.relationType === "WRITES_ENTITY" ? "write" : "read";
+              const specificOp = (edge.metadata.operation as string) || opType;
+              persistenceOps.add(specificOp);
+            }
+          } else if (edge.relationType === "CALLS") {
+            walkChain(edge.toNode, depth + 1);
+          }
+        }
+      };
+
+      walkChain(backendNode.id, 0);
+
+      serviceMethods = serviceMethodNames;
+      repositoryMethods = repoMethodNames;
+      entitiesTouched = Array.from(entityNames);
+      fullCallChain = callChain;
+      persistenceOperations = Array.from(persistenceOps);
+      technicalOperation = inferOperationType(
+        serviceMethods,
+        repositoryMethods,
+        interaction.httpMethod,
+        persistenceOperations
+      );
+    } else {
+      technicalOperation = inferOperationType([], [], interaction.httpMethod, []);
+    }
+
+    const interactionDesc = interaction.url
+      ? `${interaction.elementType}: ${interaction.actionName} → ${interaction.httpMethod} ${interaction.url}`
+      : `${interaction.elementType}: ${interaction.actionName}`;
+
+    return {
+      analysisRunId,
+      projectId,
+      screen: interaction.component,
+      interaction: interactionDesc,
+      interactionType: interaction.elementType,
+      endpoint: interaction.url || null,
+      httpMethod: interaction.httpMethod,
+      controllerClass,
+      controllerMethod,
+      serviceMethods,
+      repositoryMethods,
+      entitiesTouched,
+      fullCallChain,
+      persistenceOperations,
+      technicalOperation,
+      criticalityScore: null,
+      suggestedMeaning: null,
+      humanClassification: null,
+      sourceFile: interaction.sourceFile,
+      lineNumber: interaction.lineNumber,
+    };
+  });
+}
+
+function inferOperationType(
+  serviceMethods: string[],
+  repoMethods: string[],
+  httpMethod: string | null,
+  persistenceOps: string[]
+): string {
+  const allMethods = [...serviceMethods, ...repoMethods].map((m) => m.toLowerCase());
+  const allOps = persistenceOps.map((o) => o.toLowerCase());
+
+  if (allOps.includes("delete") || allMethods.some((m) => m.includes("delete") || m.includes("remove"))) {
+    return "DELETE";
+  }
+  if (allOps.includes("save") || allOps.includes("state_change")) {
+    if (httpMethod === "POST") return "CREATE";
+    if (httpMethod === "PUT" || httpMethod === "PATCH") return "UPDATE";
+  }
+  if (allMethods.some((m) => m.includes("create") || m.includes("add") || m.includes("insert"))) {
+    return "CREATE";
+  }
+  if (allMethods.some((m) => m.includes("update") || m.includes("edit") || m.includes("modify") || m.includes("toggle") || m.includes("change"))) {
+    return "UPDATE";
+  }
+  if (allMethods.some((m) => m.includes("export") || m.includes("download") || m.includes("csv"))) {
+    return "EXPORT";
+  }
+  if (allMethods.some((m) => m.includes("find") || m.includes("get") || m.includes("list") || m.includes("fetch") || m.includes("search"))) {
+    return "READ";
+  }
+
+  switch (httpMethod?.toUpperCase()) {
+    case "GET": return "READ";
+    case "POST": return "CREATE";
+    case "PUT": return "UPDATE";
+    case "PATCH": return "UPDATE";
+    case "DELETE": return "DELETE";
+    default: return "UNKNOWN";
+  }
 }

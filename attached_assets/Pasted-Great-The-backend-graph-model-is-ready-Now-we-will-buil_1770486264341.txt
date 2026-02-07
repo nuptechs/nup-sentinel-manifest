@@ -1,0 +1,91 @@
+Great. The backend graph model is ready.
+
+Now we will build the FRONTEND ANALYZER.
+
+This is NOT a UI parser.
+This is a semantic interaction extractor.
+
+----------------------------------------
+GOAL
+----------------------------------------
+
+Discover every user interaction in the frontend
+and map it to the real backend methods already present in ApplicationGraph.
+
+----------------------------------------
+SUPPORTED FRONTENDS
+----------------------------------------
+
+Start with:
+- React (tsx, jsx)
+- Vue (vue, js, ts)
+- Angular (ts, html)
+
+----------------------------------------
+WHAT TO DETECT
+----------------------------------------
+
+You must scan the frontend source code and detect:
+
+1) Buttons, links, menus, actions that trigger something
+2) The event handler attached (onClick, @click, (click), submit, etc)
+3) The function being called
+4) Inside that function, detect HTTP calls:
+   - fetch
+   - axios
+   - httpClient
+   - apiService
+   - any wrapper
+
+5) Extract:
+   - HTTP method (GET, POST, PUT, DELETE)
+   - URL path
+
+----------------------------------------
+CRITICAL STEP
+----------------------------------------
+
+For each HTTP call discovered:
+
+Match the URL with the CONTROLLER endpoints already present
+in the ApplicationGraph.
+
+----------------------------------------
+OUTPUT MODEL
+----------------------------------------
+
+Create:
+
+FrontendInteraction
+- component
+- elementType (button, link, form)
+- actionName
+- httpMethod
+- url
+- mappedBackendNode (GraphNode)
+
+Expose method:
+
+List<FrontendInteraction> analyzeFrontend(Path frontendPath, ApplicationGraph graph)
+
+----------------------------------------
+IMPORTANT
+----------------------------------------
+
+Do NOT use regex only.
+
+You must parse the AST of the frontend code using proper parsers:
+- For TS/JS: use a parser library
+- For Vue/Angular: parse template + script
+
+This is not text search.
+This is structural code analysis.
+
+----------------------------------------
+FINAL RESULT
+----------------------------------------
+
+For every button in the UI,
+we must know EXACTLY which backend method it reaches.
+
+Implement the frontend analyzer now.

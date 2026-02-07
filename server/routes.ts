@@ -1,9 +1,9 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { analyzeFrontendFiles } from "./analyzers/frontend-analyzer";
-import { analyzeJavaFiles, buildApplicationGraph, analyzeGraphEndpoints } from "./analyzers/java-analyzer";
-import { buildGraph, graphToCatalogEntries } from "./analyzers/graph-connector";
+import { analyzeFrontend } from "./analyzers/frontend-analyzer";
+import { buildApplicationGraph, analyzeGraphEndpoints } from "./analyzers/java-analyzer";
+import { interactionsToCatalogEntries } from "./analyzers/graph-connector";
 import { classifyEntries } from "./analyzers/semantic-engine";
 import { z } from "zod";
 
@@ -131,14 +131,14 @@ export async function registerRoutes(
           content: f.content,
         }));
 
-        const frontendInteractions = analyzeFrontendFiles(fileData);
-
         const appGraph = buildApplicationGraph(fileData);
         const endpointImpacts = analyzeGraphEndpoints(appGraph);
 
-        const { endpoints, serviceMethods, entities } = analyzeJavaFiles(fileData);
-        const connectorGraph = buildGraph(frontendInteractions, endpoints, serviceMethods, entities);
-        let catalogEntryData = graphToCatalogEntries(connectorGraph, analysisRun.id, projectId);
+        const frontendInteractions = analyzeFrontend(fileData, appGraph);
+
+        let catalogEntryData = interactionsToCatalogEntries(
+          frontendInteractions, appGraph, analysisRun.id, projectId
+        );
 
         try {
           catalogEntryData = await classifyEntries(catalogEntryData);

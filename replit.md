@@ -6,7 +6,7 @@ Enterprise-grade static code intelligence tool that analyzes frontend (Vue/React
 ## Architecture
 - **Frontend**: React + TypeScript + Shadcn UI + TailwindCSS
 - **Backend**: Express + TypeScript + Drizzle ORM + PostgreSQL
-- **Analysis Engine**: Custom AST-like analyzers for frontend interactions and Java Spring Boot code
+- **Analysis Engine**: AST-based analyzers using TypeScript compiler API for frontend + Java Spring Boot code
 - **Semantic Engine**: OpenAI LLM (via Replit AI Integrations) for classifying technical operations and criticality scores
 
 ## Key Features
@@ -40,9 +40,9 @@ server/
   seed.ts             - Sample project seed data
   analyzers/
     application-graph.ts  - ApplicationGraph model (GraphNode, GraphEdge, analyzeEndpoints)
-    frontend-analyzer.ts  - Detects interactions in Vue/React/Angular code
+    frontend-analyzer.ts  - AST-based frontend analyzer: parses Vue/React/Angular, traces event handlers to HTTP calls, maps to ApplicationGraph
     java-analyzer.ts      - Parses Spring Boot code + buildApplicationGraph() + analyzeGraphEndpoints()
-    graph-connector.ts    - Connects frontend interactions to backend endpoints
+    graph-connector.ts    - Converts FrontendInteractions to catalog entries using ApplicationGraph traversal
     semantic-engine.ts    - LLM classification of operations
 
 shared/
@@ -63,10 +63,11 @@ The backend is represented as a navigable in-memory graph:
 2. Analysis triggered → frontend analyzer + java analyzer run
 3. buildApplicationGraph() creates in-memory graph with all nodes (controllers, services, repos, entities) and edges (calls, writes, reads)
 4. analyzeGraphEndpoints() traverses the graph per controller endpoint to produce EndpointImpact
-5. Graph connector maps frontend interactions to backend endpoints
-6. Semantic engine classifies operations via LLM
-7. Catalog entries stored in database
-8. UI displays with filtering, search, editing, and JSON export
+5. analyzeFrontend() uses TypeScript compiler API to parse Vue/React/Angular ASTs, extract UI elements with event handlers, trace handler functions to HTTP calls, and match URLs to controller nodes in ApplicationGraph
+6. Graph connector converts FrontendInteractions (with mapped GraphNodes) into catalog entries, traversing ApplicationGraph for full call chains
+7. Semantic engine classifies operations via LLM
+8. Catalog entries stored in database
+9. UI displays with filtering, search, editing, and JSON export
 
 ## API Endpoints
 - GET /api/stats - Dashboard statistics
