@@ -131,7 +131,9 @@ export async function registerRoutes(
           content: f.content,
         }));
 
-        const appGraph = await buildApplicationGraph(fileData);
+        const buildResult = await buildApplicationGraph(fileData);
+        const appGraph = buildResult.graph;
+        const resolutionErrors = buildResult.resolutionErrors;
         const endpointImpacts = analyzeGraphEndpoints(appGraph);
 
         const frontendInteractions = analyzeFrontend(fileData, appGraph);
@@ -187,6 +189,7 @@ export async function registerRoutes(
             fullCallChain: ei.fullCallChain,
             persistenceOperations: ei.persistenceOperations,
           })),
+          resolutionErrors: resolutionErrors.length > 0 ? resolutionErrors : undefined,
         });
       } catch (analysisError) {
         const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";

@@ -94,6 +94,12 @@ interface JavaEngineResult {
     relationType: string;
     metadata: Record<string, unknown>;
   }>;
+  resolutionErrors?: string[];
+}
+
+export interface GraphBuildResult {
+  graph: ApplicationGraph;
+  resolutionErrors: string[];
 }
 
 async function callJavaEngine(
@@ -143,13 +149,9 @@ function reconstructGraph(result: JavaEngineResult): ApplicationGraph {
   return graph;
 }
 
-/**
- * 🔥 ÚNICA função pública para construir o grafo
- * Todo o sistema obrigatoriamente passa pelo Java Engine
- */
 export async function buildApplicationGraph(
   files: { filePath: string; content: string }[],
-): Promise<ApplicationGraph> {
+): Promise<GraphBuildResult> {
   const javaFiles: Record<string, string> = {};
 
   for (const f of files) {
@@ -159,11 +161,14 @@ export async function buildApplicationGraph(
   }
 
   if (Object.keys(javaFiles).length === 0) {
-    return new ApplicationGraph();
+    return { graph: new ApplicationGraph(), resolutionErrors: [] };
   }
 
   const result = await callJavaEngine(javaFiles);
-  return reconstructGraph(result);
+  return {
+    graph: reconstructGraph(result),
+    resolutionErrors: result.resolutionErrors || [],
+  };
 }
 
 export function analyzeGraphEndpoints(

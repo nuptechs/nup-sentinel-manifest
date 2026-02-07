@@ -81,7 +81,6 @@ public class JavaASTAnalyzer {
         List<String> resolutionErrors = new ArrayList<>();
         try {
             tempDir = writeFilesToTemp(files);
-            debugListFiles(tempDir, "");
             JavaParser parser = configureParserWithSymbolSolver(tempDir);
 
             List<CompilationUnit> compilationUnits = new ArrayList<>();
@@ -90,16 +89,22 @@ public class JavaASTAnalyzer {
                 String content = entry.getValue();
                 try {
                     ParseResult<CompilationUnit> result = parser.parse(content);
-                    System.err.println("[DEBUG-PARSE] " + filePath + " -> successful=" + result.isSuccessful()
-                        + " present=" + result.getResult().isPresent()
-                        + " problems=" + result.getProblems());
                     if (result.isSuccessful() && result.getResult().isPresent()) {
                         CompilationUnit cu = result.getResult().get();
                         compilationUnits.add(cu);
                         extractClassInfo(cu, filePath);
+                    } else {
+                        String problems = result.getProblems().stream()
+                            .map(p -> p.getMessage())
+                            .collect(Collectors.joining("; "));
+                        String msg = "Parse error in " + filePath + ": " + problems;
+                        System.err.println(msg);
+                        resolutionErrors.add(msg);
                     }
                 } catch (Exception e) {
-                    System.err.println("Failed to parse: " + filePath + " - " + e.getMessage());
+                    String msg = "Failed to parse " + filePath + ": " + e.getMessage();
+                    System.err.println(msg);
+                    resolutionErrors.add(msg);
                 }
             }
 
@@ -120,33 +125,20 @@ public class JavaASTAnalyzer {
     }
 
     private void resolveClassSymbols(List<CompilationUnit> compilationUnits, List<String> resolutionErrors) {
-        System.err.println("[DEBUG] fqnIndex keys: " + fqnIndex.keySet());
-        System.err.println("[DEBUG] fqnIndex entity flags: ");
-        for (Map.Entry<String, ClassInfo> e : fqnIndex.entrySet()) {
-            System.err.println("[DEBUG]   " + e.getKey() + " -> isEntity=" + e.getValue().isEntity
-                + " isController=" + e.getValue().isController
-                + " isService=" + e.getValue().isService
-                + " isRepository=" + e.getValue().isRepository);
-        }
         for (CompilationUnit cu : compilationUnits) {
             for (ClassOrInterfaceDeclaration cls : cu.findAll(ClassOrInterfaceDeclaration.class)) {
                 String className = cls.getNameAsString();
                 ClassInfo info = fqnIndex.values().stream()
                     .filter(ci -> ci.className.equals(className))
                     .findFirst().orElse(null);
-                if (info == null) {
-                    System.err.println("[DEBUG] No ClassInfo for: " + className);
-                    continue;
-                }
+                if (info == null) continue;
 
                 try {
                     ResolvedReferenceTypeDeclaration resolved = cls.resolve();
                     info.resolvedSymbol = resolved;
                     symbolClassMap.put(resolved, info);
-                    System.err.println("[DEBUG] Resolved class: " + className + " -> " + resolved.getQualifiedName());
                 } catch (Exception e) {
-                    String msg = "Could not resolve symbol for class: " + className + " - " + e.getClass().getSimpleName() + " - " + e.getMessage();
-                    System.err.println(msg);
+                    String msg = "Could not resolve class " + className + ": " + e.getMessage();
                     resolutionErrors.add(msg);
                 }
             }
@@ -436,8 +428,6 @@ public class JavaASTAnalyzer {
 
                     mi.methodCalls.add(mci);
                 } catch (Exception e) {
-                    System.err.println("[RESOLVE-FAIL] " + callExpr.getNameAsString()
-                        + " in " + mi.name + ": " + e.getClass().getSimpleName() + " - " + e.getMessage());
                 }
             }
         }, null);

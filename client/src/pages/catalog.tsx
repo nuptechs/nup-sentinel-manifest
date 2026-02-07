@@ -281,12 +281,23 @@ export default function CatalogPage() {
       const res = await apiRequest("POST", `/api/projects/${selectedProjectId}/analyze`);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data: { catalogEntries?: number; totalEntities?: number; resolutionErrors?: string[] }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/catalog-entries", selectedProjectId] });
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/analysis-runs/recent"] });
       queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
-      toast({ title: "Analysis complete", description: "Catalog has been generated." });
+      if (data.resolutionErrors && data.resolutionErrors.length > 0) {
+        toast({
+          title: "Analysis complete with warnings",
+          description: `${data.resolutionErrors.length} issue${data.resolutionErrors.length > 1 ? "s" : ""} detected: ${data.resolutionErrors[0]}${data.resolutionErrors.length > 1 ? ` (+${data.resolutionErrors.length - 1} more)` : ""}`,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Analysis complete",
+          description: `Catalog generated with ${data.catalogEntries || 0} entries and ${data.totalEntities || 0} entities.`,
+        });
+      }
     },
     onError: (error: Error) => {
       toast({ title: "Analysis failed", description: error.message, variant: "destructive" });

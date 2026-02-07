@@ -18,6 +18,7 @@ import {
   ArrowRight,
   Upload,
   Info,
+  FileStack,
 } from "lucide-react";
 
 interface FileEntry {
@@ -39,6 +40,67 @@ function detectFileType(path: string): string {
     xml: "xml",
   };
   return typeMap[ext] || "other";
+}
+
+const FILE_PATH_PATTERN = /^(?:\/\/\s*)?(?:[-\w./]+\/)*[-\w]+\.\w+\s*$/;
+const SOURCE_EXTENSIONS = /\.(java|vue|jsx|tsx|ts|js|html|xml)$/i;
+
+function parseBulkPaste(text: string): FileEntry[] {
+  const lines = text.split("\n");
+  const entries: FileEntry[] = [];
+  let currentPath = "";
+  let currentLines: string[] = [];
+
+  function flushCurrent() {
+    if (currentPath && currentLines.length > 0) {
+      const content = currentLines.join("\n").trim();
+      if (content) {
+        entries.push({
+          path: currentPath.trim(),
+          content,
+          type: detectFileType(currentPath),
+        });
+      }
+    }
+    currentLines = [];
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (
+      trimmed &&
+      !trimmed.startsWith("package ") &&
+      !trimmed.startsWith("import ") &&
+      !trimmed.startsWith("//") &&
+      !trimmed.startsWith("/*") &&
+      !trimmed.startsWith("*") &&
+      !trimmed.startsWith("@") &&
+      !trimmed.startsWith("{") &&
+      !trimmed.startsWith("}") &&
+      !trimmed.startsWith("public ") &&
+      !trimmed.startsWith("private ") &&
+      !trimmed.startsWith("protected ") &&
+      !trimmed.startsWith("class ") &&
+      !trimmed.startsWith("interface ") &&
+      !trimmed.startsWith("return ") &&
+      !trimmed.startsWith("this.") &&
+      !trimmed.startsWith("<") &&
+      !trimmed.startsWith("export ") &&
+      !trimmed.startsWith("const ") &&
+      !trimmed.startsWith("let ") &&
+      !trimmed.startsWith("var ") &&
+      !trimmed.startsWith("function ") &&
+      SOURCE_EXTENSIONS.test(trimmed) &&
+      FILE_PATH_PATTERN.test(trimmed)
+    ) {
+      flushCurrent();
+      currentPath = trimmed.replace(/^\/\/\s*/, "");
+    } else {
+      currentLines.push(line);
+    }
+  }
+  flushCurrent();
+  return entries;
 }
 
 function FileTypeBadge({ type }: { type: string }) {
@@ -65,6 +127,8 @@ export default function UploadPage() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [currentPath, setCurrentPath] = useState("");
   const [currentContent, setCurrentContent] = useState("");
+  const [bulkContent, setBulkContent] = useState("");
+  const [showBulk, setShowBulk] = useState(false);
 
   const addFile = useCallback(() => {
     if (!currentPath.trim() || !currentContent.trim()) {
@@ -80,6 +144,32 @@ export default function UploadPage() {
     setCurrentPath("");
     setCurrentContent("");
   }, [currentPath, currentContent, toast]);
+
+  const addBulkFiles = useCallback(() => {
+    if (!bulkContent.trim()) {
+      toast({
+        title: "No content",
+        description: "Please paste file contents with file paths as separators.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const parsed = parseBulkPaste(bulkContent);
+    if (parsed.length === 0) {
+      toast({
+        title: "No files detected",
+        description: "Could not detect file path separators. Each file should be preceded by its path (e.g., src/main/java/com/app/User.java).",
+        variant: "destructive",
+      });
+      return;
+    }
+    setFiles((prev) => [...prev, ...parsed]);
+    setBulkContent("");
+    toast({
+      title: `${parsed.length} file${parsed.length !== 1 ? "s" : ""} added`,
+      description: `Detected and added ${parsed.length} file${parsed.length !== 1 ? "s" : ""} from bulk paste.`,
+    });
+  }, [bulkContent, toast]);
 
   const removeFile = useCallback((index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
@@ -225,32 +315,88 @@ export default function UploadPage() {
           <Separator />
 
           <div className="space-y-3">
-            <p className="text-sm font-medium">Or paste code manually:</p>
-            <div className="space-y-2">
-              <Label htmlFor="file-path">File Path</Label>
-              <Input
-                id="file-path"
-                placeholder="e.g., src/main/java/com/app/UserController.java"
-                value={currentPath}
-                onChange={(e) => setCurrentPath(e.target.value)}
-                data-testid="input-file-path"
-              />
+            <div className="flex items-center gap-2">
+              <Button
+                variant={!showBulk ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => setShowBulk(false)}
+                data-testid="button-mode-single"
+              >
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                Single File
+              </Button>
+              <Button
+                variant={showBulk ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => setShowBulk(true)}
+                data-testid="button-mode-bulk"
+              >
+                <FileStack className="h-3.5 w-3.5 mr-1.5" />
+                Bulk Paste
+              </Button>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="file-content">File Content</Label>
-              <Textarea
-                id="file-content"
-                placeholder="Paste your source code here..."
-                value={currentContent}
-                onChange={(e) => setCurrentContent(e.target.value)}
-                className="font-mono text-xs min-h-[200px]"
-                data-testid="input-file-content"
-              />
-            </div>
-            <Button variant="outline" onClick={addFile} data-testid="button-add-file">
-              <Plus className="h-3.5 w-3.5 mr-1.5" />
-              Add File
-            </Button>
+
+            {!showBulk ? (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label htmlFor="file-path">File Path</Label>
+                  <Input
+                    id="file-path"
+                    placeholder="e.g., src/main/java/com/app/UserController.java"
+                    value={currentPath}
+                    onChange={(e) => setCurrentPath(e.target.value)}
+                    data-testid="input-file-path"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="file-content">File Content</Label>
+                  <Textarea
+                    id="file-content"
+                    placeholder="Paste your source code here..."
+                    value={currentContent}
+                    onChange={(e) => setCurrentContent(e.target.value)}
+                    className="font-mono text-xs min-h-[200px]"
+                    data-testid="input-file-content"
+                  />
+                </div>
+                <Button variant="outline" onClick={addFile} data-testid="button-add-file">
+                  <Plus className="h-3.5 w-3.5 mr-1.5" />
+                  Add File
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center gap-3 p-3 rounded-md bg-accent/50">
+                  <Info className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <p className="text-xs text-muted-foreground">
+                    Paste all files at once. Use file paths as separators between files. Example:
+                    <br />
+                    <code className="text-[10px] font-mono">src/main/java/com/app/User.java</code>
+                    <br />
+                    <code className="text-[10px] font-mono">package com.app; ...</code>
+                    <br />
+                    <code className="text-[10px] font-mono">src/main/java/com/app/UserController.java</code>
+                    <br />
+                    <code className="text-[10px] font-mono">package com.app; ...</code>
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="bulk-content">Bulk Paste</Label>
+                  <Textarea
+                    id="bulk-content"
+                    placeholder={"src/main/java/com/app/User.java\npackage com.app;\n\nimport jakarta.persistence.Entity;\n...\n\nsrc/main/java/com/app/UserController.java\npackage com.app;\n..."}
+                    value={bulkContent}
+                    onChange={(e) => setBulkContent(e.target.value)}
+                    className="font-mono text-xs min-h-[300px]"
+                    data-testid="input-bulk-content"
+                  />
+                </div>
+                <Button variant="outline" onClick={addBulkFiles} data-testid="button-add-bulk">
+                  <FileStack className="h-3.5 w-3.5 mr-1.5" />
+                  Parse & Add Files
+                </Button>
+              </div>
+            )}
           </div>
 
           {files.length > 0 && (
