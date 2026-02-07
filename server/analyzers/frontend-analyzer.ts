@@ -14,12 +14,6 @@ export interface FrontendInteraction {
   lineNumber: number;
 }
 
-interface HandlerInfo {
-  name: string;
-  elementType: string;
-  lineNumber: number;
-}
-
 interface HttpCall {
   method: string;
   url: string;
@@ -34,31 +28,260 @@ interface TemplateBinding {
   lineNumber: number;
 }
 
-function getComponentName(filePath: string): string {
-  const parts = filePath.split("/");
-  const fileName = parts[parts.length - 1];
-  const name = fileName.replace(/\.(vue|jsx|tsx|ts|js|html)$/, "");
-  return name.charAt(0).toUpperCase() + name.slice(1).replace(/[-_]/g, " ");
+interface SymbolDeclaration {
+  name: string;
+  node: ts.Node;
+  httpCalls: HttpCall[];
+  calledSymbols: string[];
 }
 
-function parseTypeScript(code: string, fileName: string): ts.SourceFile {
-  let scriptKind = ts.ScriptKind.TS;
-  if (fileName.endsWith(".tsx") || fileName.endsWith(".jsx")) {
-    scriptKind = ts.ScriptKind.TSX;
-  } else if (fileName.endsWith(".js")) {
-    scriptKind = ts.ScriptKind.JS;
+class ScriptSymbolTable {
+  private declarations = new Map<string, SymbolDeclaration>();
+
+  static build(sourceFile: ts.SourceFile): ScriptSymbolTable {
+    const table = new ScriptSymbolTable();
+    table.indexDeclarations(sourceFile);
+    table.extractCallInfo(sourceFile);
+    return table;
   }
-  return ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, scriptKind);
-}
 
-function getLineNumber(sourceFile: ts.SourceFile, pos: number): number {
-  return sourceFile.getLineAndCharacterOfPosition(pos).line + 1;
-}
+  private indexDeclarations(sourceFile: ts.SourceFile): void {
+    const visit = (node: ts.Node) => {
+      if (ts.isFunctionDeclaration(node) && node.name) {
+        this.declarations.set(node.name.text, {
+          name: node.name.text,
+          node,
+          httpCalls: [],
+          calledSymbols: [],
+        });
+      } else if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) {
+        this.declarations.set(node.name.text, {
+          name: node.name.text,
+          node,
+          httpCalls: [],
+          calledSymbols: [],
+        });
+      } else if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+        const parent = node.parent;
+        let declName: string | null = null;
+        if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+          declName = parent.name.text;
+        } else if (ts.isPropertyAssignment(parent) && ts.isIdentifier(parent.name)) {
+          declName = parent.name.text;
+        } else if (ts.isPropertyDeclaration(parent) && ts.isIdentifier(parent.name)) {
+          declName = parent.name.text;
+        }
+        if (declName) {
+          this.declarations.set(declName, {
+            name: declName,
+            node,
+            httpCalls: [],
+            calledSymbols: [],
+          });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
 
-function extractHttpCallsFromAST(sourceFile: ts.SourceFile): HttpCall[] {
-  const calls: HttpCall[] = [];
+  private extractCallInfo(sourceFile: ts.SourceFile): void {
+    this.declarations.forEach((decl) => {
+      const body = this.getFunctionBody(decl.node);
+      if (!body) return;
 
-  function getEnclosingFunctionName(node: ts.Node): string | null {
+      this.walkBodyForCalls(body, sourceFile, decl);
+    });
+  }
+
+  private getFunctionBody(node: ts.Node): ts.Node | null {
+    if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) {
+      return node.body || null;
+    }
+    if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+      return node.body;
+    }
+    return null;
+  }
+
+  private walkBodyForCalls(body: ts.Node, sourceFile: ts.SourceFile, decl: SymbolDeclaration): void {
+    const walk = (node: ts.Node) => {
+      if (ts.isCallExpression(node)) {
+        const httpCall = this.tryExtractHttpCall(node, sourceFile, decl.name);
+        if (httpCall) {
+          decl.httpCalls.push(httpCall);
+        } else {
+          const calledName = this.resolveCallTarget(node);
+          if (calledName && calledName !== decl.name) {
+            decl.calledSymbols.push(calledName);
+          }
+        }
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(body);
+  }
+
+  private resolveCallTarget(node: ts.CallExpression): string | null {
+    const expr = node.expression;
+    if (ts.isIdentifier(expr)) {
+      if (this.declarations.has(expr.text)) {
+        return expr.text;
+      }
+      return expr.text;
+    }
+    if (ts.isPropertyAccessExpression(expr)) {
+      const obj = expr.expression;
+      if (obj.kind === ts.SyntaxKind.ThisKeyword || (ts.isIdentifier(obj) && obj.text === "this")) {
+        const methodName = expr.name.text;
+        if (this.declarations.has(methodName)) {
+          return methodName;
+        }
+        return methodName;
+      }
+    }
+    return null;
+  }
+
+  private tryExtractHttpCall(node: ts.CallExpression, sourceFile: ts.SourceFile, callerName: string): HttpCall | null {
+    const expr = node.expression;
+
+    if (ts.isPropertyAccessExpression(expr)) {
+      const methodName = expr.name.text.toLowerCase();
+      const httpMethods = ["get", "post", "put", "delete", "patch"];
+
+      if (httpMethods.includes(methodName)) {
+        const objectText = expr.expression.getText(sourceFile).toLowerCase();
+        const httpPatterns = [
+          "axios", "http", "httpclient", "api", "apirequest",
+          "apiservice", "instance", "client", "request", "this.http",
+          "this.$http", "this.httpclient",
+        ];
+        const isHttp = httpPatterns.some(
+          (p) => objectText === p || objectText.endsWith("." + p) || objectText.includes(p)
+        );
+
+        if (isHttp && node.arguments.length > 0) {
+          const url = extractUrlFromNode(node.arguments[0]);
+          if (url) {
+            return {
+              method: methodName.toUpperCase(),
+              url,
+              lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
+              callerFunction: callerName,
+            };
+          }
+        }
+      }
+    }
+
+    if (ts.isIdentifier(expr) && expr.text === "fetch") {
+      if (node.arguments.length > 0) {
+        const url = extractUrlFromNode(node.arguments[0]);
+        if (url) {
+          let method = "GET";
+          if (node.arguments.length > 1 && ts.isObjectLiteralExpression(node.arguments[1])) {
+            for (const prop of node.arguments[1].properties) {
+              if (
+                ts.isPropertyAssignment(prop) &&
+                ts.isIdentifier(prop.name) &&
+                prop.name.text === "method" &&
+                ts.isStringLiteral(prop.initializer)
+              ) {
+                method = prop.initializer.text.toUpperCase();
+              }
+            }
+          }
+          return {
+            method,
+            url,
+            lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            callerFunction: callerName,
+          };
+        }
+      }
+    }
+
+    if (ts.isIdentifier(expr)) {
+      const fnName = expr.text.toLowerCase();
+      if (fnName === "apirequest" || fnName === "request") {
+        if (node.arguments.length >= 2) {
+          const methodArg = node.arguments[0];
+          const urlArg = node.arguments[1];
+          if (ts.isStringLiteral(methodArg)) {
+            const url = extractUrlFromNode(urlArg);
+            if (url) {
+              return {
+                method: methodArg.text.toUpperCase(),
+                url,
+                lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
+                callerFunction: callerName,
+              };
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  resolveHandler(handlerName: string): SymbolDeclaration | null {
+    return this.declarations.get(handlerName) || null;
+  }
+
+  resolveHttpCallsForHandler(handlerName: string): HttpCall[] {
+    const visited = new Set<string>();
+    const results: HttpCall[] = [];
+
+    const trace = (name: string) => {
+      if (visited.has(name)) return;
+      visited.add(name);
+
+      const decl = this.declarations.get(name);
+      if (!decl) return;
+
+      if (decl.httpCalls.length > 0) {
+        results.push(...decl.httpCalls);
+        return;
+      }
+
+      for (const calledName of decl.calledSymbols) {
+        trace(calledName);
+      }
+    };
+
+    trace(handlerName);
+    return results;
+  }
+
+  getAllHttpCalls(): HttpCall[] {
+    const calls: HttpCall[] = [];
+    this.declarations.forEach((decl) => {
+      calls.push(...decl.httpCalls);
+    });
+    return calls;
+  }
+
+  getTopLevelHttpCalls(sourceFile: ts.SourceFile): HttpCall[] {
+    const calls: HttpCall[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node)) {
+        const enclosing = this.getEnclosingDeclaration(node);
+        if (!enclosing) {
+          const httpCall = this.tryExtractHttpCall(node, sourceFile, "__top_level__");
+          if (httpCall) {
+            calls.push(httpCall);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return calls;
+  }
+
+  private getEnclosingDeclaration(node: ts.Node): string | null {
     let current = node.parent;
     while (current) {
       if (ts.isFunctionDeclaration(current) && current.name) {
@@ -83,206 +306,41 @@ function extractHttpCallsFromAST(sourceFile: ts.SourceFile): HttpCall[] {
     }
     return null;
   }
-
-  function extractUrlFromNode(node: ts.Node): string | null {
-    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-      return node.text;
-    }
-    if (ts.isTemplateExpression(node)) {
-      let result = node.head.text;
-      for (const span of node.templateSpans) {
-        result += "{param}" + span.literal.text;
-      }
-      return result;
-    }
-    return null;
-  }
-
-  function visit(node: ts.Node) {
-    if (ts.isCallExpression(node)) {
-      const expr = node.expression;
-
-      if (ts.isPropertyAccessExpression(expr)) {
-        const methodName = expr.name.text.toLowerCase();
-        const httpMethods = ["get", "post", "put", "delete", "patch"];
-
-        if (httpMethods.includes(methodName)) {
-          const objectText = expr.expression.getText(sourceFile).toLowerCase();
-          const httpPatterns = [
-            "axios", "http", "httpclient", "api", "apirequest",
-            "apiservice", "instance", "client", "request", "this.http",
-            "this.$http", "this.httpclient",
-          ];
-          const isHttp = httpPatterns.some(
-            (p) => objectText === p || objectText.endsWith("." + p) || objectText.includes(p)
-          );
-
-          if (isHttp && node.arguments.length > 0) {
-            const urlArg = node.arguments[0];
-            const url = extractUrlFromNode(urlArg);
-            if (url) {
-              calls.push({
-                method: methodName.toUpperCase(),
-                url,
-                lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
-                callerFunction: getEnclosingFunctionName(node),
-              });
-            }
-          }
-        }
-      }
-
-      if (ts.isIdentifier(expr) && expr.text === "fetch") {
-        if (node.arguments.length > 0) {
-          const urlArg = node.arguments[0];
-          const url = extractUrlFromNode(urlArg);
-          if (url) {
-            let method = "GET";
-            if (node.arguments.length > 1 && ts.isObjectLiteralExpression(node.arguments[1])) {
-              for (const prop of node.arguments[1].properties) {
-                if (
-                  ts.isPropertyAssignment(prop) &&
-                  ts.isIdentifier(prop.name) &&
-                  prop.name.text === "method" &&
-                  ts.isStringLiteral(prop.initializer)
-                ) {
-                  method = prop.initializer.text.toUpperCase();
-                }
-              }
-            }
-            calls.push({
-              method,
-              url,
-              lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
-              callerFunction: getEnclosingFunctionName(node),
-            });
-          }
-        }
-      }
-
-      if (ts.isIdentifier(expr)) {
-        const fnName = expr.text.toLowerCase();
-        if (fnName === "apirequest" || fnName === "request") {
-          if (node.arguments.length >= 2) {
-            const methodArg = node.arguments[0];
-            const urlArg = node.arguments[1];
-            if (ts.isStringLiteral(methodArg)) {
-              const url = extractUrlFromNode(urlArg);
-              if (url) {
-                calls.push({
-                  method: methodArg.text.toUpperCase(),
-                  url,
-                  lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
-                  callerFunction: getEnclosingFunctionName(node),
-                });
-              }
-            }
-          }
-        }
-      }
-    }
-
-    ts.forEachChild(node, visit);
-  }
-
-  visit(sourceFile);
-  return calls;
 }
 
-function buildFunctionToHttpMap(httpCalls: HttpCall[]): Map<string, HttpCall[]> {
-  const map = new Map<string, HttpCall[]>();
-  for (const call of httpCalls) {
-    const key = call.callerFunction || "__top_level__";
-    if (!map.has(key)) {
-      map.set(key, []);
-    }
-    map.get(key)!.push(call);
-  }
-  return map;
+function getComponentName(filePath: string): string {
+  const parts = filePath.split("/");
+  const fileName = parts[parts.length - 1];
+  const name = fileName.replace(/\.(vue|jsx|tsx|ts|js|html)$/, "");
+  return name.charAt(0).toUpperCase() + name.slice(1).replace(/[-_]/g, " ");
 }
 
-function buildASTFunctionCallMap(sourceFile: ts.SourceFile): Map<string, string[]> {
-  const callMap = new Map<string, string[]>();
-
-  function visit(node: ts.Node) {
-    let fnName: string | null = null;
-
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      fnName = node.name.text;
-    } else if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) {
-      fnName = node.name.text;
-    } else if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node))) {
-      const parent = node.parent;
-      if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
-        fnName = parent.name.text;
-      } else if (ts.isPropertyAssignment(parent) && ts.isIdentifier(parent.name)) {
-        fnName = parent.name.text;
-      } else if (ts.isPropertyDeclaration(parent) && ts.isIdentifier(parent.name)) {
-        fnName = parent.name.text;
-      }
-    }
-
-    if (fnName) {
-      const calledFns: string[] = [];
-
-      const walkBody = (n: ts.Node) => {
-        if (ts.isCallExpression(n)) {
-          if (ts.isIdentifier(n.expression)) {
-            calledFns.push(n.expression.text);
-          } else if (ts.isPropertyAccessExpression(n.expression)) {
-            const obj = n.expression.expression;
-            if (obj.kind === ts.SyntaxKind.ThisKeyword || (ts.isIdentifier(obj) && obj.text === "this")) {
-              calledFns.push(n.expression.name.text);
-            }
-          }
-        }
-        ts.forEachChild(n, walkBody);
-      };
-
-      if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) {
-        if (node.body) walkBody(node.body);
-      } else if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
-        walkBody(node.body);
-      }
-
-      callMap.set(fnName, calledFns);
-    }
-
-    ts.forEachChild(node, visit);
+function parseTypeScript(code: string, fileName: string): ts.SourceFile {
+  let scriptKind = ts.ScriptKind.TS;
+  if (fileName.endsWith(".tsx") || fileName.endsWith(".jsx")) {
+    scriptKind = ts.ScriptKind.TSX;
+  } else if (fileName.endsWith(".js")) {
+    scriptKind = ts.ScriptKind.JS;
   }
-
-  visit(sourceFile);
-  return callMap;
+  return ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, scriptKind);
 }
 
-function findIndirectHttpCallsAST(
-  handlerName: string,
-  functionCallMap: Map<string, string[]>,
-  functionMap: Map<string, HttpCall[]>
-): HttpCall[] {
-  const visited = new Set<string>();
-  const results: HttpCall[] = [];
+function getLineNumber(sourceFile: ts.SourceFile, pos: number): number {
+  return sourceFile.getLineAndCharacterOfPosition(pos).line + 1;
+}
 
-  function trace(fnName: string) {
-    if (visited.has(fnName)) return;
-    visited.add(fnName);
-
-    const direct = functionMap.get(fnName);
-    if (direct) {
-      results.push(...direct);
-      return;
-    }
-
-    const calledFns = functionCallMap.get(fnName);
-    if (calledFns) {
-      for (const fn of calledFns) {
-        trace(fn);
-      }
-    }
+function extractUrlFromNode(node: ts.Node): string | null {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return node.text;
   }
-
-  trace(handlerName);
-  return results;
+  if (ts.isTemplateExpression(node)) {
+    let result = node.head.text;
+    for (const span of node.templateSpans) {
+      result += "{param}" + span.literal.text;
+    }
+    return result;
+  }
+  return null;
 }
 
 function parseVueTemplateAST(content: string): { bindings: TemplateBinding[]; scriptContent: string; scriptOffset: number } {
@@ -572,10 +630,9 @@ function endpointMatchScore(frontendUrl: string, backendPath: string): number {
   return (matchCount / frontParts.length) * 100;
 }
 
-function resolveBindingsToInteractions(
+function resolveBindingsViaSymbolTable(
   bindings: TemplateBinding[],
-  functionMap: Map<string, HttpCall[]>,
-  functionCallMap: Map<string, string[]>,
+  symbolTable: ScriptSymbolTable,
   component: string,
   filePath: string,
   graph: ApplicationGraph
@@ -583,26 +640,40 @@ function resolveBindingsToInteractions(
   const interactions: FrontendInteraction[] = [];
 
   for (const binding of bindings) {
-    const callsInHandler = functionMap.get(binding.handlerName) || [];
+    const resolved = symbolTable.resolveHandler(binding.handlerName);
 
-    if (callsInHandler.length > 0) {
-      for (const call of callsInHandler) {
-        const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
+    if (resolved) {
+      const httpCalls = symbolTable.resolveHttpCallsForHandler(binding.handlerName);
+      if (httpCalls.length > 0) {
+        for (const call of httpCalls) {
+          const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
+          interactions.push({
+            component,
+            elementType: binding.elementType,
+            actionName: binding.handlerName,
+            httpMethod: call.method,
+            url: call.url,
+            mappedBackendNode: backendNode,
+            sourceFile: filePath,
+            lineNumber: binding.lineNumber,
+          });
+        }
+      } else {
         interactions.push({
           component,
           elementType: binding.elementType,
           actionName: binding.handlerName,
-          httpMethod: call.method,
-          url: call.url,
-          mappedBackendNode: backendNode,
+          httpMethod: null,
+          url: null,
+          mappedBackendNode: null,
           sourceFile: filePath,
           lineNumber: binding.lineNumber,
         });
       }
     } else {
-      const indirectCalls = findIndirectHttpCallsAST(binding.handlerName, functionCallMap, functionMap);
-      if (indirectCalls.length > 0) {
-        for (const call of indirectCalls) {
+      const httpCalls = symbolTable.resolveHttpCallsForHandler(binding.handlerName);
+      if (httpCalls.length > 0) {
+        for (const call of httpCalls) {
           const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
           interactions.push({
             component,
@@ -639,25 +710,22 @@ function analyzeVueFile(
   graph: ApplicationGraph
 ): FrontendInteraction[] {
   const component = getComponentName(filePath);
+  const { bindings: templateBindings, scriptContent } = parseVueTemplateAST(content);
 
-  const { bindings: templateBindings, scriptContent, scriptOffset } = parseVueTemplateAST(content);
-
-  let httpCalls: HttpCall[] = [];
-  let functionMap = new Map<string, HttpCall[]>();
-  let functionCallMap = new Map<string, string[]>();
+  let symbolTable = new ScriptSymbolTable() as ScriptSymbolTable;
+  let allHttpCalls: HttpCall[] = [];
 
   if (scriptContent.trim()) {
     const scriptSource = parseTypeScript(scriptContent, filePath + ".script.ts");
-    httpCalls = extractHttpCallsFromAST(scriptSource);
-    functionMap = buildFunctionToHttpMap(httpCalls);
-    functionCallMap = buildASTFunctionCallMap(scriptSource);
+    symbolTable = ScriptSymbolTable.build(scriptSource);
+    allHttpCalls = [...symbolTable.getAllHttpCalls(), ...symbolTable.getTopLevelHttpCalls(scriptSource)];
   }
 
-  const interactions = resolveBindingsToInteractions(
-    templateBindings, functionMap, functionCallMap, component, filePath, graph
+  const interactions = resolveBindingsViaSymbolTable(
+    templateBindings, symbolTable, component, filePath, graph
   );
 
-  addUnmappedHttpCalls(interactions, httpCalls, component, filePath, graph);
+  addUnmappedHttpCalls(interactions, allHttpCalls, component, filePath, graph);
 
   return interactions;
 }
@@ -669,16 +737,15 @@ function analyzeReactFile(
 ): FrontendInteraction[] {
   const component = getComponentName(filePath);
   const sourceFile = parseTypeScript(content, filePath);
-  const httpCalls = extractHttpCallsFromAST(sourceFile);
-  const functionMap = buildFunctionToHttpMap(httpCalls);
-  const functionCallMap = buildASTFunctionCallMap(sourceFile);
+  const symbolTable = ScriptSymbolTable.build(sourceFile);
   const jsxBindings = parseJSXTemplate(sourceFile);
+  const allHttpCalls = [...symbolTable.getAllHttpCalls(), ...symbolTable.getTopLevelHttpCalls(sourceFile)];
 
-  const interactions = resolveBindingsToInteractions(
-    jsxBindings, functionMap, functionCallMap, component, filePath, graph
+  const interactions = resolveBindingsViaSymbolTable(
+    jsxBindings, symbolTable, component, filePath, graph
   );
 
-  addUnmappedHttpCalls(interactions, httpCalls, component, filePath, graph);
+  addUnmappedHttpCalls(interactions, allHttpCalls, component, filePath, graph);
 
   return interactions;
 }
@@ -710,9 +777,8 @@ function analyzeAngularFile(
   }
 
   const sourceFile = parseTypeScript(content, filePath);
-  const httpCalls = extractHttpCallsFromAST(sourceFile);
-  const functionMap = buildFunctionToHttpMap(httpCalls);
-  const functionCallMap = buildASTFunctionCallMap(sourceFile);
+  const symbolTable = ScriptSymbolTable.build(sourceFile);
+  const allHttpCalls = [...symbolTable.getAllHttpCalls(), ...symbolTable.getTopLevelHttpCalls(sourceFile)];
 
   let templateContent = "";
 
@@ -738,13 +804,13 @@ function analyzeAngularFile(
 
   if (templateContent) {
     const templateBindings = parseAngularTemplateAST(templateContent);
-    const resolved = resolveBindingsToInteractions(
-      templateBindings, functionMap, functionCallMap, component, filePath, graph
+    const resolved = resolveBindingsViaSymbolTable(
+      templateBindings, symbolTable, component, filePath, graph
     );
     interactions.push(...resolved);
   }
 
-  addUnmappedHttpCalls(interactions, httpCalls, component, filePath, graph);
+  addUnmappedHttpCalls(interactions, allHttpCalls, component, filePath, graph);
 
   return interactions;
 }
@@ -897,12 +963,4 @@ export function analyzeFrontend(
   }
 
   return interactions;
-}
-
-export function analyzeFrontendFiles(
-  files: { filePath: string; content: string }[]
-): FrontendInteraction[] {
-  const { ApplicationGraph: AG } = require("./application-graph");
-  const emptyGraph = new AG();
-  return analyzeFrontend(files, emptyGraph);
 }

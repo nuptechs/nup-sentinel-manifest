@@ -64,7 +64,10 @@ shared/
 ## Analyzer Architecture
 
 ### Java Backend Analyzer (JVM-based)
-- Uses **JavaParser** library for real AST parsing of Java source files
+- Uses **JavaParser** library with **JavaSymbolSolver** for semantic AST analysis
+- **CombinedTypeSolver**: ReflectionTypeSolver (JDK types) + JavaParserTypeSolver (project source types)
+- Writes source files to temp directory for JavaParserTypeSolver filesystem access
+- Uses `callExpr.resolve()` for type-resolved method call resolution with graceful fallback to heuristics when framework JARs unavailable
 - Runs as a standalone HTTP service on port 9876 (auto-started by Node.js client)
 - Detects: @RestController, @Service, @Repository, @Entity annotations via AST
 - Resolves: constructor injection, @Autowired fields, method call chains across classes
@@ -72,11 +75,13 @@ shared/
 - Returns JSON matching ApplicationGraph node/edge format
 
 ### Frontend Analyzer (Node.js-based)
+- **ScriptSymbolTable**: Maps function/method names to AST declaration nodes (ts.Node references), not string lookups
+- **Symbol resolution**: Template handlers resolved to actual declaration nodes, call chains traced through node references
 - **React/JSX/TSX**: TypeScript compiler API (ts.createSourceFile) for full AST parsing
 - **Vue SFCs**: @vue/compiler-sfc for SFC parsing + template AST walking, TypeScript compiler API for script blocks
 - **Angular**: @angular/compiler (parseTemplate) for template AST, TypeScript compiler API for component files
-- **HTTP call detection**: AST-based detection of axios, fetch, httpClient patterns via CallExpression nodes
-- **Indirect call tracing**: Pure AST-based function-to-function call map (no regex fallback)
+- **HTTP call detection**: AST-based detection of axios, fetch, httpClient patterns via CallExpression nodes within symbol-resolved function bodies
+- **Indirect call tracing**: Symbol-table-driven call graph traversal (resolveHttpCallsForHandler traces through calledSymbols)
 - **URL matching**: Segment-by-segment URL scoring against ApplicationGraph controller nodes
 
 ## Application Graph Model

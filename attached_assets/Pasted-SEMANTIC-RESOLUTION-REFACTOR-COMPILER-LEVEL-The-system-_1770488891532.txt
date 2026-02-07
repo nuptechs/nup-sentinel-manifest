@@ -1,0 +1,113 @@
+SEMANTIC RESOLUTION REFACTOR — COMPILER LEVEL
+
+The system is currently AST-based but NOT semantically resolved.
+
+This is NOT enough.
+
+We now require TRUE SYMBOL RESOLUTION, exactly like a compiler.
+
+This applies to BOTH:
+
+- Java backend analyzer
+- Vue / Angular / React frontend analyzer
+
+You must refactor the analyzers to perform REAL semantic symbol resolution.
+
+No string-based name matching is allowed anymore.
+
+========================================================
+PART 1 — JAVA: REAL JavaSymbolSolver CONFIGURATION
+========================================================
+
+You MUST configure JavaParser with JavaSymbolSolver.
+
+Required implementation:
+
+1) Configure CombinedTypeSolver including:
+   - ReflectionTypeSolver
+   - JavaParserTypeSolver for the project source root
+   - JarTypeSolver for dependencies if present
+
+2) Register JavaSymbolSolver in ParserConfiguration.
+
+3) For every MethodCallExpr, you MUST use:
+
+   ResolvedMethodDeclaration resolved = callExpr.resolve();
+
+4) From the resolved method, you must extract:
+   - Declaring class
+   - Full qualified signature
+   - Return type
+   - Parameter types
+
+5) Method call graph MUST be built from resolved symbols, NOT from classMap or injected field name matching.
+
+6) Field injection MUST be resolved via symbol types, not string comparison.
+
+7) Inheritance, interfaces, generics, Spring proxies MUST be correctly resolved.
+
+You must show code where JavaSymbolSolver is configured and used.
+
+========================================================
+PART 2 — VUE: TEMPLATE → SCRIPT SYMBOL RESOLUTION
+========================================================
+
+Currently you extract handlerName from the template AST.
+
+This is insufficient.
+
+You MUST:
+
+1) Parse the <script> or <script setup> using TypeScript AST.
+2) Build a symbol table of all functions and imports.
+3) When a template handler is found (e.g. @click="salvarUsuario"),
+   you must resolve this to the actual function declaration node in the script AST.
+4) From that function node, detect HTTP calls via AST traversal.
+5) If the function calls another function, follow the chain via AST symbol map.
+
+No string matching allowed.
+
+========================================================
+PART 3 — ANGULAR: TEMPLATE → COMPONENT METHOD RESOLUTION
+========================================================
+
+When (click)="salvar()":
+
+1) Use Angular template AST to extract handler.
+2) Use TypeScript AST of the component to resolve the exact method node.
+3) Follow method calls via AST call graph.
+4) Detect HTTP calls from the resolved method chain.
+
+========================================================
+PART 4 — REACT: JSX → FUNCTION RESOLUTION (VERIFY)
+========================================================
+
+Ensure JSX handlers are resolved to real function nodes via TypeScript AST symbol tracking.
+
+========================================================
+STRICT RULE
+========================================================
+
+From now on, the system must NEVER rely on:
+
+- handlerName strings
+- class names from maps
+- injected field name matching
+
+EVERYTHING must come from symbol resolution.
+
+========================================================
+EXPECTED RESULT
+========================================================
+
+After this refactor:
+
+- Java analyzer behaves like a compiler
+- Vue/Angular/React analyzers behave like compilers
+- ApplicationGraph is built from semantically resolved call chains
+
+This is the final step required to make this system reliable for real enterprise projects.
+
+Start the semantic resolution refactor now.
+Do not patch.
+Refactor properly.

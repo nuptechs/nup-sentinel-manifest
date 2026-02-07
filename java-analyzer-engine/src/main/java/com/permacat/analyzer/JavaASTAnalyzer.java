@@ -2,15 +2,26 @@ package com.permacat.analyzer;
 
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParseResult;
+import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
-import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.body.*;
 import com.github.javaparser.ast.expr.*;
 import com.github.javaparser.ast.stmt.*;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.github.javaparser.ast.visitor.VoidVisitorAdapter;
+import com.github.javaparser.resolution.declarations.ResolvedMethodDeclaration;
+import com.github.javaparser.resolution.declarations.ResolvedReferenceTypeDeclaration;
+import com.github.javaparser.resolution.types.ResolvedType;
+import com.github.javaparser.symbolsolver.JavaSymbolSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.CombinedTypeSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.JavaParserTypeSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeSolver;
 import com.permacat.model.*;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -51,25 +62,114 @@ public class JavaASTAnalyzer {
     );
 
     private final Map<String, ClassInfo> classMap = new HashMap<>();
+    private final Map<String, ClassInfo> fqnClassMap = new HashMap<>();
+    private boolean symbolSolverActive = false;
 
     public AnalysisResult analyze(Map<String, String> files) {
-        JavaParser parser = new JavaParser();
+        Path tempDir = null;
+        try {
+            tempDir = writeFilesToTemp(files);
+            JavaParser parser = configureParserWithSymbolSolver(tempDir);
+            symbolSolverActive = true;
 
-        for (Map.Entry<String, String> entry : files.entrySet()) {
-            String filePath = entry.getKey();
-            String content = entry.getValue();
-            try {
-                ParseResult<CompilationUnit> result = parser.parse(content);
-                if (result.isSuccessful() && result.getResult().isPresent()) {
-                    CompilationUnit cu = result.getResult().get();
-                    extractClassInfo(cu, filePath);
+            for (Map.Entry<String, String> entry : files.entrySet()) {
+                String filePath = entry.getKey();
+                String content = entry.getValue();
+                try {
+                    ParseResult<CompilationUnit> result = parser.parse(content);
+                    if (result.isSuccessful() && result.getResult().isPresent()) {
+                        CompilationUnit cu = result.getResult().get();
+                        extractClassInfo(cu, filePath);
+                    }
+                } catch (Exception e) {
+                    System.err.println("Failed to parse: " + filePath + " - " + e.getMessage());
                 }
-            } catch (Exception e) {
-                System.err.println("Failed to parse: " + filePath + " - " + e.getMessage());
+            }
+        } catch (Exception e) {
+            System.err.println("Symbol solver init failed, falling back to heuristic mode: " + e.getMessage());
+            symbolSolverActive = false;
+            classMap.clear();
+            fqnClassMap.clear();
+
+            JavaParser parser = new JavaParser();
+            for (Map.Entry<String, String> entry : files.entrySet()) {
+                String filePath = entry.getKey();
+                String content = entry.getValue();
+                try {
+                    ParseResult<CompilationUnit> result = parser.parse(content);
+                    if (result.isSuccessful() && result.getResult().isPresent()) {
+                        CompilationUnit cu = result.getResult().get();
+                        extractClassInfo(cu, filePath);
+                    }
+                } catch (Exception e2) {
+                    System.err.println("Failed to parse: " + filePath + " - " + e2.getMessage());
+                }
+            }
+        } finally {
+            if (tempDir != null) {
+                deleteRecursively(tempDir.toFile());
             }
         }
 
         return buildGraph();
+    }
+
+    private Path writeFilesToTemp(Map<String, String> files) throws IOException {
+        Path tempDir = Files.createTempDirectory("permacat-src-");
+
+        for (Map.Entry<String, String> entry : files.entrySet()) {
+            String filePath = entry.getKey();
+            String content = entry.getValue();
+
+            String packagePath = extractPackagePath(content);
+            Path targetDir;
+            if (packagePath != null) {
+                targetDir = tempDir.resolve(packagePath.replace('.', File.separatorChar));
+            } else {
+                String dirPart = filePath.contains("/") ? filePath.substring(0, filePath.lastIndexOf('/')) : "";
+                targetDir = dirPart.isEmpty() ? tempDir : tempDir.resolve(dirPart);
+            }
+            Files.createDirectories(targetDir);
+
+            String fileName = filePath.contains("/") ? filePath.substring(filePath.lastIndexOf('/') + 1) : filePath;
+            Path targetFile = targetDir.resolve(fileName);
+            Files.writeString(targetFile, content);
+        }
+
+        return tempDir;
+    }
+
+    private String extractPackagePath(String content) {
+        int idx = content.indexOf("package ");
+        if (idx < 0) return null;
+        int semi = content.indexOf(';', idx);
+        if (semi < 0) return null;
+        return content.substring(idx + 8, semi).trim();
+    }
+
+    private JavaParser configureParserWithSymbolSolver(Path sourceRoot) {
+        CombinedTypeSolver combinedSolver = new CombinedTypeSolver();
+        combinedSolver.add(new ReflectionTypeSolver());
+        combinedSolver.add(new JavaParserTypeSolver(sourceRoot));
+
+        JavaSymbolSolver symbolSolver = new JavaSymbolSolver(combinedSolver);
+
+        ParserConfiguration config = new ParserConfiguration();
+        config.setSymbolResolver(symbolSolver);
+
+        return new JavaParser(config);
+    }
+
+    private void deleteRecursively(File file) {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteRecursively(child);
+                }
+            }
+        }
+        file.delete();
     }
 
     private void extractClassInfo(CompilationUnit cu, String filePath) {
@@ -81,6 +181,7 @@ public class JavaASTAnalyzer {
             ClassInfo info = new ClassInfo();
             info.className = cls.getNameAsString();
             info.packageName = packageName;
+            info.fqn = packageName.isEmpty() ? info.className : packageName + "." + info.className;
             info.sourceFile = filePath;
             info.isInterface = cls.isInterface();
 
@@ -124,6 +225,7 @@ public class JavaASTAnalyzer {
             extractMethods(cls, info);
 
             classMap.put(info.className, info);
+            fqnClassMap.put(info.fqn, info);
         }
     }
 
@@ -146,22 +248,74 @@ public class JavaASTAnalyzer {
                 .anyMatch(a -> INJECT_ANNOTATIONS.contains(a.getNameAsString()));
             if (isInjected) {
                 for (VariableDeclarator var : field.getVariables()) {
-                    info.injectedFields.put(var.getNameAsString(), var.getTypeAsString());
+                    String resolvedType = resolveFieldType(var);
+                    info.injectedFields.put(var.getNameAsString(), resolvedType);
                 }
             }
         }
 
         for (ConstructorDeclaration ctor : cls.getConstructors()) {
             for (Parameter param : ctor.getParameters()) {
-                String typeName = param.getTypeAsString();
-                if (typeName.endsWith("Service") || typeName.endsWith("Repository") ||
-                    typeName.endsWith("Repo") || typeName.endsWith("Client") ||
-                    typeName.endsWith("Mapper") || typeName.endsWith("Converter") ||
-                    typeName.endsWith("Dao") || typeName.endsWith("DAO")) {
-                    info.injectedFields.put(param.getNameAsString(), typeName);
+                String resolvedType = resolveParameterType(param);
+                if (isInjectableType(resolvedType)) {
+                    info.injectedFields.put(param.getNameAsString(), resolvedType);
                 }
             }
         }
+    }
+
+    private String resolveFieldType(VariableDeclarator var) {
+        if (symbolSolverActive) {
+            try {
+                ResolvedType resolved = var.getType().resolve();
+                if (resolved.isReferenceType()) {
+                    String qualifiedName = resolved.asReferenceType().getQualifiedName();
+                    String simpleName = qualifiedName.contains(".")
+                        ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
+                        : qualifiedName;
+                    ClassInfo target = classMap.get(simpleName);
+                    if (target == null) target = fqnClassMap.get(qualifiedName);
+                    if (target != null) {
+                        return target.className;
+                    }
+                    return simpleName;
+                }
+            } catch (Exception e) {
+                // fall through to heuristic
+            }
+        }
+        return var.getTypeAsString();
+    }
+
+    private String resolveParameterType(Parameter param) {
+        if (symbolSolverActive) {
+            try {
+                ResolvedType resolved = param.getType().resolve();
+                if (resolved.isReferenceType()) {
+                    String qualifiedName = resolved.asReferenceType().getQualifiedName();
+                    String simpleName = qualifiedName.contains(".")
+                        ? qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1)
+                        : qualifiedName;
+                    ClassInfo target = classMap.get(simpleName);
+                    if (target == null) target = fqnClassMap.get(qualifiedName);
+                    if (target != null) {
+                        return target.className;
+                    }
+                    return simpleName;
+                }
+            } catch (Exception e) {
+                // fall through to heuristic
+            }
+        }
+        return param.getTypeAsString();
+    }
+
+    private boolean isInjectableType(String typeName) {
+        return typeName.endsWith("Service") || typeName.endsWith("Repository") ||
+            typeName.endsWith("Repo") || typeName.endsWith("Client") ||
+            typeName.endsWith("Mapper") || typeName.endsWith("Converter") ||
+            typeName.endsWith("Dao") || typeName.endsWith("DAO") ||
+            classMap.containsKey(typeName) || fqnClassMap.containsKey(typeName);
     }
 
     private void extractMethods(ClassOrInterfaceDeclaration cls, ClassInfo info) {
@@ -171,10 +325,6 @@ public class JavaASTAnalyzer {
             mi.returnType = method.getTypeAsString();
             mi.parameters = method.getParameters().stream()
                 .map(p -> p.getTypeAsString() + " " + p.getNameAsString())
-                .collect(Collectors.toList());
-
-            List<String> methodAnnotations = method.getAnnotations().stream()
-                .map(a -> a.getNameAsString())
                 .collect(Collectors.toList());
 
             for (AnnotationExpr ann : method.getAnnotations()) {
@@ -204,6 +354,27 @@ public class JavaASTAnalyzer {
                 super.visit(callExpr, arg);
                 MethodCallInfo mci = new MethodCallInfo();
                 mci.methodName = callExpr.getNameAsString();
+
+                if (symbolSolverActive) {
+                    try {
+                        ResolvedMethodDeclaration resolved = callExpr.resolve();
+                        String declaringClass = resolved.declaringType().getQualifiedName();
+                        String simpleName = declaringClass.contains(".")
+                            ? declaringClass.substring(declaringClass.lastIndexOf('.') + 1)
+                            : declaringClass;
+
+                        mci.resolvedDeclaringClass = simpleName;
+                        mci.resolvedQualifiedClass = declaringClass;
+                        mci.resolvedSignature = resolved.getQualifiedSignature();
+                        mci.resolvedReturnType = resolved.getReturnType().describe();
+                        mci.isSymbolResolved = true;
+
+                        mi.methodCalls.add(mci);
+                        return;
+                    } catch (Exception e) {
+                        // symbol resolution failed, fall through to heuristic
+                    }
+                }
 
                 if (callExpr.getScope().isPresent()) {
                     Expression scope = callExpr.getScope().get();
@@ -380,26 +551,10 @@ public class JavaASTAnalyzer {
                 if (!nodeIds.contains(fromId)) continue;
 
                 for (MethodCallInfo call : method.methodCalls) {
-                    String targetType = resolveTargetType(call.targetVariable, cls);
-                    ClassInfo targetClass = targetType != null ? classMap.get(targetType) : null;
-
-                    if (targetClass != null) {
-                        processMethodCall(fromId, call, targetClass, nodes, edges, nodeIds, edgeKeys);
-                    } else if ("this".equals(call.targetVariable)) {
-                        String toId = nodeType + ":" + cls.className + "." + call.methodName;
-                        if (nodeIds.contains(toId)) {
-                            addEdge(edges, edgeKeys, fromId, toId, "CALLS", null);
-                        }
-                    } else if (call.targetVariable != null && !call.targetVariable.equals("__chained__")) {
-                        String injectedType = cls.injectedFields.get(call.targetVariable);
-                        if (injectedType != null) {
-                            ClassInfo injectedClass = classMap.get(injectedType);
-                            if (injectedClass != null) {
-                                processMethodCall(fromId, call, injectedClass, nodes, edges, nodeIds, edgeKeys);
-                            } else if (injectedType.endsWith("Repository") || injectedType.endsWith("Repo")) {
-                                handleSyntheticRepoCall(fromId, call, injectedType, nodes, edges, nodeIds, edgeKeys);
-                            }
-                        }
+                    if (call.isSymbolResolved) {
+                        processResolvedCall(fromId, call, nodes, edges, nodeIds, edgeKeys);
+                    } else {
+                        processHeuristicCall(fromId, call, cls, nodes, edges, nodeIds, edgeKeys);
                     }
                 }
 
@@ -410,6 +565,85 @@ public class JavaASTAnalyzer {
         }
 
         return new AnalysisResult(nodes, edges);
+    }
+
+    private void processResolvedCall(String fromId, MethodCallInfo call,
+                                     List<GraphNodeDTO> nodes, List<GraphEdgeDTO> edges,
+                                     Set<String> nodeIds, Set<String> edgeKeys) {
+        String declaringSimple = call.resolvedDeclaringClass;
+        ClassInfo targetClass = classMap.get(declaringSimple);
+        if (targetClass == null && call.resolvedQualifiedClass != null) {
+            targetClass = fqnClassMap.get(call.resolvedQualifiedClass);
+        }
+
+        if (targetClass == null) return;
+
+        if (targetClass.isRepository) {
+            String repoNodeId = "REPOSITORY:" + targetClass.className + "." + call.methodName;
+            if (!nodeIds.contains(repoNodeId)) {
+                GraphNodeDTO syntheticNode = new GraphNodeDTO("REPOSITORY", targetClass.className, call.methodName);
+                syntheticNode.metadata.put("synthetic", true);
+                syntheticNode.metadata.put("sourceFile", targetClass.sourceFile);
+                syntheticNode.metadata.put("resolvedFrom", call.resolvedSignature);
+                nodeIds.add(repoNodeId);
+                nodes.add(syntheticNode);
+
+                String entityName = targetClass.className
+                    .replaceAll("Repository$", "")
+                    .replaceAll("Repo$", "");
+                String entityNodeId = "ENTITY:" + entityName + "." + entityName;
+                if (nodeIds.contains(entityNodeId)) {
+                    String op = detectPersistenceOp(call.methodName);
+                    if (isWriteOp(op)) {
+                        addEdge(edges, edgeKeys, repoNodeId, entityNodeId, "WRITES_ENTITY", Map.of("operation", op));
+                    } else {
+                        addEdge(edges, edgeKeys, repoNodeId, entityNodeId, "READS_ENTITY", Map.of("operation", op != null ? op : "read"));
+                    }
+                }
+            }
+            addEdge(edges, edgeKeys, fromId, repoNodeId, "CALLS", null);
+        } else {
+            String targetNodeType;
+            if (targetClass.isController) targetNodeType = "CONTROLLER";
+            else if (targetClass.isService) targetNodeType = "SERVICE";
+            else return;
+
+            String toId = targetNodeType + ":" + targetClass.className + "." + call.methodName;
+            if (nodeIds.contains(toId)) {
+                addEdge(edges, edgeKeys, fromId, toId, "CALLS", null);
+            }
+        }
+    }
+
+    private void processHeuristicCall(String fromId, MethodCallInfo call, ClassInfo cls,
+                                      List<GraphNodeDTO> nodes, List<GraphEdgeDTO> edges,
+                                      Set<String> nodeIds, Set<String> edgeKeys) {
+        String targetType = resolveTargetType(call.targetVariable, cls);
+        ClassInfo targetClass = targetType != null ? classMap.get(targetType) : null;
+
+        if (targetClass != null) {
+            processMethodCall(fromId, call, targetClass, nodes, edges, nodeIds, edgeKeys);
+        } else if ("this".equals(call.targetVariable)) {
+            String nodeType;
+            if (cls.isController) nodeType = "CONTROLLER";
+            else if (cls.isService) nodeType = "SERVICE";
+            else if (cls.isRepository) nodeType = "REPOSITORY";
+            else return;
+            String toId = nodeType + ":" + cls.className + "." + call.methodName;
+            if (nodeIds.contains(toId)) {
+                addEdge(edges, edgeKeys, fromId, toId, "CALLS", null);
+            }
+        } else if (call.targetVariable != null && !call.targetVariable.equals("__chained__")) {
+            String injectedType = cls.injectedFields.get(call.targetVariable);
+            if (injectedType != null) {
+                ClassInfo injectedClass = classMap.get(injectedType);
+                if (injectedClass != null) {
+                    processMethodCall(fromId, call, injectedClass, nodes, edges, nodeIds, edgeKeys);
+                } else if (injectedType.endsWith("Repository") || injectedType.endsWith("Repo")) {
+                    handleSyntheticRepoCall(fromId, call, injectedType, nodes, edges, nodeIds, edgeKeys);
+                }
+            }
+        }
     }
 
     private void processMethodCall(String fromId, MethodCallInfo call, ClassInfo targetClass,
@@ -482,8 +716,16 @@ public class JavaASTAnalyzer {
 
         for (MethodInfo m : cls.methods) {
             for (MethodCallInfo call : m.methodCalls) {
-                String targetType = resolveTargetType(call.targetVariable, cls);
-                ClassInfo targetClass = targetType != null ? classMap.get(targetType) : null;
+                ClassInfo targetClass = null;
+                if (call.isSymbolResolved && call.resolvedDeclaringClass != null) {
+                    targetClass = classMap.get(call.resolvedDeclaringClass);
+                    if (targetClass == null && call.resolvedQualifiedClass != null) {
+                        targetClass = fqnClassMap.get(call.resolvedQualifiedClass);
+                    }
+                } else {
+                    String targetType = resolveTargetType(call.targetVariable, cls);
+                    targetClass = targetType != null ? classMap.get(targetType) : null;
+                }
                 if (targetClass != null && targetClass.isRepository) {
                     String entityName = targetClass.className.replaceAll("Repository$", "").replaceAll("Repo$", "");
                     entityNames.add(entityName);
@@ -547,6 +789,7 @@ public class JavaASTAnalyzer {
     static class ClassInfo {
         String className;
         String packageName;
+        String fqn;
         String sourceFile;
         boolean isInterface;
         boolean isController;
@@ -572,6 +815,11 @@ public class JavaASTAnalyzer {
     static class MethodCallInfo {
         String methodName;
         String targetVariable;
+        boolean isSymbolResolved = false;
+        String resolvedDeclaringClass;
+        String resolvedQualifiedClass;
+        String resolvedSignature;
+        String resolvedReturnType;
     }
 
     static class EntityField {
