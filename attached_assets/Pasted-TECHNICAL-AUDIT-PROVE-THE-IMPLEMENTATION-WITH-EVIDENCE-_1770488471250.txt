@@ -1,0 +1,109 @@
+TECHNICAL AUDIT — PROVE THE IMPLEMENTATION WITH EVIDENCE
+
+You are NOT allowed to explain.
+You must PROVE with code evidence.
+
+For each requirement below, you must provide:
+
+1) File path
+2) Exact code snippet
+3) Explanation of why this proves the requirement is met
+
+If you cannot provide real code evidence, say:
+"NOT IMPLEMENTED"
+
+========================================================
+1) JAVA ANALYZER ENGINE (COMPILER-LEVEL)
+========================================================
+
+Prove that:
+
+- A Java project exists under /java-analyzer-engine
+- It uses JavaParser with Symbol Solver
+- It parses Java files into AST (not regex)
+- It resolves method calls across classes using symbol resolution
+- It detects Controllers, Services, Repositories, Entities via AST annotations
+- It detects repository operations and entity mutations via AST
+- It exposes a REST endpoint /analyze returning ApplicationGraph JSON
+
+Show pom.xml or build.gradle dependencies proving JavaParser usage.
+
+Show Java code where:
+- JavaParser is instantiated
+- SymbolSolver is configured
+- AST visitors are implemented
+
+========================================================
+2) NODE BACKEND CALLING JAVA ENGINE
+========================================================
+
+Prove that:
+
+- Node no longer parses Java
+- There is a backend-java-client.ts calling the Java engine
+- The response is transformed into ApplicationGraph nodes/edges
+
+========================================================
+3) VUE TEMPLATE AST PARSING
+========================================================
+
+Prove that:
+
+- @vue/compiler-sfc and @vue/compiler-dom are used
+- Vue templates are parsed into AST
+- Event bindings are extracted by walking AST nodes (not regex)
+
+Show the code walking Vue AST nodes.
+
+========================================================
+4) ANGULAR TEMPLATE AST PARSING
+========================================================
+
+Prove that:
+
+- @angular/compiler is used
+- Templates are parsed into AST
+- Event bindings are extracted structurally
+
+Show AST traversal code.
+
+========================================================
+5) REACT / TS — NO REGEX FALLBACK
+========================================================
+
+Prove that:
+
+- No regex is used to find functions or HTTP calls
+- Indirect call tracing is AST-only
+
+========================================================
+6) REGEX BAN VERIFICATION
+========================================================
+
+Search the entire project and list any usage of:
+
+/class\s+
+/<[\w-]+/
+/@[\w.]+/
+/function\s*\(
+
+If any exist in analyzers, explain why they are NOT used for structural parsing.
+
+========================================================
+7) APPLICATION GRAPH INTEGRITY
+========================================================
+
+Prove that:
+
+- GraphNode, GraphEdge, ApplicationGraph were NOT modified
+- The new analyzers still populate the SAME model
+
+========================================================
+FINAL RULE
+========================================================
+
+Do not summarize.
+Do not describe intentions.
+Only show code evidence.
+
+If something is missing, explicitly say NOT IMPLEMENTED.
