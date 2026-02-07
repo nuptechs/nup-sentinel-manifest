@@ -9,6 +9,8 @@ interface GraphNode {
   resolvedServiceMethods: string[];
   resolvedRepositoryMethods: string[];
   resolvedEntities: string[];
+  fullCallChain: string[];
+  persistenceOperations: string[];
   inferredOperation: string;
 }
 
@@ -53,13 +55,13 @@ function resolveServiceCallChain(
   serviceCalls: string[],
   allServiceMethods: JavaServiceMethod[]
 ): { resolvedMethods: string[]; resolvedRepos: string[]; resolvedEntities: string[] } {
-  const resolvedMethods: Set<string> = new Set();
-  const resolvedRepos: Set<string> = new Set();
-  const resolvedEntities: Set<string> = new Set();
-  const visited: Set<string> = new Set();
+  const resolvedMethods = new Set<string>();
+  const resolvedRepos = new Set<string>();
+  const resolvedEntities = new Set<string>();
+  const visited = new Set<string>();
 
   function trace(calls: string[], depth: number) {
-    if (depth > 5) return;
+    if (depth > 10) return;
 
     for (const call of calls) {
       if (visited.has(call)) continue;
@@ -90,9 +92,9 @@ function resolveServiceCallChain(
 
   trace(serviceCalls, 0);
   return {
-    resolvedMethods: [...resolvedMethods],
-    resolvedRepos: [...resolvedRepos],
-    resolvedEntities: [...resolvedEntities],
+    resolvedMethods: Array.from(resolvedMethods),
+    resolvedRepos: Array.from(resolvedRepos),
+    resolvedEntities: Array.from(resolvedEntities),
   };
 }
 
@@ -135,22 +137,27 @@ export function buildGraph(
     let resolvedServiceMethods: string[] = [];
     let resolvedRepositoryMethods: string[] = [];
     let resolvedEntities: string[] = [];
+    let fullCallChain: string[] = [];
+    let persistenceOperations: string[] = [];
 
     if (bestMatch) {
-      const allServiceCalls = [...bestMatch.serviceCalls];
+      fullCallChain = bestMatch.fullCallChain || [];
+      persistenceOperations = bestMatch.persistenceOperations || [];
+
+      const allServiceCalls = bestMatch.serviceCalls.slice();
       const resolved = resolveServiceCallChain(allServiceCalls, serviceMethods);
 
       resolvedServiceMethods = resolved.resolvedMethods;
-      resolvedRepositoryMethods = [
-        ...new Set([...bestMatch.repositoryCalls, ...resolved.resolvedRepos]),
-      ];
-      resolvedEntities = [
-        ...new Set([...bestMatch.entitiesTouched, ...resolved.resolvedEntities]),
-      ];
+      resolvedRepositoryMethods = Array.from(
+        new Set(bestMatch.repositoryCalls.concat(resolved.resolvedRepos))
+      );
+      resolvedEntities = Array.from(
+        new Set(bestMatch.entitiesTouched.concat(resolved.resolvedEntities))
+      );
     }
 
     const inferredOperation = bestMatch
-      ? inferOperationType(resolvedServiceMethods, resolvedRepositoryMethods, bestMatch.httpMethod)
+      ? inferOperationType(resolvedServiceMethods, resolvedRepositoryMethods, bestMatch.httpMethod, persistenceOperations)
       : interaction.interactionType === "navigation"
       ? "NAVIGATION"
       : inferOperationType([], [], interaction.httpMethod);
@@ -161,6 +168,8 @@ export function buildGraph(
       resolvedServiceMethods,
       resolvedRepositoryMethods,
       resolvedEntities,
+      fullCallChain,
+      persistenceOperations,
       inferredOperation,
     });
   }
@@ -186,6 +195,8 @@ export function graphToCatalogEntries(
     serviceMethods: node.resolvedServiceMethods,
     repositoryMethods: node.resolvedRepositoryMethods,
     entitiesTouched: node.resolvedEntities,
+    fullCallChain: node.fullCallChain,
+    persistenceOperations: node.persistenceOperations,
     technicalOperation: node.inferredOperation,
     criticalityScore: null,
     suggestedMeaning: null,

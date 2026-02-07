@@ -1,0 +1,83 @@
+Good. Now you must evolve the analyzer-backend.
+
+What you built so far is NOT enough.
+
+You are not building a controller scanner.
+You are building a FULL CALL GRAPH ANALYZER for a Spring Boot application.
+
+This is critical for the entire system.
+
+----------------------------------------
+NEW GOAL
+----------------------------------------
+
+Given a Spring Boot project, you must build a complete Call Graph that traces:
+
+Endpoint method
+  → service methods called
+      → other internal methods called
+          → repository/entity operations
+
+This must work even when:
+
+- methods are in different classes
+- methods are private
+- services call other services
+- repositories are wrapped
+- methods are chained
+- there are multiple layers
+
+----------------------------------------
+MANDATORY IMPLEMENTATION
+----------------------------------------
+
+Using JavaParser, you must:
+
+1) Index ALL classes and ALL methods in the project
+2) Create a map: methodSignature → MethodDeclaration
+3) When analyzing a controller method, recursively follow ALL MethodCallExpr
+4) Resolve the class where the method belongs
+5) Continue recursively until no more internal calls are found
+6) Detect when a method touches persistence by:
+   - save
+   - delete
+   - update
+   - setStatus / setState patterns
+   - repository usage
+7) Record ALL entities touched in the entire chain
+
+----------------------------------------
+OUTPUT REQUIRED
+----------------------------------------
+
+For each endpoint, produce:
+
+{
+  "endpoint": "...",
+  "controllerMethod": "...",
+  "fullCallChain": [
+      "ProcessoController.confirmar",
+      "ProcessoService.confirmarProcesso",
+      "HistoricoService.registrar",
+      "ProcessoRepository.save"
+  ],
+  "entitiesTouched": ["Processo", "HistoricoProcesso"],
+  "persistenceOperationsDetected": ["save", "state_change"]
+}
+
+This output is mandatory.
+
+----------------------------------------
+DO NOT SIMPLIFY
+----------------------------------------
+
+- Do not stop at first service call
+- Do not ignore private methods
+- Do not assume method names are unique
+- You MUST resolve method ownership by class
+
+----------------------------------------
+START BY IMPLEMENTING:
+1) Global method indexer
+2) Recursive call tracer
+3) Persistence detector

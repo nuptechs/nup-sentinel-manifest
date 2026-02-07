@@ -93,6 +93,8 @@ export const catalogEntries = pgTable("catalog_entries", {
   serviceMethods: jsonb("service_methods").$type<string[]>().default([]),
   repositoryMethods: jsonb("repository_methods").$type<string[]>().default([]),
   entitiesTouched: jsonb("entities_touched").$type<string[]>().default([]),
+  fullCallChain: jsonb("full_call_chain").$type<string[]>().default([]),
+  persistenceOperations: jsonb("persistence_operations").$type<string[]>().default([]),
   technicalOperation: text("technical_operation"),
   criticalityScore: integer("criticality_score").default(0),
   suggestedMeaning: text("suggested_meaning"),

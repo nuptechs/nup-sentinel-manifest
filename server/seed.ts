@@ -235,6 +235,49 @@ public class OrderController {
     }
 }`;
 
+const SAMPLE_NOTIFICATION_SERVICE = `package com.example.app.service;
+
+import com.example.app.model.Notification;
+import com.example.app.repository.NotificationRepository;
+import com.example.app.repository.OrderRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+@Service
+public class NotificationService {
+
+    @Autowired
+    private NotificationRepository notificationRepository;
+
+    @Autowired
+    private OrderRepository orderRepository;
+
+    public void sendOrderCancellation(Long orderId) {
+        Notification notif = createNotification(orderId, "ORDER_CANCELLED");
+        notificationRepository.save(notif);
+        logOrderEvent(orderId, "CANCELLED");
+    }
+
+    public void sendOrderApproval(Long orderId) {
+        Notification notif = createNotification(orderId, "ORDER_APPROVED");
+        notificationRepository.save(notif);
+        logOrderEvent(orderId, "APPROVED");
+    }
+
+    private Notification createNotification(Long orderId, String type) {
+        Notification notif = new Notification();
+        notif.setType(type);
+        notif.setOrderId(orderId);
+        return notif;
+    }
+
+    private void logOrderEvent(Long orderId, String event) {
+        var order = orderRepository.findById(orderId).orElseThrow();
+        order.setLastEvent(event);
+        orderRepository.save(order);
+    }
+}`;
+
 const SAMPLE_USER_SERVICE = `package com.example.app.service;
 
 import com.example.app.model.User;
@@ -395,6 +438,7 @@ export async function seedDatabase() {
     { path: "src/main/java/com/app/controller/OrderController.java", type: "java", content: SAMPLE_ORDER_CONTROLLER },
     { path: "src/main/java/com/app/service/UserService.java", type: "java", content: SAMPLE_USER_SERVICE },
     { path: "src/main/java/com/app/service/OrderService.java", type: "java", content: SAMPLE_ORDER_SERVICE },
+    { path: "src/main/java/com/app/service/NotificationService.java", type: "java", content: SAMPLE_NOTIFICATION_SERVICE },
     { path: "src/main/java/com/app/model/User.java", type: "java", content: SAMPLE_USER_ENTITY },
     { path: "src/main/java/com/app/model/Order.java", type: "java", content: SAMPLE_ORDER_ENTITY },
   ];

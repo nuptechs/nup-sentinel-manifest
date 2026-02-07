@@ -172,27 +172,50 @@ function EntryDetailDialog({
           </div>
           <Separator />
           <div>
-            <Label className="text-xs text-muted-foreground">Service Methods</Label>
-            <div className="flex flex-wrap gap-1 mt-1">
-              {(entry.serviceMethods as string[] || []).length > 0
-                ? (entry.serviceMethods as string[]).map((m, i) => (
-                    <Badge key={i} variant="secondary" className="text-xs font-mono">
-                      {m}
-                    </Badge>
+            <Label className="text-xs text-muted-foreground">Full Call Chain</Label>
+            <div className="mt-1 space-y-0.5" data-testid="text-detail-call-chain">
+              {(entry.fullCallChain as string[] || []).length > 0
+                ? (entry.fullCallChain as string[]).map((step, i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-xs font-mono">
+                      <span className="text-muted-foreground select-none">{i === 0 ? "" : "\u2514\u2500"}</span>
+                      <span className={
+                        step.includes("Repository") || step.includes("Repo")
+                          ? "text-amber-600 dark:text-amber-400"
+                          : step.includes("Controller")
+                          ? "text-blue-600 dark:text-blue-400"
+                          : "text-foreground"
+                      }>
+                        {step}
+                      </span>
+                    </div>
                   ))
-                : <span className="text-xs text-muted-foreground">None detected</span>}
+                : <span className="text-xs text-muted-foreground">No call chain traced</span>}
             </div>
           </div>
-          <div>
-            <Label className="text-xs text-muted-foreground">Entities Touched</Label>
-            <div className="flex flex-wrap gap-1 mt-1">
-              {(entry.entitiesTouched as string[] || []).length > 0
-                ? (entry.entitiesTouched as string[]).map((e, i) => (
-                    <Badge key={i} variant="outline" className="text-xs font-mono">
-                      {e}
-                    </Badge>
-                  ))
-                : <span className="text-xs text-muted-foreground">None detected</span>}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label className="text-xs text-muted-foreground">Persistence Operations</Label>
+              <div className="flex flex-wrap gap-1 mt-1" data-testid="text-detail-persistence-ops">
+                {(entry.persistenceOperations as string[] || []).length > 0
+                  ? (entry.persistenceOperations as string[]).map((op, i) => (
+                      <Badge key={i} variant="secondary" className="text-xs font-mono">
+                        {op}
+                      </Badge>
+                    ))
+                  : <span className="text-xs text-muted-foreground">None</span>}
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">Entities Touched</Label>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {(entry.entitiesTouched as string[] || []).length > 0
+                  ? (entry.entitiesTouched as string[]).map((e, i) => (
+                      <Badge key={i} variant="outline" className="text-xs font-mono">
+                        {e}
+                      </Badge>
+                    ))
+                  : <span className="text-xs text-muted-foreground">None detected</span>}
+              </div>
             </div>
           </div>
           <Separator />

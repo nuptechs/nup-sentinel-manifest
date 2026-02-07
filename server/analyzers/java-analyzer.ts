@@ -7,6 +7,8 @@ export interface JavaEndpoint {
   serviceCalls: string[];
   repositoryCalls: string[];
   entitiesTouched: string[];
+  fullCallChain: string[];
+  persistenceOperations: string[];
   sourceFile: string;
   lineNumber: number;
 }
@@ -27,40 +29,78 @@ export interface JavaEntity {
   sourceFile: string;
 }
 
-const CONTROLLER_ANNOTATION = /@(?:Rest)?Controller/;
-const REQUEST_MAPPING_CLASS = /@RequestMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/;
-const REQUEST_MAPPING_CLASS_BARE = /@RequestMapping\s*(?:\(\s*\))?$/;
-const METHOD_MAPPINGS = [
-  { regex: /@GetMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/, method: "GET" },
-  { regex: /@PostMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/, method: "POST" },
-  { regex: /@PutMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/, method: "PUT" },
-  { regex: /@DeleteMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/, method: "DELETE" },
-  { regex: /@PatchMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/, method: "PATCH" },
-  { regex: /@GetMapping\s*(?:\(\s*\))?$/, method: "GET" },
-  { regex: /@PostMapping\s*(?:\(\s*\))?$/, method: "POST" },
-  { regex: /@PutMapping\s*(?:\(\s*\))?$/, method: "PUT" },
-  { regex: /@DeleteMapping\s*(?:\(\s*\))?$/, method: "DELETE" },
-  { regex: /@PatchMapping\s*(?:\(\s*\))?$/, method: "PATCH" },
-];
+interface ClassIndex {
+  className: string;
+  packageName: string;
+  annotations: string[];
+  injectedFields: Map<string, string>;
+  methods: MethodIndex[];
+  sourceFile: string;
+  isController: boolean;
+  isService: boolean;
+  isRepository: boolean;
+  isEntity: boolean;
+  basePath: string;
+  tableName: string;
+  entityFields: string[];
+  extendsClass: string | null;
+}
 
-const REQUEST_MAPPING_METHOD = /@RequestMapping\s*\([^)]*method\s*=\s*RequestMethod\.(GET|POST|PUT|DELETE|PATCH)[^)]*value\s*=\s*["']([^"']+)["']/;
-const REQUEST_MAPPING_METHOD_ALT = /@RequestMapping\s*\([^)]*value\s*=\s*["']([^"']+)["'][^)]*method\s*=\s*RequestMethod\.(GET|POST|PUT|DELETE|PATCH)/;
+interface MethodIndex {
+  className: string;
+  methodName: string;
+  visibility: string;
+  returnType: string;
+  params: string;
+  body: string;
+  lineNumber: number;
+  httpMapping: { method: string; path: string } | null;
+  methodCalls: MethodCallRef[];
+}
 
-const ENTITY_ANNOTATION = /@Entity/;
-const TABLE_ANNOTATION = /@Table\s*\(\s*name\s*=\s*["']([^"']+)["']/;
-const SERVICE_ANNOTATION = /@Service/;
-const REPOSITORY_ANNOTATION = /@Repository|extends\s+(?:JpaRepository|CrudRepository|PagingAndSortingRepository)/;
+interface MethodCallRef {
+  targetVariable: string;
+  methodName: string;
+  raw: string;
+}
 
-const REPO_METHOD_CALLS = /(\w+Repository|\w+Repo)\s*\.\s*(\w+)/g;
-const SERVICE_METHOD_CALLS = /(\w+Service)\s*\.\s*(\w+)/g;
+interface CallChainResult {
+  fullCallChain: string[];
+  entitiesTouched: string[];
+  persistenceOperations: string[];
+  repositoryCalls: string[];
+  serviceMethods: string[];
+}
 
-const SAVE_METHODS = ["save", "saveAll", "saveAndFlush", "persist", "merge", "saveAllAndFlush"];
-const DELETE_METHODS = ["delete", "deleteById", "deleteAll", "deleteAllById", "deleteAllInBatch", "remove"];
-const READ_METHODS = ["findById", "findAll", "findOne", "getById", "getOne", "existsById", "count", "findAllById", "getReferenceById"];
+const PERSISTENCE_SAVE = ["save", "saveAll", "saveAndFlush", "persist", "merge", "saveAllAndFlush", "insert", "create"];
+const PERSISTENCE_DELETE = ["delete", "deleteById", "deleteAll", "deleteAllById", "deleteAllInBatch", "remove", "deleteByOrderId", "deleteByUserId", "removeAll"];
+const PERSISTENCE_READ = ["findById", "findAll", "findOne", "getById", "getOne", "existsById", "count", "findAllById", "getReferenceById", "findByStatus", "findByName", "findByEmail", "existsByEmail"];
+const PERSISTENCE_UPDATE = ["update", "updateAll", "flush"];
+const STATE_CHANGE_PATTERNS = /\.set\w+\s*\(/;
+
+function extractPackageName(content: string): string {
+  const match = content.match(/package\s+([\w.]+)\s*;/);
+  return match ? match[1] : "";
+}
 
 function getClassName(content: string): string {
   const match = content.match(/(?:public\s+)?(?:abstract\s+)?class\s+(\w+)/);
   return match ? match[1] : "Unknown";
+}
+
+function getExtendsClass(content: string): string | null {
+  const match = content.match(/class\s+\w+\s+extends\s+(\w+)/);
+  return match ? match[1] : null;
+}
+
+function extractAnnotations(content: string): string[] {
+  const annotations: string[] = [];
+  const regex = /@(\w+)/g;
+  let match;
+  while ((match = regex.exec(content)) !== null) {
+    annotations.push(match[1]);
+  }
+  return Array.from(new Set(annotations));
 }
 
 function getLineNumber(content: string, index: number): number {
@@ -86,25 +126,15 @@ function extractMethodBody(content: string, startIndex: number): string {
       }
     }
   }
-  return content.substring(bodyStart, Math.min(bodyStart + 500, content.length));
+  return content.substring(bodyStart, Math.min(bodyStart + 2000, content.length));
 }
 
-function extractFields(content: string): string[] {
-  const fields: string[] = [];
-  const fieldRegex = /(?:@Column|@Id|@JoinColumn|private|protected)\s+(?:\w+(?:<[^>]+>)?)\s+(\w+)\s*[;=]/g;
-  let match;
-  while ((match = fieldRegex.exec(content)) !== null) {
-    fields.push(match[1]);
-  }
-  return fields;
-}
-
-function findInjectedServices(content: string): Map<string, string> {
-  const services = new Map<string, string>();
+function extractInjectedFields(content: string, className: string): Map<string, string> {
+  const fields = new Map<string, string>();
 
   const fieldPatterns = [
-    /@Autowired\s+(?:private\s+)?(\w+)\s+(\w+)/g,
-    /private\s+(?:final\s+)?(\w+)\s+(\w+)/g,
+    /@Autowired\s+(?:private\s+)?(?:final\s+)?(\w+)\s+(\w+)/g,
+    /private\s+(?:final\s+)?(\w+)\s+(\w+)\s*;/g,
     /(?:@Inject|@Resource)\s+(?:private\s+)?(\w+)\s+(\w+)/g,
   ];
 
@@ -114,13 +144,20 @@ function findInjectedServices(content: string): Map<string, string> {
     while ((match = re.exec(content)) !== null) {
       const typeName = match[1];
       const fieldName = match[2];
-      if (typeName.endsWith("Service") || typeName.endsWith("Repository") || typeName.endsWith("Repo")) {
-        services.set(fieldName, typeName);
+      if (
+        typeName.endsWith("Service") ||
+        typeName.endsWith("Repository") ||
+        typeName.endsWith("Repo") ||
+        typeName.endsWith("Dao") ||
+        typeName.endsWith("Helper") ||
+        typeName.endsWith("Manager") ||
+        typeName.endsWith("Client")
+      ) {
+        fields.set(fieldName, typeName);
       }
     }
   }
 
-  const className = getClassName(content);
   const constructorRegex = new RegExp(
     `(?:public\\s+)?${className}\\s*\\(([^)]*)\\)`,
     "g"
@@ -133,199 +170,409 @@ function findInjectedServices(content: string): Map<string, string> {
     while ((paramMatch = paramRegex.exec(params)) !== null) {
       const typeName = paramMatch[1];
       const fieldName = paramMatch[2];
-      if (typeName.endsWith("Service") || typeName.endsWith("Repository") || typeName.endsWith("Repo")) {
-        services.set(fieldName, typeName);
+      if (
+        typeName.endsWith("Service") ||
+        typeName.endsWith("Repository") ||
+        typeName.endsWith("Repo") ||
+        typeName.endsWith("Dao") ||
+        typeName.endsWith("Helper") ||
+        typeName.endsWith("Manager") ||
+        typeName.endsWith("Client")
+      ) {
+        fields.set(fieldName, typeName);
       }
     }
   }
 
-  return services;
+  return fields;
 }
 
-export function analyzeJavaController(
-  filePath: string,
-  content: string
-): JavaEndpoint[] {
-  if (!CONTROLLER_ANNOTATION.test(content)) return [];
-
-  const endpoints: JavaEndpoint[] = [];
-  const className = getClassName(content);
-  const injectedServices = findInjectedServices(content);
-
-  let basePath = "";
-  const basePathMatch = content.match(REQUEST_MAPPING_CLASS);
-  if (basePathMatch) {
-    basePath = basePathMatch[1];
+function extractEntityFields(content: string): string[] {
+  const fields: string[] = [];
+  const fieldRegex = /(?:@Column|@Id|@JoinColumn|private|protected)\s+(?:\w+(?:<[^>]+>)?)\s+(\w+)\s*[;=]/g;
+  let match;
+  while ((match = fieldRegex.exec(content)) !== null) {
+    fields.push(match[1]);
   }
-
-  const lines = content.split("\n");
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    for (const mapping of METHOD_MAPPINGS) {
-      const match = line.match(mapping.regex);
-      if (match) {
-        const methodPath = match[1] || "";
-        const fullPath = `${basePath}${methodPath}`.replace(/\/+/g, "/");
-
-        const methodLineIndex = content.indexOf(line);
-        const methodBody = extractMethodBody(content, methodLineIndex);
-
-        const serviceCalls: string[] = [];
-        const repositoryCalls: string[] = [];
-        const entitiesTouched: string[] = [];
-
-        const serviceCallRegex = new RegExp(SERVICE_METHOD_CALLS.source, SERVICE_METHOD_CALLS.flags);
-        let scMatch;
-        while ((scMatch = serviceCallRegex.exec(methodBody)) !== null) {
-          serviceCalls.push(`${scMatch[1]}.${scMatch[2]}`);
-        }
-
-        const repoCallRegex = new RegExp(REPO_METHOD_CALLS.source, REPO_METHOD_CALLS.flags);
-        let rcMatch;
-        while ((rcMatch = repoCallRegex.exec(methodBody)) !== null) {
-          repositoryCalls.push(`${rcMatch[1]}.${rcMatch[2]}`);
-          const entityName = rcMatch[1].replace(/Repository|Repo$/, "");
-          if (entityName && !entitiesTouched.includes(entityName)) {
-            entitiesTouched.push(entityName);
-          }
-        }
-
-        let methodName = "unknown";
-        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-          const methodMatch = lines[j].match(/(?:public|private|protected)\s+\w+(?:<[^>]+>)?\s+(\w+)\s*\(/);
-          if (methodMatch) {
-            methodName = methodMatch[1];
-            break;
-          }
-        }
-
-        endpoints.push({
-          className,
-          methodName,
-          httpMethod: mapping.method,
-          path: methodPath,
-          fullPath: fullPath || basePath || "/",
-          serviceCalls: [...new Set(serviceCalls)],
-          repositoryCalls: [...new Set(repositoryCalls)],
-          entitiesTouched: [...new Set(entitiesTouched)],
-          sourceFile: filePath,
-          lineNumber: i + 1,
-        });
-      }
-    }
-
-    const rmMatch = line.match(REQUEST_MAPPING_METHOD) || line.match(REQUEST_MAPPING_METHOD_ALT);
-    if (rmMatch) {
-      const httpMethod = rmMatch[1] === rmMatch[1].toUpperCase() ? rmMatch[1] : rmMatch[2];
-      const path = rmMatch[1] === rmMatch[1].toUpperCase() ? rmMatch[2] : rmMatch[1];
-      const fullPath = `${basePath}${path}`.replace(/\/+/g, "/");
-
-      endpoints.push({
-        className,
-        methodName: "unknown",
-        httpMethod,
-        path,
-        fullPath,
-        serviceCalls: [],
-        repositoryCalls: [],
-        entitiesTouched: [],
-        sourceFile: filePath,
-        lineNumber: i + 1,
-      });
-    }
-  }
-
-  return endpoints;
+  return fields;
 }
 
-export function analyzeJavaService(
-  filePath: string,
-  content: string
-): JavaServiceMethod[] {
-  if (!SERVICE_ANNOTATION.test(content)) return [];
+function extractMethodCalls(methodBody: string): MethodCallRef[] {
+  const calls: MethodCallRef[] = [];
+  const callRegex = /(\w+)\s*\.\s*(\w+)\s*\(/g;
+  let match;
+  while ((match = callRegex.exec(methodBody)) !== null) {
+    const target = match[1];
+    const method = match[2];
+    if (
+      !["System", "String", "Integer", "Long", "Double", "Boolean", "Math",
+        "Arrays", "Collections", "List", "Map", "Set", "Optional", "Stream",
+        "log", "logger", "LOG", "LOGGER", "ResponseEntity", "Objects"].includes(target) &&
+      !target.startsWith("\"") &&
+      target !== "this"
+    ) {
+      calls.push({ targetVariable: target, methodName: method, raw: `${target}.${method}` });
+    }
+  }
 
-  const className = getClassName(content);
-  const methods: JavaServiceMethod[] = [];
-  const injectedDeps = findInjectedServices(content);
+  const thisCallRegex = /(?:this\s*\.\s*)?(\w+)\s*\(/g;
+  while ((match = thisCallRegex.exec(methodBody)) !== null) {
+    const methodName = match[1];
+    if (
+      !["if", "for", "while", "switch", "catch", "return", "throw", "new", "super",
+        "get", "set", "put", "add", "remove", "contains", "size", "isEmpty",
+        "toString", "valueOf", "equals", "hashCode", "println", "print", "format",
+        "ok", "build", "orElseThrow", "orElse", "map", "filter", "stream",
+        "collect", "of", "asList", "emptyList", "singletonList"].includes(methodName) &&
+      /^[a-z]/.test(methodName) &&
+      methodName.length > 2
+    ) {
+      calls.push({ targetVariable: "this", methodName, raw: `this.${methodName}` });
+    }
+  }
 
-  const methodRegex = /(?:public|private|protected)\s+\w+(?:<[^>]+>)?\s+(\w+)\s*\([^)]*\)/g;
-  let methodMatch;
+  return calls;
+}
 
-  while ((methodMatch = methodRegex.exec(content)) !== null) {
-    const methodName = methodMatch[1];
-    const methodBody = extractMethodBody(content, methodMatch.index);
+function extractMethods(content: string, className: string): MethodIndex[] {
+  const methods: MethodIndex[] = [];
 
-    const repositoryCalls: string[] = [];
-    const entitiesTouched: string[] = [];
-    const nestedServiceCalls: string[] = [];
+  const methodRegex = /((?:@\w+(?:\([^)]*\))?[\s\n]*)*)(public|private|protected)\s+(?:static\s+)?(\w+(?:<[^>]+>)?)\s+(\w+)\s*\(([^)]*)\)/g;
+  let match;
 
-    const repoCallRegex = new RegExp(REPO_METHOD_CALLS.source, REPO_METHOD_CALLS.flags);
-    let rcMatch;
-    while ((rcMatch = repoCallRegex.exec(methodBody)) !== null) {
-      repositoryCalls.push(`${rcMatch[1]}.${rcMatch[2]}`);
-      const entityName = rcMatch[1].replace(/Repository|Repo$/, "");
-      if (entityName && !entitiesTouched.includes(entityName)) {
-        entitiesTouched.push(entityName);
+  while ((match = methodRegex.exec(content)) !== null) {
+    const annotations = match[1] || "";
+    const visibility = match[2];
+    const returnType = match[3];
+    const methodName = match[4];
+    const params = match[5];
+
+    if (methodName === className) continue;
+
+    const body = extractMethodBody(content, match.index + match[0].length);
+    const lineNumber = getLineNumber(content, match.index);
+    const methodCalls = extractMethodCalls(body);
+
+    let httpMapping: { method: string; path: string } | null = null;
+
+    const mappings: { pattern: RegExp; method: string }[] = [
+      { pattern: /@GetMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']\s*\)/, method: "GET" },
+      { pattern: /@PostMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']\s*\)/, method: "POST" },
+      { pattern: /@PutMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']\s*\)/, method: "PUT" },
+      { pattern: /@DeleteMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']\s*\)/, method: "DELETE" },
+      { pattern: /@PatchMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']\s*\)/, method: "PATCH" },
+      { pattern: /@GetMapping\s*(?:\(\s*\))?/, method: "GET" },
+      { pattern: /@PostMapping\s*(?:\(\s*\))?/, method: "POST" },
+      { pattern: /@PutMapping\s*(?:\(\s*\))?/, method: "PUT" },
+      { pattern: /@DeleteMapping\s*(?:\(\s*\))?/, method: "DELETE" },
+      { pattern: /@PatchMapping\s*(?:\(\s*\))?/, method: "PATCH" },
+    ];
+
+    for (const m of mappings) {
+      const annotMatch = annotations.match(m.pattern);
+      if (annotMatch) {
+        httpMapping = { method: m.method, path: annotMatch[1] || "" };
+        break;
       }
     }
 
-    const serviceCallRegex = new RegExp(SERVICE_METHOD_CALLS.source, SERVICE_METHOD_CALLS.flags);
-    let scMatch;
-    while ((scMatch = serviceCallRegex.exec(methodBody)) !== null) {
-      const calledService = scMatch[1];
-      if (calledService !== className) {
-        nestedServiceCalls.push(`${calledService}.${scMatch[2]}`);
+    if (!httpMapping) {
+      const rmMatch = annotations.match(
+        /@RequestMapping\s*\([^)]*method\s*=\s*RequestMethod\.(GET|POST|PUT|DELETE|PATCH)[^)]*value\s*=\s*["']([^"']+)["']/
+      );
+      const rmMatchAlt = annotations.match(
+        /@RequestMapping\s*\([^)]*value\s*=\s*["']([^"']+)["'][^)]*method\s*=\s*RequestMethod\.(GET|POST|PUT|DELETE|PATCH)/
+      );
+      if (rmMatch) {
+        httpMapping = { method: rmMatch[1], path: rmMatch[2] };
+      } else if (rmMatchAlt) {
+        httpMapping = { method: rmMatchAlt[2], path: rmMatchAlt[1] };
       }
     }
 
-    if (repositoryCalls.length > 0 || nestedServiceCalls.length > 0) {
-      methods.push({
-        className,
-        methodName,
-        repositoryCalls: [...new Set(repositoryCalls)],
-        entitiesTouched: [...new Set(entitiesTouched)],
-        nestedServiceCalls: [...new Set(nestedServiceCalls)],
-        sourceFile: filePath,
-      });
-    }
+    methods.push({
+      className,
+      methodName,
+      visibility,
+      returnType,
+      params,
+      body,
+      lineNumber,
+      httpMapping,
+      methodCalls,
+    });
   }
 
   return methods;
 }
 
-export function analyzeJavaEntity(
-  filePath: string,
-  content: string
-): JavaEntity | null {
-  if (!ENTITY_ANNOTATION.test(content)) return null;
-
+function buildClassIndex(filePath: string, content: string): ClassIndex | null {
   const className = getClassName(content);
-  const tableMatch = content.match(TABLE_ANNOTATION);
-  const tableName = tableMatch ? tableMatch[1] : className.toLowerCase();
-  const fields = extractFields(content);
+  if (className === "Unknown") return null;
+
+  const packageName = extractPackageName(content);
+  const annotations = extractAnnotations(content);
+  const injectedFields = extractInjectedFields(content, className);
+  const methods = extractMethods(content, className);
+  const extendsClass = getExtendsClass(content);
+
+  const isController = annotations.includes("RestController") || annotations.includes("Controller");
+  const isService = annotations.includes("Service") || annotations.includes("Component");
+  const isRepository = annotations.includes("Repository") ||
+    /extends\s+(?:JpaRepository|CrudRepository|PagingAndSortingRepository|MongoRepository)/.test(content);
+  const isEntity = annotations.includes("Entity");
+
+  let basePath = "";
+  const basePathMatch = content.match(/@RequestMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/);
+  if (basePathMatch) basePath = basePathMatch[1];
+
+  let tableName = "";
+  let entityFields: string[] = [];
+  if (isEntity) {
+    const tableMatch = content.match(/@Table\s*\(\s*name\s*=\s*["']([^"']+)["']/);
+    tableName = tableMatch ? tableMatch[1] : className.toLowerCase();
+    entityFields = extractEntityFields(content);
+  }
 
   return {
     className,
-    tableName,
-    fields,
+    packageName,
+    annotations,
+    injectedFields,
+    methods,
     sourceFile: filePath,
+    isController,
+    isService,
+    isRepository,
+    isEntity,
+    basePath,
+    tableName,
+    entityFields,
+    extendsClass,
+  };
+}
+
+function detectPersistenceOp(methodName: string): string | null {
+  if (PERSISTENCE_SAVE.some((s) => methodName.toLowerCase() === s.toLowerCase() || methodName.toLowerCase().startsWith(s.toLowerCase()))) {
+    return "save";
+  }
+  if (PERSISTENCE_DELETE.some((d) => methodName.toLowerCase() === d.toLowerCase() || methodName.toLowerCase().startsWith(d.toLowerCase()))) {
+    return "delete";
+  }
+  if (PERSISTENCE_UPDATE.some((u) => methodName.toLowerCase() === u.toLowerCase() || methodName.toLowerCase().startsWith(u.toLowerCase()))) {
+    return "update";
+  }
+  return null;
+}
+
+function detectStateChange(methodBody: string): boolean {
+  return STATE_CHANGE_PATTERNS.test(methodBody);
+}
+
+function resolveMethodTarget(
+  call: MethodCallRef,
+  currentClass: ClassIndex,
+  classMap: Map<string, ClassIndex>
+): ClassIndex | null {
+  if (call.targetVariable === "this") {
+    return currentClass;
+  }
+
+  const fieldType = currentClass.injectedFields.get(call.targetVariable);
+  if (fieldType) {
+    return classMap.get(fieldType) || null;
+  }
+
+  const allClasses = Array.from(classMap.values());
+  for (const cls of allClasses) {
+    if (cls.className === call.targetVariable) {
+      return cls;
+    }
+  }
+
+  return null;
+}
+
+function traceCallGraph(
+  startClass: ClassIndex,
+  startMethod: MethodIndex,
+  classMap: Map<string, ClassIndex>,
+  maxDepth: number = 15
+): CallChainResult {
+  const fullCallChain: string[] = [];
+  const entitiesTouched = new Set<string>();
+  const persistenceOperations = new Set<string>();
+  const repositoryCalls: string[] = [];
+  const serviceMethods: string[] = [];
+  const visited = new Set<string>();
+
+  function trace(cls: ClassIndex, method: MethodIndex, depth: number) {
+    if (depth > maxDepth) return;
+
+    const signature = `${cls.className}.${method.methodName}`;
+    if (visited.has(signature)) return;
+    visited.add(signature);
+
+    fullCallChain.push(signature);
+
+    if (detectStateChange(method.body)) {
+      persistenceOperations.add("state_change");
+    }
+
+    for (const call of method.methodCalls) {
+      const targetClass = resolveMethodTarget(call, cls, classMap);
+
+      if (targetClass && targetClass.isRepository) {
+        const repoCall = `${targetClass.className}.${call.methodName}`;
+        repositoryCalls.push(repoCall);
+        fullCallChain.push(repoCall);
+
+        const entityName = targetClass.className
+          .replace(/Repository$/, "")
+          .replace(/Repo$/, "");
+        if (entityName) entitiesTouched.add(entityName);
+
+        if (targetClass.extendsClass) {
+          const repoEntityMatch = targetClass.extendsClass.match(
+            /(?:JpaRepository|CrudRepository|PagingAndSortingRepository)<(\w+)/
+          );
+        }
+
+        const op = detectPersistenceOp(call.methodName);
+        if (op) persistenceOperations.add(op);
+
+      } else if (targetClass) {
+        if (targetClass.isService || targetClass.className !== cls.className) {
+          serviceMethods.push(`${targetClass.className}.${call.methodName}`);
+        }
+
+        const targetMethod = targetClass.methods.find(
+          (m) => m.methodName === call.methodName
+        );
+        if (targetMethod) {
+          trace(targetClass, targetMethod, depth + 1);
+        }
+      } else if (call.targetVariable === "this") {
+        const sameClassMethod = cls.methods.find(
+          (m) => m.methodName === call.methodName
+        );
+        if (sameClassMethod) {
+          trace(cls, sameClassMethod, depth + 1);
+        }
+      } else {
+        const varType = cls.injectedFields.get(call.targetVariable);
+        if (varType && (varType.endsWith("Repository") || varType.endsWith("Repo"))) {
+          const repoCall = `${varType}.${call.methodName}`;
+          repositoryCalls.push(repoCall);
+          fullCallChain.push(repoCall);
+
+          const entityName = varType
+            .replace(/Repository$/, "")
+            .replace(/Repo$/, "");
+          if (entityName) entitiesTouched.add(entityName);
+
+          const op = detectPersistenceOp(call.methodName);
+          if (op) persistenceOperations.add(op);
+        }
+      }
+    }
+  }
+
+  trace(startClass, startMethod, 0);
+
+  return {
+    fullCallChain,
+    entitiesTouched: Array.from(entitiesTouched),
+    persistenceOperations: Array.from(persistenceOperations),
+    repositoryCalls: Array.from(new Set(repositoryCalls)),
+    serviceMethods: Array.from(new Set(serviceMethods)),
   };
 }
 
 export function analyzeJavaFiles(files: { filePath: string; content: string }[]) {
+  const javaFiles = files.filter((f) => f.filePath.endsWith(".java"));
+
+  const classMap = new Map<string, ClassIndex>();
+  const allClasses: ClassIndex[] = [];
+
+  for (const file of javaFiles) {
+    const cls = buildClassIndex(file.filePath, file.content);
+    if (cls) {
+      classMap.set(cls.className, cls);
+      allClasses.push(cls);
+    }
+  }
+
   const endpoints: JavaEndpoint[] = [];
   const serviceMethods: JavaServiceMethod[] = [];
   const entities: JavaEntity[] = [];
 
-  const javaFiles = files.filter((f) => f.filePath.endsWith(".java"));
+  for (const cls of allClasses) {
+    if (cls.isEntity) {
+      entities.push({
+        className: cls.className,
+        tableName: cls.tableName,
+        fields: cls.entityFields,
+        sourceFile: cls.sourceFile,
+      });
+    }
 
-  for (const file of javaFiles) {
-    endpoints.push(...analyzeJavaController(file.filePath, file.content));
-    serviceMethods.push(...analyzeJavaService(file.filePath, file.content));
-    const entity = analyzeJavaEntity(file.filePath, file.content);
-    if (entity) entities.push(entity);
+    if (cls.isService) {
+      for (const method of cls.methods) {
+        const repoCalls: string[] = [];
+        const entityNames: string[] = [];
+        const nestedCalls: string[] = [];
+
+        for (const call of method.methodCalls) {
+          const fieldType = cls.injectedFields.get(call.targetVariable);
+          if (fieldType) {
+            if (fieldType.endsWith("Repository") || fieldType.endsWith("Repo")) {
+              repoCalls.push(`${fieldType}.${call.methodName}`);
+              const entityName = fieldType.replace(/Repository$/, "").replace(/Repo$/, "");
+              if (entityName && !entityNames.includes(entityName)) entityNames.push(entityName);
+            } else if (fieldType.endsWith("Service")) {
+              nestedCalls.push(`${fieldType}.${call.methodName}`);
+            }
+          }
+        }
+
+        if (repoCalls.length > 0 || nestedCalls.length > 0) {
+          serviceMethods.push({
+            className: cls.className,
+            methodName: method.methodName,
+            repositoryCalls: Array.from(new Set(repoCalls)),
+            entitiesTouched: Array.from(new Set(entityNames)),
+            nestedServiceCalls: Array.from(new Set(nestedCalls)),
+            sourceFile: cls.sourceFile,
+          });
+        }
+      }
+    }
+
+    if (cls.isController) {
+      for (const method of cls.methods) {
+        if (!method.httpMapping) continue;
+
+        const fullPath = `${cls.basePath}${method.httpMapping.path}`.replace(/\/+/g, "/") || cls.basePath || "/";
+
+        const result = traceCallGraph(cls, method, classMap);
+
+        endpoints.push({
+          className: cls.className,
+          methodName: method.methodName,
+          httpMethod: method.httpMapping.method,
+          path: method.httpMapping.path,
+          fullPath,
+          serviceCalls: result.serviceMethods,
+          repositoryCalls: result.repositoryCalls,
+          entitiesTouched: result.entitiesTouched,
+          fullCallChain: result.fullCallChain,
+          persistenceOperations: result.persistenceOperations,
+          sourceFile: cls.sourceFile,
+          lineNumber: method.lineNumber,
+        });
+      }
+    }
   }
 
   return { endpoints, serviceMethods, entities };
@@ -334,29 +581,36 @@ export function analyzeJavaFiles(files: { filePath: string; content: string }[])
 export function inferOperationType(
   serviceCalls: string[],
   repositoryCalls: string[],
-  httpMethod: string | null
+  httpMethod: string | null,
+  persistenceOps?: string[]
 ): string {
-  for (const call of repositoryCalls) {
-    const methodName = call.split(".").pop() || "";
-    if (DELETE_METHODS.some((d) => methodName.toLowerCase().includes(d.toLowerCase()))) {
-      return "DELETE";
-    }
-    if (SAVE_METHODS.some((s) => methodName.toLowerCase().includes(s.toLowerCase()))) {
+  if (persistenceOps && persistenceOps.length > 0) {
+    if (persistenceOps.includes("delete")) return "DELETE";
+    if (persistenceOps.includes("state_change")) return "STATE_CHANGE";
+    if (persistenceOps.includes("save") || persistenceOps.includes("update")) {
       if (httpMethod === "PUT" || httpMethod === "PATCH") return "STATE_CHANGE";
       return "WRITE";
     }
-    if (READ_METHODS.some((r) => methodName.toLowerCase().includes(r.toLowerCase()))) {
+  }
+
+  for (const call of repositoryCalls) {
+    const methodName = call.split(".").pop() || "";
+    if (PERSISTENCE_DELETE.some((d) => methodName.toLowerCase().includes(d.toLowerCase()))) {
+      return "DELETE";
+    }
+    if (PERSISTENCE_SAVE.some((s) => methodName.toLowerCase().includes(s.toLowerCase()))) {
+      if (httpMethod === "PUT" || httpMethod === "PATCH") return "STATE_CHANGE";
+      return "WRITE";
+    }
+    if (PERSISTENCE_READ.some((r) => methodName.toLowerCase().includes(r.toLowerCase()))) {
       return "READ";
     }
   }
 
   if (httpMethod) {
     const methodMap: Record<string, string> = {
-      GET: "READ",
-      POST: "WRITE",
-      PUT: "STATE_CHANGE",
-      PATCH: "STATE_CHANGE",
-      DELETE: "DELETE",
+      GET: "READ", POST: "WRITE", PUT: "STATE_CHANGE",
+      PATCH: "STATE_CHANGE", DELETE: "DELETE",
     };
     return methodMap[httpMethod] || "READ";
   }
