@@ -1,11 +1,22 @@
-import { ApplicationGraph, GraphNode, GraphEdge, analyzeEndpoints } from "./application-graph";
-import type { NodeType, EdgeRelation, EndpointImpact } from "./application-graph";
+import {
+  ApplicationGraph,
+  GraphNode,
+  GraphEdge,
+  analyzeEndpoints,
+} from "./application-graph";
+import type {
+  NodeType,
+  EdgeRelation,
+  EndpointImpact,
+} from "./application-graph";
 import { spawn, type ChildProcess } from "child_process";
 import path from "path";
 
 const JAVA_ENGINE_PORT = 9876;
 const JAVA_ENGINE_URL = `http://127.0.0.1:${JAVA_ENGINE_PORT}`;
-const JAR_PATH = path.resolve("java-analyzer-engine/target/java-analyzer-engine-1.0.0.jar");
+const JAR_PATH = path.resolve(
+  "java-analyzer-engine/target/java-analyzer-engine-1.0.0.jar",
+);
 
 let javaProcess: ChildProcess | null = null;
 let engineReady = false;
@@ -19,8 +30,7 @@ async function waitForEngine(maxWaitMs = 15000): Promise<void> {
         engineReady = true;
         return;
       }
-    } catch {
-    }
+    } catch {}
     await new Promise((r) => setTimeout(r, 300));
   }
   throw new Error("Java analyzer engine failed to start within timeout");
@@ -37,7 +47,9 @@ async function ensureEngineRunning(): Promise<void> {
   }
 
   if (javaProcess) {
-    try { javaProcess.kill(); } catch {}
+    try {
+      javaProcess.kill();
+    } catch {}
     javaProcess = null;
   }
 
@@ -72,7 +84,7 @@ interface JavaEngineResult {
     id: string;
     type: string;
     className: string;
-    methodName: string;
+    methodName: string | null;
     qualifiedSignature: string | null;
     metadata: Record<string, unknown>;
   }>;
@@ -84,7 +96,9 @@ interface JavaEngineResult {
   }>;
 }
 
-async function callJavaEngine(javaFiles: Record<string, string>): Promise<JavaEngineResult> {
+async function callJavaEngine(
+  javaFiles: Record<string, string>,
+): Promise<JavaEngineResult> {
   await ensureEngineRunning();
 
   const res = await fetch(`${JAVA_ENGINE_URL}/analyze`, {
@@ -111,7 +125,7 @@ function reconstructGraph(result: JavaEngineResult): ApplicationGraph {
       n.className,
       n.methodName || null,
       n.qualifiedSignature || null,
-      n.metadata || {}
+      n.metadata || {},
     );
     graph.addNode(node);
   }
@@ -121,7 +135,7 @@ function reconstructGraph(result: JavaEngineResult): ApplicationGraph {
       e.fromNode,
       e.toNode,
       e.relationType as EdgeRelation,
-      e.metadata || {}
+      e.metadata || {},
     );
     graph.addEdge(edge);
   }
@@ -129,27 +143,15 @@ function reconstructGraph(result: JavaEngineResult): ApplicationGraph {
   return graph;
 }
 
-export function buildApplicationGraph(
-  files: { filePath: string; content: string }[]
-): ApplicationGraph {
-  const javaFiles: Record<string, string> = {};
-  for (const f of files) {
-    if (f.filePath.endsWith(".java")) {
-      javaFiles[f.filePath] = f.content;
-    }
-  }
-
-  if (Object.keys(javaFiles).length === 0) {
-    return new ApplicationGraph();
-  }
-
-  throw new Error("USE_ASYNC_BUILD_GRAPH");
-}
-
-export async function buildApplicationGraphAsync(
-  files: { filePath: string; content: string }[]
+/**
+ * 🔥 ÚNICA função pública para construir o grafo
+ * Todo o sistema obrigatoriamente passa pelo Java Engine
+ */
+export async function buildApplicationGraph(
+  files: { filePath: string; content: string }[],
 ): Promise<ApplicationGraph> {
   const javaFiles: Record<string, string> = {};
+
   for (const f of files) {
     if (f.filePath.endsWith(".java")) {
       javaFiles[f.filePath] = f.content;
@@ -164,13 +166,17 @@ export async function buildApplicationGraphAsync(
   return reconstructGraph(result);
 }
 
-export function analyzeGraphEndpoints(graph: ApplicationGraph): EndpointImpact[] {
+export function analyzeGraphEndpoints(
+  graph: ApplicationGraph,
+): EndpointImpact[] {
   return analyzeEndpoints(graph);
 }
 
 export function shutdownJavaEngine(): void {
   if (javaProcess) {
-    try { javaProcess.kill(); } catch {}
+    try {
+      javaProcess.kill();
+    } catch {}
     javaProcess = null;
     engineReady = false;
   }

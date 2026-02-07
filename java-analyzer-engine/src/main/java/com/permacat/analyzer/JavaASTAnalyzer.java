@@ -78,8 +78,10 @@ public class JavaASTAnalyzer {
 
     public AnalysisResult analyze(Map<String, String> files) {
         Path tempDir = null;
+        List<String> resolutionErrors = new ArrayList<>();
         try {
             tempDir = writeFilesToTemp(files);
+            debugListFiles(tempDir, "");
             JavaParser parser = configureParserWithSymbolSolver(tempDir);
 
             List<CompilationUnit> compilationUnits = new ArrayList<>();
@@ -88,6 +90,9 @@ public class JavaASTAnalyzer {
                 String content = entry.getValue();
                 try {
                     ParseResult<CompilationUnit> result = parser.parse(content);
+                    System.err.println("[DEBUG-PARSE] " + filePath + " -> successful=" + result.isSuccessful()
+                        + " present=" + result.getResult().isPresent()
+                        + " problems=" + result.getProblems());
                     if (result.isSuccessful() && result.getResult().isPresent()) {
                         CompilationUnit cu = result.getResult().get();
                         compilationUnits.add(cu);
@@ -98,42 +103,57 @@ public class JavaASTAnalyzer {
                 }
             }
 
-            resolveClassSymbols(compilationUnits);
-            resolveMethodSignatures(compilationUnits);
-            resolveRepositoryEntitiesViaGenerics(compilationUnits);
+            resolveClassSymbols(compilationUnits, resolutionErrors);
+            resolveMethodSignatures(compilationUnits, resolutionErrors);
+            resolveRepositoryEntitiesViaGenerics(compilationUnits, resolutionErrors);
 
         } catch (Exception e) {
             System.err.println("Symbol solver init failed: " + e.getMessage());
+            resolutionErrors.add("Symbol solver init failed: " + e.getMessage());
         } finally {
             if (tempDir != null) {
                 deleteRecursively(tempDir.toFile());
             }
         }
 
-        return buildGraph();
+        return buildGraph(resolutionErrors);
     }
 
-    private void resolveClassSymbols(List<CompilationUnit> compilationUnits) {
+    private void resolveClassSymbols(List<CompilationUnit> compilationUnits, List<String> resolutionErrors) {
+        System.err.println("[DEBUG] fqnIndex keys: " + fqnIndex.keySet());
+        System.err.println("[DEBUG] fqnIndex entity flags: ");
+        for (Map.Entry<String, ClassInfo> e : fqnIndex.entrySet()) {
+            System.err.println("[DEBUG]   " + e.getKey() + " -> isEntity=" + e.getValue().isEntity
+                + " isController=" + e.getValue().isController
+                + " isService=" + e.getValue().isService
+                + " isRepository=" + e.getValue().isRepository);
+        }
         for (CompilationUnit cu : compilationUnits) {
             for (ClassOrInterfaceDeclaration cls : cu.findAll(ClassOrInterfaceDeclaration.class)) {
                 String className = cls.getNameAsString();
                 ClassInfo info = fqnIndex.values().stream()
                     .filter(ci -> ci.className.equals(className))
                     .findFirst().orElse(null);
-                if (info == null) continue;
+                if (info == null) {
+                    System.err.println("[DEBUG] No ClassInfo for: " + className);
+                    continue;
+                }
 
                 try {
                     ResolvedReferenceTypeDeclaration resolved = cls.resolve();
                     info.resolvedSymbol = resolved;
                     symbolClassMap.put(resolved, info);
+                    System.err.println("[DEBUG] Resolved class: " + className + " -> " + resolved.getQualifiedName());
                 } catch (Exception e) {
-                    System.err.println("Could not resolve symbol for class: " + className + " - " + e.getMessage());
+                    String msg = "Could not resolve symbol for class: " + className + " - " + e.getClass().getSimpleName() + " - " + e.getMessage();
+                    System.err.println(msg);
+                    resolutionErrors.add(msg);
                 }
             }
         }
     }
 
-    private void resolveMethodSignatures(List<CompilationUnit> compilationUnits) {
+    private void resolveMethodSignatures(List<CompilationUnit> compilationUnits, List<String> resolutionErrors) {
         for (CompilationUnit cu : compilationUnits) {
             for (ClassOrInterfaceDeclaration cls : cu.findAll(ClassOrInterfaceDeclaration.class)) {
                 String className = cls.getNameAsString();
@@ -153,15 +173,17 @@ public class JavaASTAnalyzer {
                         ResolvedMethodDeclaration resolved = methodDecl.resolve();
                         mi.resolvedQualifiedSignature = resolved.getQualifiedSignature();
                     } catch (Exception e) {
-                        System.err.println("[RESOLVE-FAIL] method declaration " + className + "." + methodName
-                            + ": " + e.getClass().getSimpleName() + " - " + e.getMessage());
+                        String msg = "[RESOLVE-FAIL] method " + className + "." + methodName
+                            + ": " + e.getClass().getSimpleName() + " - " + e.getMessage();
+                        System.err.println(msg);
+                        resolutionErrors.add(msg);
                     }
                 }
             }
         }
     }
 
-    private void resolveRepositoryEntitiesViaGenerics(List<CompilationUnit> compilationUnits) {
+    private void resolveRepositoryEntitiesViaGenerics(List<CompilationUnit> compilationUnits, List<String> resolutionErrors) {
         for (CompilationUnit cu : compilationUnits) {
             for (ClassOrInterfaceDeclaration cls : cu.findAll(ClassOrInterfaceDeclaration.class)) {
                 String className = cls.getNameAsString();
@@ -210,9 +232,22 @@ public class JavaASTAnalyzer {
                             }
                         }
                     } catch (Exception e) {
-                        System.err.println("Could not resolve entity generic for " + className + ": " + e.getMessage());
+                        String msg = "Could not resolve entity generic for " + className + ": " + e.getMessage();
+                        System.err.println(msg);
+                        resolutionErrors.add(msg);
                     }
                 }
+            }
+        }
+    }
+
+    private void debugListFiles(Path dir, String indent) {
+        File[] files = dir.toFile().listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            System.err.println("[DEBUG-FS] " + indent + f.getName() + (f.isDirectory() ? "/" : ""));
+            if (f.isDirectory()) {
+                debugListFiles(f.toPath(), indent + "  ");
             }
         }
     }
@@ -503,7 +538,7 @@ public class JavaASTAnalyzer {
         return targetQualifiedName + "." + methodPart;
     }
 
-    private AnalysisResult buildGraph() {
+    private AnalysisResult buildGraph(List<String> resolutionErrors) {
         List<GraphNodeDTO> nodes = new ArrayList<>();
         List<GraphEdgeDTO> edges = new ArrayList<>();
         Set<String> nodeIds = new HashSet<>();
@@ -654,7 +689,7 @@ public class JavaASTAnalyzer {
             }
         }
 
-        return new AnalysisResult(nodes, edges);
+        return new AnalysisResult(nodes, edges, resolutionErrors);
     }
 
     private ClassInfo resolveEntityClassForRepository(ClassInfo repoInfo) {
