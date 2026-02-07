@@ -1,0 +1,143 @@
+FINAL PROOF-OF-IMPLEMENTATION — FOR THE RECORD
+
+Do NOT explain. Do NOT summarize. Do NOT give high-level descriptions.
+
+This is a forensic verification. You must PROVE each required item with direct, copy-pastable evidence:
+
+- file path
+- exact code snippet (with line numbers if possible)
+- command outputs (unit/integration/test run)
+- JSON outputs or structured tables where required
+- exact log lines (with timestamps if possible)
+
+If any required item is missing or incomplete, respond exactly with:
+"MISSING — NOT IMPLEMENTED" for that item.
+
+Perform the following checks and return the evidence in the same order.
+
+========================================================
+PART A — JVM / JAVA ANALYZER (compiler-level)
+========================================================
+
+A1) Show the code that configures the symbol solver — CombinedTypeSolver, ReflectionTypeSolver, JavaParserTypeSolver, JarTypeSolver (if used), and registration with ParserConfiguration. Provide file path and exact code snippet.
+
+A2) Show the code where MethodCallExpr.resolve() is invoked. Provide the snippet that captures ResolvedMethodDeclaration and extracts:
+   - declaring type (qualified)
+   - resolved signature (qualified)
+   - resolved return type
+   - resolved parameter types
+
+A3) Show the code where Class/Type symbols (ResolvedReferenceTypeDeclaration instances) are mapped DIRECTLY to ClassInfo (or equivalent) WITHOUT relying on simple-name string maps. Provide the map declaration and insertion code, and the lookup using the ResolvedReferenceTypeDeclaration (not string).
+
+A4) Show the code that implements the **scope-type fallback** (the explicit, documented fallback you added). Prove that it is limited to: when resolvedDeclaringType is external/framework, the analyzer uses the resolved scope expression type (resolvedScopeType) to find the project repository. Provide the exact code snippet where this decision happens.
+
+A5) Show the exact code where repository → entity mapping is resolved FROM GENERICS (e.g. JpaRepository<User, Long>) using symbol resolution, not by chopping class name strings. Provide the snippet that extracts the entity type from the repository generics (ResolvedReferenceTypeDeclaration, type parameters).
+
+A6) Show any remaining code that performs string-based heuristics in the Java analyzer (e.g., isInjectableType suffix checks, resolveTargetType by field name, name-based repo→entity mapping). For each occurrence, provide file path, code snippet, and a clear label: "ALLOWED (explain why)" or "UNALLOWED" — but remember: no explanations; the agent must simply label ALLOWED/UNALLOWED. If none remain, respond "NO STRING HEURISTICS FOUND".
+
+A7) Run the Java analyzer engine unit/integration test (or invoke the analysis on the provided sample projects). Provide:
+   - exact command issued
+   - console output
+   - the JSON result returned by the Java engine /analyze endpoint (full AnalysisResult) for both sample projects used in previous runs (provide project IDs or filenames)
+   - list counts: nodes, edges, controllers, services, repositories, entities
+   - any RESOLVE-FAIL lines in logs; if none, return an explicit "NO RESOLVE-FAIL LINES".
+
+A8) Show the code that creates ApplicationGraph edges from Java analyzer output and prove the edges use node IDs derived from resolved symbols (not strings). Provide the exact snippet that constructs GraphEdge(fromNode, toNode, relation).
+
+========================================================
+PART B — FRONTEND (Vue, Angular, React) SYMBOLIC ANALYSIS
+========================================================
+
+B1) Show the ScriptSymbolTable implementation file path and exact code where the symbol table is keyed by AST node references (Map<ts.Node, SymbolDeclaration> or equivalent). Provide the code that inserts entries keyed by node (not by string name).
+
+B2) Show the code that resolves a template handler (e.g. @click="salvarUsuario") to the actual ts.Node declaration by symbol resolution (not string lookup). Provide the exact traversal: template AST → handler expression → symbol lookup → ts.Node result. Include code snippets for both Vue and Angular template handler resolution.
+
+B3) Show the code that walks function/method AST bodies and records:
+   - httpCalls attached to the node (with method & url)
+   - calledSymbols as node references (ts.Node[]), not string[]
+   Provide the exact snippet that stores calledSymbols as node references.
+
+B4) Show the code that traces call chains by node references (trace(node: ts.Node)), not by string names. Provide the trace algorithm source and a short example of a trace invocation (handlerNode → returned httpCalls).
+
+B5) Show the import-resolution code used to detect HTTP clients (axios, fetch wrappers, services). Provide exact code where import declarations are parsed and used to classify a CallExpression as an HTTP call (matching import identifiers to call expressions). Provide a sample evidence where an import like `import api from '@/shared/api'` leads to identifying api.get(...) as HTTP.
+
+B6) Search the frontend analyzer source for any code that still uses handler name string matching to resolve to functions. Provide all occurrences (file path + snippet). If none remain, return "NO FRONTEND STRING LOOKUPS FOUND".
+
+B7) Run the frontend analyzer on both sample projects (same projects as in PART A). Provide:
+   - command
+   - output counts: interactions discovered, endpoints matched, bindings resolved, httpCalls found
+   - sample mapping: show 5 example interactions with structure:
+     {
+       component: "ComponentName.vue",
+       elementType: "button",
+       handlerNodeId: "<unique node identifier>",
+       httpCalls: [{method:"POST", url:"/api/x"}],
+       mappedBackendNodeId: "CONTROLLER:Class.method"
+     }
+
+========================================================
+PART C — GRAPH & ENDPOINT IMPACTS
+========================================================
+
+C1) Provide the full ApplicationGraph JSON produced after combining backend & frontend analyzers for each sample project (or provide a downloadable attachment if the JSON is huge). If large, provide first 200 nodes and edges and a checksum (sha256) of the full JSON.
+
+C2) Provide the analyzeEndpoints() result (EndpointImpact[]), in JSON, for each project. Confirm: for every endpoint the fields entitiesTouched and persistenceOperations are non-empty where applicable. If any endpoint lacks entitiesTouched while there is a repository call chain, list those endpoints explicitly.
+
+C3) Show example GraphEdge entries proving WRITES_ENTITY / READS_ENTITY edges exist. Provide file and snippets where those edges are added (the exact addEdge call with relationType "WRITES_ENTITY" or "READS_ENTITY").
+
+========================================================
+PART D — BANNED PATTERNS & SANITY SEARCH
+========================================================
+
+Search the entire analyzer codebase and list any files that contain (literal regex) these patterns used for STRUCTURAL parsing:
+
+- any regex that looks like `/class\s+/` or `/@[\w.]+/` used to parse Java structure
+- any regex that parses `<template ...>` or HTML tags for structure
+- any logic that uses `.indexOf("(")` or `.match(/.../)` to infer structure (list occurrences)
+
+For each occurrence, provide file path, code snippet, and label whether it is:
+  - "STRING CLEANUP (OK)" — e.g. trimming "()" from already-extracted AST strings
+  - "STRUCTURAL PARSING (NOT OK)"
+
+If none exist, return "NO BANNED STRUCTURAL REGEX FOUND".
+
+========================================================
+PART E — END-TO-END INTEGRATION TESTS
+========================================================
+
+E1) Run the full pipeline (frontend analyze -> java engine -> reconstruct Graph -> analyzeEndpoints -> UI render test) for both sample projects. Provide:
+   - exact commands
+   - execution time
+   - final summarized counts: nodes/edges/endpoints/impacts
+   - screenshot evidence (base64 or file path) of UI showing at least one endpoint with entitiesTouched populated
+   - any error logs (if none, return "NO ERRORS")
+
+E2) Persist results: produce a single JSON report combining PART A-C results with:
+{
+  "projectId": <id>,
+  "nodes": N,
+  "edges": M,
+  "endpoints": K,
+  "endpointsWithEntities": L,
+  "resolveFails": [ ... ],
+  "checks": {
+     "javaSymbolSolverConfigured": true/false,
+     "noHeuristicsRemaining": true/false,
+     "frontendNodeKeyed": true/false,
+     "httpImportResolution": true/false
+  },
+  "graphChecksum": "<sha256>"
+}
+
+If any check is false, list the exact missing code snippets or failing evidence (MISSING — NOT IMPLEMENTED).
+
+========================================================
+FINAL RULES
+========================================================
+
+1) Only evidence. No commentary. If any requirement cannot be proved, return "MISSING — NOT IMPLEMENTED" for that requirement.
+2) Use exact file paths in the project tree.
+3) If commands must be run, show the exact shell commands executed and full output.
+4) End the response with either "FULL PROOF PRESENT — READY TO PROCEED" or "PROOF INCOMPLETE" (no extra text).
+
+Start now and return a single, machine-readable response that contains all requested evidence.
