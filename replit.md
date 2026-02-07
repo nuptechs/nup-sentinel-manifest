@@ -39,8 +39,9 @@ server/
   db.ts               - Database connection
   seed.ts             - Sample project seed data
   analyzers/
+    application-graph.ts  - ApplicationGraph model (GraphNode, GraphEdge, analyzeEndpoints)
     frontend-analyzer.ts  - Detects interactions in Vue/React/Angular code
-    java-analyzer.ts      - Parses Spring Boot controllers/services/entities
+    java-analyzer.ts      - Parses Spring Boot code + buildApplicationGraph() + analyzeGraphEndpoints()
     graph-connector.ts    - Connects frontend interactions to backend endpoints
     semantic-engine.ts    - LLM classification of operations
 
@@ -48,13 +49,24 @@ shared/
   schema.ts           - Drizzle ORM schema (projects, source_files, analysis_runs, catalog_entries)
 ```
 
+## Application Graph Model
+The backend is represented as a navigable in-memory graph:
+- **GraphNode** (id, type: CONTROLLER|SERVICE|REPOSITORY|ENTITY, className, methodName, metadata)
+- **GraphEdge** (fromNode, toNode, relationType: CALLS|WRITES_ENTITY|READS_ENTITY, metadata)
+- **ApplicationGraph** class with addNode/addEdge, getNodesByType, reachableFrom(nodeId), toJSON
+- **buildApplicationGraph(files)** populates the graph from Java source files
+- **analyzeGraphEndpoints(graph)** traverses the graph to produce EndpointImpact[]
+- **EndpointImpact** contains endpoint, involvedNodes, entitiesTouched, callDepth, fullCallChain, persistenceOperations
+
 ## Data Flow
 1. User uploads source files → stored in `source_files` table
 2. Analysis triggered → frontend analyzer + java analyzer run
-3. Graph connector maps interactions to endpoints with method tracing
-4. Semantic engine classifies operations via LLM
-5. Catalog entries stored in database
-6. UI displays with filtering, search, editing, and JSON export
+3. buildApplicationGraph() creates in-memory graph with all nodes (controllers, services, repos, entities) and edges (calls, writes, reads)
+4. analyzeGraphEndpoints() traverses the graph per controller endpoint to produce EndpointImpact
+5. Graph connector maps frontend interactions to backend endpoints
+6. Semantic engine classifies operations via LLM
+7. Catalog entries stored in database
+8. UI displays with filtering, search, editing, and JSON export
 
 ## API Endpoints
 - GET /api/stats - Dashboard statistics

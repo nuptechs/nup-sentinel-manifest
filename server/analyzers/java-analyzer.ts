@@ -578,6 +578,244 @@ export function analyzeJavaFiles(files: { filePath: string; content: string }[])
   return { endpoints, serviceMethods, entities };
 }
 
+import {
+  ApplicationGraph,
+  GraphNode,
+  GraphEdge,
+  type NodeType,
+  type EndpointImpact,
+  analyzeEndpoints as graphAnalyzeEndpoints,
+} from "./application-graph";
+
+export { ApplicationGraph, GraphNode, GraphEdge };
+export type { EndpointImpact };
+
+export function buildApplicationGraph(
+  files: { filePath: string; content: string }[]
+): ApplicationGraph {
+  const javaFiles = files.filter((f) => f.filePath.endsWith(".java"));
+  const graph = new ApplicationGraph();
+
+  const classMap = new Map<string, ClassIndex>();
+  const allClasses: ClassIndex[] = [];
+
+  for (const file of javaFiles) {
+    const cls = buildClassIndex(file.filePath, file.content);
+    if (cls) {
+      classMap.set(cls.className, cls);
+      allClasses.push(cls);
+    }
+  }
+
+  for (const cls of allClasses) {
+    if (cls.isEntity) {
+      graph.addNode(
+        new GraphNode("ENTITY", cls.className, null, {
+          tableName: cls.tableName,
+          fields: cls.entityFields,
+          sourceFile: cls.sourceFile,
+        })
+      );
+    }
+
+    if (cls.isRepository) {
+      for (const method of cls.methods) {
+        graph.addNode(
+          new GraphNode("REPOSITORY", cls.className, method.methodName, {
+            sourceFile: cls.sourceFile,
+            lineNumber: method.lineNumber,
+          })
+        );
+        const entityName = cls.className
+          .replace(/Repository$/, "")
+          .replace(/Repo$/, "");
+        const entityNodeId = `ENTITY:${entityName}`;
+        if (graph.getNode(entityNodeId)) {
+          const op = detectPersistenceOp(method.methodName);
+          if (op && (op === "save" || op === "update" || op === "delete")) {
+            graph.addEdge(
+              new GraphEdge(
+                `REPOSITORY:${cls.className}.${method.methodName}`,
+                entityNodeId,
+                "WRITES_ENTITY",
+                { operation: op }
+              )
+            );
+          } else {
+            graph.addEdge(
+              new GraphEdge(
+                `REPOSITORY:${cls.className}.${method.methodName}`,
+                entityNodeId,
+                "READS_ENTITY",
+                { operation: op || "read" }
+              )
+            );
+          }
+        }
+      }
+    }
+
+    if (cls.isService) {
+      for (const method of cls.methods) {
+        graph.addNode(
+          new GraphNode("SERVICE", cls.className, method.methodName, {
+            visibility: method.visibility,
+            sourceFile: cls.sourceFile,
+            lineNumber: method.lineNumber,
+          })
+        );
+      }
+    }
+
+    if (cls.isController) {
+      for (const method of cls.methods) {
+        if (!method.httpMapping) continue;
+        const fullPath =
+          `${cls.basePath}${method.httpMapping.path}`.replace(/\/+/g, "/") ||
+          cls.basePath ||
+          "/";
+        graph.addNode(
+          new GraphNode("CONTROLLER", cls.className, method.methodName, {
+            httpMethod: method.httpMapping.method,
+            path: method.httpMapping.path,
+            fullPath,
+            sourceFile: cls.sourceFile,
+            lineNumber: method.lineNumber,
+          })
+        );
+      }
+    }
+  }
+
+  for (const cls of allClasses) {
+    if (cls.isEntity) continue;
+
+    const nodeType: "CONTROLLER" | "SERVICE" | "REPOSITORY" =
+      cls.isController ? "CONTROLLER" : cls.isService ? "SERVICE" : "REPOSITORY";
+
+    for (const method of cls.methods) {
+      if (cls.isController && !method.httpMapping) continue;
+
+      const fromId = `${nodeType}:${cls.className}.${method.methodName}`;
+      if (!graph.getNode(fromId)) continue;
+
+      for (const call of method.methodCalls) {
+        const targetClass = resolveMethodTarget(call, cls, classMap);
+
+        if (targetClass && targetClass.isRepository) {
+          const repoNodeId = `REPOSITORY:${targetClass.className}.${call.methodName}`;
+          if (!graph.getNode(repoNodeId)) {
+            graph.addNode(
+              new GraphNode("REPOSITORY", targetClass.className, call.methodName, {
+                sourceFile: targetClass.sourceFile,
+                synthetic: true,
+              })
+            );
+            const entityName = targetClass.className
+              .replace(/Repository$/, "")
+              .replace(/Repo$/, "");
+            const entityNodeId = `ENTITY:${entityName}`;
+            if (graph.getNode(entityNodeId)) {
+              const op = detectPersistenceOp(call.methodName);
+              if (op && (op === "save" || op === "update" || op === "delete")) {
+                graph.addEdge(
+                  new GraphEdge(repoNodeId, entityNodeId, "WRITES_ENTITY", { operation: op })
+                );
+              } else {
+                graph.addEdge(
+                  new GraphEdge(repoNodeId, entityNodeId, "READS_ENTITY", { operation: op || "read" })
+                );
+              }
+            }
+          }
+          graph.addEdge(new GraphEdge(fromId, repoNodeId, "CALLS"));
+        } else if (targetClass) {
+          const targetMethod = targetClass.methods.find(
+            (m) => m.methodName === call.methodName
+          );
+          if (targetMethod) {
+            const targetType: NodeType = targetClass.isController
+              ? "CONTROLLER"
+              : targetClass.isService
+              ? "SERVICE"
+              : "REPOSITORY";
+            const toId = `${targetType}:${targetClass.className}.${call.methodName}`;
+            if (graph.getNode(toId)) {
+              graph.addEdge(new GraphEdge(fromId, toId, "CALLS"));
+            }
+          }
+        } else if (call.targetVariable === "this") {
+          const sameClassMethod = cls.methods.find(
+            (m) => m.methodName === call.methodName
+          );
+          if (sameClassMethod) {
+            const toId = `${nodeType}:${cls.className}.${call.methodName}`;
+            if (graph.getNode(toId)) {
+              graph.addEdge(new GraphEdge(fromId, toId, "CALLS"));
+            }
+          }
+        } else {
+          const varType = cls.injectedFields.get(call.targetVariable);
+          if (varType && (varType.endsWith("Repository") || varType.endsWith("Repo"))) {
+            const repoNodeId = `REPOSITORY:${varType}.${call.methodName}`;
+            if (!graph.getNode(repoNodeId)) {
+              graph.addNode(
+                new GraphNode("REPOSITORY", varType, call.methodName, { synthetic: true })
+              );
+              const entityName = varType.replace(/Repository$/, "").replace(/Repo$/, "");
+              const entityNodeId = `ENTITY:${entityName}`;
+              if (graph.getNode(entityNodeId)) {
+                const op = detectPersistenceOp(call.methodName);
+                if (op && (op === "save" || op === "update" || op === "delete")) {
+                  graph.addEdge(
+                    new GraphEdge(repoNodeId, entityNodeId, "WRITES_ENTITY", { operation: op })
+                  );
+                } else {
+                  graph.addEdge(
+                    new GraphEdge(repoNodeId, entityNodeId, "READS_ENTITY", { operation: op || "read" })
+                  );
+                }
+              }
+            }
+            graph.addEdge(new GraphEdge(fromId, repoNodeId, "CALLS"));
+          }
+        }
+      }
+
+      if (detectStateChange(method.body)) {
+        const entityRefs = new Set<string>();
+        for (const call of method.methodCalls) {
+          const tc = resolveMethodTarget(call, cls, classMap);
+          if (tc && tc.isRepository) {
+            const entityName = tc.className.replace(/Repository$/, "").replace(/Repo$/, "");
+            if (entityName) entityRefs.add(entityName);
+          }
+        }
+        for (const varType of Array.from(cls.injectedFields.values())) {
+          if (varType.endsWith("Repository") || varType.endsWith("Repo")) {
+            const entityName = varType.replace(/Repository$/, "").replace(/Repo$/, "");
+            if (entityName) entityRefs.add(entityName);
+          }
+        }
+        for (const entityName of Array.from(entityRefs)) {
+          const entityNodeId = `ENTITY:${entityName}`;
+          if (graph.getNode(entityNodeId)) {
+            graph.addEdge(
+              new GraphEdge(fromId, entityNodeId, "WRITES_ENTITY", { operation: "state_change" })
+            );
+          }
+        }
+      }
+    }
+  }
+
+  return graph;
+}
+
+export function analyzeGraphEndpoints(graph: ApplicationGraph): EndpointImpact[] {
+  return graphAnalyzeEndpoints(graph);
+}
+
 export function inferOperationType(
   serviceCalls: string[],
   repositoryCalls: string[],

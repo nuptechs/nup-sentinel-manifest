@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { analyzeFrontendFiles } from "./analyzers/frontend-analyzer";
-import { analyzeJavaFiles } from "./analyzers/java-analyzer";
+import { analyzeJavaFiles, buildApplicationGraph, analyzeGraphEndpoints } from "./analyzers/java-analyzer";
 import { buildGraph, graphToCatalogEntries } from "./analyzers/graph-connector";
 import { classifyEntries } from "./analyzers/semantic-engine";
 import { z } from "zod";
@@ -132,9 +132,13 @@ export async function registerRoutes(
         }));
 
         const frontendInteractions = analyzeFrontendFiles(fileData);
+
+        const appGraph = buildApplicationGraph(fileData);
+        const endpointImpacts = analyzeGraphEndpoints(appGraph);
+
         const { endpoints, serviceMethods, entities } = analyzeJavaFiles(fileData);
-        const graph = buildGraph(frontendInteractions, endpoints, serviceMethods, entities);
-        let catalogEntryData = graphToCatalogEntries(graph, analysisRun.id, projectId);
+        const connectorGraph = buildGraph(frontendInteractions, endpoints, serviceMethods, entities);
+        let catalogEntryData = graphToCatalogEntries(connectorGraph, analysisRun.id, projectId);
 
         try {
           catalogEntryData = await classifyEntries(catalogEntryData);
@@ -144,12 +148,14 @@ export async function registerRoutes(
 
         const created = await storage.createCatalogEntries(catalogEntryData);
 
+        const graphSummary = appGraph.toJSON();
+
         await storage.updateAnalysisRun(analysisRun.id, {
           status: "completed",
           completedAt: new Date(),
           totalInteractions: frontendInteractions.length,
-          totalEndpoints: endpoints.length,
-          totalEntities: entities.length,
+          totalEndpoints: endpointImpacts.length,
+          totalEntities: appGraph.getNodesByType("ENTITY").length,
         });
 
         await storage.updateProjectStatus(projectId, "completed");
@@ -157,9 +163,30 @@ export async function registerRoutes(
         res.json({
           analysisRunId: analysisRun.id,
           totalInteractions: frontendInteractions.length,
-          totalEndpoints: endpoints.length,
-          totalEntities: entities.length,
+          totalEndpoints: endpointImpacts.length,
+          totalEntities: appGraph.getNodesByType("ENTITY").length,
           catalogEntries: created.length,
+          graph: {
+            totalNodes: graphSummary.nodes.length,
+            totalEdges: graphSummary.edges.length,
+            nodesByType: {
+              controllers: appGraph.getNodesByType("CONTROLLER").length,
+              services: appGraph.getNodesByType("SERVICE").length,
+              repositories: appGraph.getNodesByType("REPOSITORY").length,
+              entities: appGraph.getNodesByType("ENTITY").length,
+            },
+          },
+          endpointImpacts: endpointImpacts.map((ei) => ({
+            endpoint: ei.endpoint,
+            httpMethod: ei.httpMethod,
+            controllerClass: ei.controllerClass,
+            controllerMethod: ei.controllerMethod,
+            callDepth: ei.callDepth,
+            entitiesTouched: ei.entitiesTouched,
+            involvedNodeCount: ei.involvedNodes.length,
+            fullCallChain: ei.fullCallChain,
+            persistenceOperations: ei.persistenceOperations,
+          })),
         });
       } catch (analysisError) {
         const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";
