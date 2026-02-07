@@ -1,0 +1,147 @@
+FINAL FORENSIC VERIFICATION — NO NARRATIVE, ONLY EVIDENCE
+
+Do not explain. Do not summarize. Do not justify. Only provide copy-pastable evidence.
+
+For each item below provide:
+- file path(s)
+- exact code snippet(s) with line numbers
+- exact shell commands executed and full stdout/stderr
+- exact JSON outputs (full, not trimmed) or a downloadable path
+- exact log lines (with timestamps if available)
+- exact checksums (sha256) for any exported JSON
+
+If any item cannot be proved, respond exactly with:
+"MISSING — NOT IMPLEMENTED" for that item.
+
+Return the evidence in the same ordered sections below.
+
+========================================================
+A — PROOF OF FORENSIC DOCUMENT
+========================================================
+
+A1) Provide the full contents of /tmp/forensic-verification.md (exact file dump), plus its sha256.
+
+========================================================
+B — JAVA ENGINE / SYMBOL RESOLUTION
+========================================================
+
+For the Java engine (java-analyzer-engine):
+
+B1) Show file path and exact code snippet that constructs CombinedTypeSolver and registers JavaSymbolSolver in ParserConfiguration (include line numbers).
+
+B2) Show file path and exact code snippet where callExpr.resolve() is invoked and the code that extracts declaring type, qualified signature, return type, parameter types (include line numbers).
+
+B3) Show the exact data structure code that maps resolved type symbols to ClassInfo WITHOUT using simple-name string keys (show the map declaration and insertion and lookup code). If a custom symbol-keyed map is used, show its full implementation.
+
+B4) Show the exact snippet that implements the "scope-type fallback" (i.e., when resolvedDeclaringType is external/framework, fallback to resolvedScopeType). Include line numbers.
+
+B5) Show the code that extracts repository generic type arguments (JpaRepository<T, ID>) via symbol resolution (not name chopping). Provide snippet where typeArgs.get(0).resolve() or equivalent is used.
+
+B6) Run the java engine analyze on both sample projects and provide:
+   - exact curl command(s) to /analyze or CLI invocation
+   - full JSON AnalysisResult returned (save to /tmp/analysis-project-<id>.json and provide path)
+   - sha256 checksum of each JSON file
+   - counts: nodes, edges, controllers, services, repositories, entities (computed from the JSON)
+   - exact log grep for "RESOLVE-FAIL" lines (if none, respond "NO RESOLVE-FAIL LINES")
+
+B7) Show any remaining Java code snippets that use string-based heuristics for structural resolution (e.g., isInjectableType suffix checks, repository→entity name replace). For each snippet, output file path, lines, and label either "ALLOWED" or "UNALLOWED". Do not justify; only label.
+
+========================================================
+C — FRONTEND SYMBOLIC ANALYSIS PROOF
+========================================================
+
+C1) Provide the ScriptSymbolTable implementation file path and exact code that shows it is keyed by AST node references (Map keyed by node, not by string). Include lines.
+
+C2) For Vue: show the exact code snippet (lines) that maps a template handler expression to the resolved ts.Node declaration (template AST → handler expr → resolved node). Provide one concrete example from project 4: the template file path, the handler text, and the exact ts.Node locator (file:line:col) of the resolved function.
+
+C3) For Angular: same as C2 — one concrete example: template file, handler, resolved ts.Node (file:line:col).
+
+C4) For React: show code that resolves JSX onClick handler to the actual function node (exact snippets and one concrete example).
+
+C5) Show the code that records calledNodes as node references (ts.Node[]), not strings. Provide the snippet where calledNodes array is populated and where trace(node: ts.Node) uses those references.
+
+C6) Show import-resolution code that detects HTTP clients via imports (exact file, lines). Provide one concrete example from a sample project where an imported `api` or `client` was detected and show the call expression that was recognized as HTTP (file:line).
+
+C7) Run the frontend analyzer on both sample projects and provide:
+   - exact commands run
+   - counts: interactions discovered, endpoints matched, bindings resolved, httpCalls found
+   - save frontend mapping JSON to /tmp/frontend-mapping-project-<id>.json and provide sha256
+   - show 5 example interaction objects (full JSON) as indicated:
+     { component, elementType, handlerNodeId, httpCalls, mappedBackendNodeId }
+
+C8) Search for any remaining code that uses handler-name string lookups to resolve functions. Provide grep output with file paths and lines. If none, write "NO FRONTEND STRING LOOKUPS FOUND".
+
+========================================================
+D — GRAPH CONSTRUCTION & ENDPOINT IMPACTS
+========================================================
+
+D1) Show the exact code that reconstructs ApplicationGraph from Java engine JSON (backend-java-client.ts) including the code that maps resolved symbols → GraphNode ids. Include lines.
+
+D2) Provide the full ApplicationGraph JSON for each sample project (save to /tmp/graph-project-<id>.json) and sha256. If large, provide first 200 nodes/edges and sha256 for full file.
+
+D3) Provide analyzeEndpoints() full JSON output for each project (save to /tmp/endpoint-impacts-project-<id>.json) and sha256.
+
+D4) Provide 5 concrete GraphEdge examples that are WRITES_ENTITY or READS_ENTITY with the exact addEdge call site (file:line) where those edges are produced.
+
+D5) For every endpoint in analyzeEndpoints() where entitiesTouched is empty but the graph contains a repository call in the reachable subgraph, list those endpoints explicitly (file:line or endpoint path). If none, state "ALL ENDPOINTS HAVE ENTITIES_TOUCHED".
+
+========================================================
+E — BANNED PATTERN SCAN (FOR STRUCTURAL PARSING)
+========================================================
+
+E1) Run project-wide grep for patterns used for structural parsing:
+   - `/class\s+/`
+   - `/@[\w.]+/`
+   - `<template[^>]*>`
+   - any regex that parses HTML tags
+   - `.match(/.../)` or `.indexOf("(")` used in analyzer codebases for structure
+
+Provide exact grep commands and full outputs. For each hit show file:line:snippet and mark:
+   - "STRING CLEANUP (OK)" or
+   - "STRUCTURAL PARSING (NOT OK)"
+
+If no structural parsing regex exists in active analyzers, respond "NO BANNED STRUCTURAL REGEX FOUND".
+
+Also explicitly show that the old java-analyzer.ts is not imported (run `grep -R "java-analyzer" -n` and show output).
+
+========================================================
+F — END-TO-END EXECUTION & UI PROOF
+========================================================
+
+F1) Run the full pipeline for each project: frontend analyze -> java engine -> reconstruct graph -> analyzeEndpoints -> UI render; provide:
+   - exact sequence of commands (shell)
+   - total execution time (start/end timestamps)
+   - final summary counts nodes/edges/endpoints
+   - provide a screenshot file (png) path or base64 showing the UI page where an endpoint displays entitiesTouched populated (file path under /tmp, or base64 string)
+   - show any UI logs or errors (if none, "NO ERRORS")
+
+F2) Produce a combined JSON report file /tmp/final-verification-report.json exactly containing:
+{
+  "projectId": <id>,
+  "nodes": N,
+  "edges": M,
+  "endpoints": K,
+  "endpointsWithEntities": L,
+  "resolveFails": [ ... ],
+  "checks": {
+     "javaSymbolSolverConfigured": true/false,
+     "noHeuristicsRemaining": true/false,
+     "frontendNodeKeyed": true/false,
+     "httpImportResolution": true/false
+  },
+  "graphChecksum": "<sha256>"
+}
+
+Save to /tmp/final-verification-report.json and provide sha256 and the full file content.
+
+========================================================
+FINAL RULES
+========================================================
+
+1) Only evidence; no prose. If a requirement cannot be proven, return "MISSING — NOT IMPLEMENTED" for that requirement.
+2) Use exact file paths and exact shell commands.
+3) End the response with exactly one of:
+   - "FULL PROOF PRESENT — READY TO PROCEED"
+   - "PROOF INCOMPLETE"
+
+Start now and return a single machine-readable response that contains all requested evidence.
