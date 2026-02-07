@@ -1,0 +1,124 @@
+You are not building a CRUD app.
+
+You are building an enterprise-grade Code-to-Permission Catalog Generator that will feed a corporate IAM (Identity and Access Management) system.
+
+This system MUST NOT attempt to manage users or permissions directly.
+
+Its only responsibility is to analyze the source code of client systems (Frontend + Spring Boot Backend) and automatically generate a Technical Action Catalog that describes ALL user interaction points and their technical impact.
+
+This catalog will later be classified by humans and imported into an IAM.
+
+The system must be modular, extensible, and architecturally correct.
+
+Follow this architecture STRICTLY.
+
+----------------------------------------
+GOAL
+----------------------------------------
+
+Given a client project containing:
+
+- Vue / React / Angular frontend
+- Java Spring Boot backend
+
+The system must:
+
+1) Scan the frontend and detect ALL interaction points:
+   - buttons
+   - menu actions
+   - form submissions
+   - router navigations
+   - axios/fetch/http calls
+
+2) Extract the URLs/endpoints called by each interaction.
+
+3) Parse the entire Spring Boot backend using AST (JavaParser).
+
+4) Map:
+   Interaction → Endpoint → Controller → Service → Repository → Entities touched
+
+5) Classify the technical nature of the action automatically:
+   - READ
+   - WRITE
+   - DELETE
+   - STATE_CHANGE
+   - FILE_IO
+   - EXTERNAL_INTEGRATION
+
+6) Produce a JSON Technical Action Catalog like:
+
+{
+  "screen": "...",
+  "interaction": "...",
+  "endpoint": "...",
+  "httpMethod": "...",
+  "serviceMethods": ["..."],
+  "entitiesTouched": ["..."],
+  "technicalOperation": "STATE_CHANGE",
+  "criticalityScore": 0-100
+}
+
+This is NOT optional. This is the core output.
+
+----------------------------------------
+MANDATORY ARCHITECTURE
+----------------------------------------
+
+Create a monorepo with:
+
+/analyzer-frontend   (Node + TS + AST for Vue/React/Angular)
+/analyzer-backend    (Java Spring Boot + JavaParser AST)
+/semantic-engine     (Node service that uses an LLM to classify actions)
+/api                 (Spring Boot API to orchestrate everything)
+/ui                  (simple UI to show catalog and allow human classification)
+
+----------------------------------------
+IMPORTANT RULES
+----------------------------------------
+
+- DO NOT hardcode anything
+- DO NOT create mock logic
+- DO NOT simplify AST parsing
+- DO NOT skip method call tracing
+- DO NOT assume simple controller structure
+- You MUST follow method calls across layers
+- You MUST detect entity writes (save, delete, update, status change)
+- You MUST support nested service calls
+
+----------------------------------------
+STEP ORDER (very important)
+----------------------------------------
+
+1) Build backend AST analyzer with JavaParser
+2) Build frontend interaction analyzer with Babel/TS AST
+3) Create graph model to connect both
+4) Only then build semantic engine using LLM
+5) Only then create API and UI
+
+----------------------------------------
+SEMANTIC ENGINE
+----------------------------------------
+
+Send the graph data to an LLM to classify the technicalOperation and criticalityScore.
+
+The LLM is not discovering endpoints. It is classifying technical impact.
+
+----------------------------------------
+UI
+----------------------------------------
+
+The UI must show:
+
+Interaction | Endpoint | Entities | Technical Type | Suggested Meaning (editable)
+
+----------------------------------------
+EXPECTED LEVEL
+----------------------------------------
+
+This is a static code intelligence tool similar in spirit to SonarQube/CodeQL, not a CRUD project.
+
+Design for real enterprise code, not examples.
+
+----------------------------------------
+START BY IMPLEMENTING ONLY:
+1) analyzer-backend with JavaParser and full method tracing
