@@ -79,11 +79,19 @@ public class JavaASTAnalyzer {
     public AnalysisResult analyze(Map<String, String> files) {
         Path tempDir = null;
         List<String> resolutionErrors = new ArrayList<>();
+        long totalStart = System.currentTimeMillis();
         try {
+            long phaseStart = System.currentTimeMillis();
             tempDir = writeFilesToTemp(files);
-            JavaParser parser = configureParserWithSymbolSolver(tempDir);
+            System.out.println("[java-engine] Phase 1/7: Write files to temp — " + (System.currentTimeMillis() - phaseStart) + "ms");
 
+            phaseStart = System.currentTimeMillis();
+            JavaParser parser = configureParserWithSymbolSolver(tempDir);
+            System.out.println("[java-engine] Phase 2/7: Configure parser + symbol solver — " + (System.currentTimeMillis() - phaseStart) + "ms");
+
+            phaseStart = System.currentTimeMillis();
             List<CompilationUnit> compilationUnits = new ArrayList<>();
+            int parseErrors = 0;
             for (Map.Entry<String, String> entry : files.entrySet()) {
                 String filePath = entry.getKey();
                 String content = entry.getValue();
@@ -94,6 +102,7 @@ public class JavaASTAnalyzer {
                         compilationUnits.add(cu);
                         extractClassInfo(cu, filePath);
                     } else {
+                        parseErrors++;
                         String problems = result.getProblems().stream()
                             .map(p -> p.getMessage())
                             .collect(Collectors.joining("; "));
@@ -102,15 +111,35 @@ public class JavaASTAnalyzer {
                         resolutionErrors.add(msg);
                     }
                 } catch (Exception e) {
+                    parseErrors++;
                     String msg = "Failed to parse " + filePath + ": " + e.getMessage();
                     System.err.println(msg);
                     resolutionErrors.add(msg);
                 }
             }
+            System.out.println("[java-engine] Phase 3/7: Parse " + files.size() + " files — " + (System.currentTimeMillis() - phaseStart) + "ms ("
+                + compilationUnits.size() + " OK, " + parseErrors + " errors, " + fqnIndex.size() + " classes found)");
 
+            phaseStart = System.currentTimeMillis();
             resolveClassSymbols(compilationUnits, resolutionErrors);
+            System.out.println("[java-engine] Phase 4/7: Resolve class symbols — " + (System.currentTimeMillis() - phaseStart) + "ms ("
+                + symbolClassMap.byQualifiedName.size() + " resolved)");
+
+            phaseStart = System.currentTimeMillis();
             resolveMethodSignatures(compilationUnits, resolutionErrors);
+            long totalMethods = fqnIndex.values().stream().mapToLong(ci -> ci.methods.size()).sum();
+            long resolvedMethods = fqnIndex.values().stream()
+                .flatMap(ci -> ci.methods.stream())
+                .filter(m -> m.resolvedQualifiedSignature != null).count();
+            System.out.println("[java-engine] Phase 5/7: Resolve method signatures — " + (System.currentTimeMillis() - phaseStart) + "ms ("
+                + resolvedMethods + "/" + totalMethods + " resolved)");
+
+            phaseStart = System.currentTimeMillis();
             resolveRepositoryEntitiesViaGenerics(compilationUnits, resolutionErrors);
+            long reposWithEntity = fqnIndex.values().stream()
+                .filter(ci -> ci.isRepository && ci.resolvedEntityClassName != null).count();
+            System.out.println("[java-engine] Phase 6/7: Resolve repository entities — " + (System.currentTimeMillis() - phaseStart) + "ms ("
+                + reposWithEntity + " repos linked to entities)");
 
         } catch (Exception e) {
             System.err.println("Symbol solver init failed: " + e.getMessage());
@@ -121,7 +150,11 @@ public class JavaASTAnalyzer {
             }
         }
 
-        return buildGraph(resolutionErrors);
+        long phaseStart = System.currentTimeMillis();
+        AnalysisResult result = buildGraph(resolutionErrors);
+        System.out.println("[java-engine] Phase 7/7: Build graph — " + (System.currentTimeMillis() - phaseStart) + "ms");
+        System.out.println("[java-engine] Total analysis time: " + ((System.currentTimeMillis() - totalStart) / 1000.0) + "s");
+        return result;
     }
 
     private void resolveClassSymbols(List<CompilationUnit> compilationUnits, List<String> resolutionErrors) {

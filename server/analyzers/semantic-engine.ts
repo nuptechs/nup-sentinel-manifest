@@ -16,14 +16,21 @@ export async function classifyEntries(
   entries: InsertCatalogEntry[]
 ): Promise<InsertCatalogEntry[]> {
   const batchSize = 10;
+  const totalBatches = Math.ceil(entries.length / batchSize);
   const classified: InsertCatalogEntry[] = [];
+  const llmStart = Date.now();
 
   for (let i = 0; i < entries.length; i += batchSize) {
+    const batchNum = Math.floor(i / batchSize) + 1;
     const batch = entries.slice(i, i + batchSize);
+    console.log(`[analysis] LLM batch ${batchNum}/${totalBatches} (entries ${i + 1}-${Math.min(i + batchSize, entries.length)})...`);
+    const batchStart = Date.now();
     const classifiedBatch = await classifyBatch(batch);
+    console.log(`[analysis] LLM batch ${batchNum}/${totalBatches} done in ${((Date.now() - batchStart) / 1000).toFixed(1)}s`);
     classified.push(...classifiedBatch);
   }
 
+  console.log(`[analysis] LLM classification total: ${((Date.now() - llmStart) / 1000).toFixed(1)}s for ${entries.length} entries`);
   return classified;
 }
 

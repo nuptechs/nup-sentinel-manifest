@@ -58,10 +58,20 @@ public class AnalyzerServer {
                 return;
             }
 
+            System.out.println("[java-engine] Received " + files.size() + " Java files for analysis");
+            long analysisStart = System.currentTimeMillis();
+
             JavaASTAnalyzer analyzer = new JavaASTAnalyzer();
             AnalysisResult result = analyzer.analyze(files);
 
+            long analysisDuration = System.currentTimeMillis() - analysisStart;
+            System.out.println("[java-engine] Analysis complete in " + (analysisDuration / 1000.0) + "s — "
+                + result.nodes.size() + " nodes, " + result.edges.size() + " edges"
+                + (result.resolutionErrors != null ? ", " + result.resolutionErrors.size() + " resolution errors" : ""));
+
+            long serializeStart = System.currentTimeMillis();
             String json = gson.toJson(result);
+            System.out.println("[java-engine] JSON serialization: " + (System.currentTimeMillis() - serializeStart) + "ms, " + (json.length() / 1024) + " KB");
             sendResponse(exchange, 200, json);
         } catch (Exception e) {
             StringWriter sw = new StringWriter();
