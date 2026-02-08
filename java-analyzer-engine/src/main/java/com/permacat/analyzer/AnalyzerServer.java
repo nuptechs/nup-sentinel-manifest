@@ -11,6 +11,7 @@ import java.lang.reflect.Type;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.Executors;
 
 public class AnalyzerServer {
 
@@ -41,7 +42,7 @@ public class AnalyzerServer {
             sendResponse(exchange, 200, "{\"status\":\"ok\"}");
         });
 
-        server.setExecutor(null);
+        server.setExecutor(Executors.newFixedThreadPool(2));
         server.start();
         System.out.println("Java Analyzer Engine running on port " + port);
     }

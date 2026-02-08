@@ -235,18 +235,47 @@ export async function registerRoutes(
   });
 
   app.post("/api/projects/upload-zip", upload.single("zipFile"), async (req, res) => {
+    const useSSE = req.headers.accept === "text/event-stream";
+
+    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+
+    function sendProgress(step: string, detail: string) {
+      if (useSSE) {
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail })}\n\n`);
+      }
+      console.log(`[analysis] ${step}: ${detail}`);
+    }
+
+    if (useSSE) {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      heartbeatInterval = setInterval(() => {
+        res.write(`: heartbeat\n\n`);
+      }, 15000);
+    }
+
     try {
       const file = req.file;
       if (!file) {
         console.error("ZIP upload: No file received in request");
+        if (useSSE) {
+          res.write(`data: ${JSON.stringify({ type: "error", message: "No ZIP file uploaded" })}\n\n`);
+          return res.end();
+        }
         return res.status(400).json({ message: "No ZIP file uploaded" });
       }
 
       console.log(`ZIP upload: Received file "${file.originalname}" (${(file.size / 1024).toFixed(1)} KB)`);
+      sendProgress("upload", `Received ${file.originalname} (${(file.size / 1024).toFixed(1)} KB)`);
 
       const projectName = req.body.name || "Uploaded Repository";
       const projectDescription = req.body.description || null;
 
+      sendProgress("scan", "Scanning ZIP for source files...");
       const scannedFiles = extractAndScanZip(file.buffer);
       console.log(`ZIP upload: Scanned ${scannedFiles.length} supported files from ZIP`);
       if (scannedFiles.length > 0) {
@@ -255,12 +284,20 @@ export async function registerRoutes(
           const ext = f.filePath.split(".").pop() || "?";
           exts.set(ext, (exts.get(ext) || 0) + 1);
         }
-        console.log(`ZIP upload: File types: ${Array.from(exts.entries()).map(([e, c]) => `${e}:${c}`).join(", ")}`);
+        const typeStr = Array.from(exts.entries()).map(([e, c]) => `${e}:${c}`).join(", ");
+        console.log(`ZIP upload: File types: ${typeStr}`);
+        sendProgress("scan", `Found ${scannedFiles.length} files (${typeStr})`);
       }
       if (scannedFiles.length === 0) {
-        return res.status(400).json({ message: "No supported source files found in the ZIP. Supported extensions: .java, .ts, .tsx, .js, .jsx, .vue, .py, .cs" });
+        const msg = "No supported source files found in the ZIP. Supported extensions: .java, .ts, .tsx, .js, .jsx, .vue, .py, .cs";
+        if (useSSE) {
+          res.write(`data: ${JSON.stringify({ type: "error", message: msg })}\n\n`);
+          return res.end();
+        }
+        return res.status(400).json({ message: msg });
       }
 
+      sendProgress("save", "Saving project to database...");
       const project = await storage.createProject({
         name: projectName,
         description: projectDescription,
@@ -290,20 +327,20 @@ export async function registerRoutes(
 
         const javaCount = fileData.filter(f => f.filePath.endsWith(".java")).length;
         const frontendCount = fileData.length - javaCount;
-        console.log(`[analysis] Step 1/4: Building application graph (${javaCount} Java files, ${frontendCount} frontend files)...`);
+        sendProgress("Step 1/4", `Building application graph (${javaCount} Java files, ${frontendCount} frontend files)...`);
         const graphStart = Date.now();
         const buildResult = await buildApplicationGraph(fileData);
         const appGraph = buildResult.graph;
         const resolutionErrors = buildResult.resolutionErrors;
-        console.log(`[analysis] Step 1/4 done in ${((Date.now() - graphStart) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
+        sendProgress("Step 1/4", `Done in ${((Date.now() - graphStart) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
 
-        console.log(`[analysis] Step 2/4: Analyzing graph endpoints...`);
+        sendProgress("Step 2/4", "Analyzing graph endpoints...");
         const endpointImpacts = analyzeGraphEndpoints(appGraph);
-        console.log(`[analysis] Step 2/4 done — ${endpointImpacts.length} endpoints found`);
+        sendProgress("Step 2/4", `Done — ${endpointImpacts.length} endpoints found`);
 
-        console.log(`[analysis] Step 3/4: Analyzing frontend interactions...`);
+        sendProgress("Step 3/4", "Analyzing frontend interactions...");
         const frontendInteractions = analyzeFrontend(fileData, appGraph);
-        console.log(`[analysis] Step 3/4 done — ${frontendInteractions.length} frontend interactions found`);
+        sendProgress("Step 3/4", `Done — ${frontendInteractions.length} frontend interactions found`);
 
         let catalogEntryData = interactionsToCatalogEntries(
           frontendInteractions, appGraph, analysisRun.id, project.id
@@ -315,12 +352,13 @@ export async function registerRoutes(
           );
         }
 
-        console.log(`[analysis] Step 4/4: LLM classification of ${catalogEntryData.length} entries...`);
+        sendProgress("Step 4/4", `LLM classification of ${catalogEntryData.length} entries...`);
         try {
           catalogEntryData = await classifyEntries(catalogEntryData);
-          console.log(`[analysis] Step 4/4 done — LLM classification complete`);
+          sendProgress("Step 4/4", "LLM classification complete");
         } catch (llmError) {
           console.error("[analysis] Step 4/4 — LLM classification failed, using inferred values:", llmError);
+          sendProgress("Step 4/4", "LLM classification failed, using inferred values");
         }
 
         const created = await storage.createCatalogEntries(catalogEntryData);
@@ -337,7 +375,7 @@ export async function registerRoutes(
 
         await storage.updateProjectStatus(project.id, "completed");
 
-        res.status(201).json({
+        const result = {
           projectId: project.id,
           projectName: projectName,
           filesScanned: scannedFiles.length,
@@ -367,7 +405,15 @@ export async function registerRoutes(
             persistenceOperations: ei.persistenceOperations,
           })),
           resolutionErrors: resolutionErrors.length > 0 ? resolutionErrors : undefined,
-        });
+        };
+
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        if (useSSE) {
+          res.write(`data: ${JSON.stringify({ type: "complete", result })}\n\n`);
+          res.end();
+        } else {
+          res.status(201).json(result);
+        }
       } catch (analysisError) {
         const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";
         await storage.updateAnalysisRun(analysisRun.id, {
@@ -379,9 +425,15 @@ export async function registerRoutes(
         throw analysisError;
       }
     } catch (error) {
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       console.error("Error processing ZIP upload:", error);
       const msg = error instanceof Error ? error.message : "Failed to process ZIP";
-      res.status(500).json({ message: msg });
+      if (useSSE) {
+        res.write(`data: ${JSON.stringify({ type: "error", message: msg })}\n\n`);
+        res.end();
+      } else {
+        res.status(500).json({ message: msg });
+      }
     }
   });
 

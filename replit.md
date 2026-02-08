@@ -47,8 +47,8 @@ client/src/
     theme-provider.tsx          - Theme context provider
 
 server/
-  index.ts                      - Express server entry point
-  routes.ts                     - API endpoints (uses async buildApplicationGraphAsync)
+  index.ts                      - Express server entry (20min HTTP timeouts for large uploads)
+  routes.ts                     - API endpoints (SSE streaming progress for ZIP upload)
   storage.ts                    - Database storage layer (IStorage interface)
   db.ts                         - Database connection
   seed.ts                       - Sample project seed data
@@ -141,6 +141,16 @@ The backend is represented as a navigable in-memory graph:
 - **Max file size**: 512 KB per file
 - **ZIP root stripping**: Automatically strips the top-level folder from ZIP paths
 - Uses `adm-zip` for ZIP extraction, no filesystem I/O needed (in-memory processing)
+
+## Upload & Analysis Timeouts
+- HTTP server: 20-minute timeout (requestTimeout, headersTimeout, keepAliveTimeout, timeout)
+- Java engine fetch: 20-minute abort controller timeout
+- Frontend fetch: 20-minute abort controller timeout
+- JVM heap: -Xmx2g -Xms512m for large projects
+- SSE streaming: ZIP upload uses Server-Sent Events to stream progress in real-time
+  - Heartbeat every 15s prevents proxy/LB idle disconnects
+  - Events: `progress` (step + detail), `complete` (result), `error` (message)
+  - Frontend reads via ReadableStream and shows live progress log
 
 ## System Dependencies
 - Java JDK 17 (for JavaParser-based analyzer engine)

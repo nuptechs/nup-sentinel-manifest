@@ -135,6 +135,7 @@ export default function UploadPage() {
   const [uploadMode, setUploadMode] = useState<UploadMode>("zip");
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [progressMessages, setProgressMessages] = useState<string[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const addFile = useCallback(() => {
@@ -212,38 +213,83 @@ export default function UploadPage() {
   const zipUploadMutation = useMutation({
     mutationFn: async () => {
       if (!zipFile) throw new Error("No ZIP file selected");
+      setProgressMessages([]);
       const formData = new FormData();
       formData.append("zipFile", zipFile);
       formData.append("name", projectName);
       if (description) formData.append("description", description);
 
-      let res: Response;
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000);
+      const timeoutId = setTimeout(() => controller.abort(), 20 * 60 * 1000);
+
+      let res: Response;
       try {
         res = await fetch("/api/projects/upload-zip", {
           method: "POST",
           body: formData,
           signal: controller.signal,
+          headers: { Accept: "text/event-stream" },
         });
       } catch (networkError: any) {
         clearTimeout(timeoutId);
         if (networkError.name === "AbortError") {
-          throw new Error("The analysis timed out after 15 minutes. Your project may be very large — try uploading fewer files or splitting into smaller ZIPs.");
+          throw new Error("The analysis timed out after 20 minutes. Your project may be very large — try uploading fewer files or splitting into smaller ZIPs.");
         }
         throw new Error("Network error: could not reach the server. Please check your connection and try again.");
       }
-      clearTimeout(timeoutId);
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: `Server error (${res.status}). Please try again.` }));
+
+      if (!res.ok && res.headers.get("content-type")?.includes("application/json")) {
+        clearTimeout(timeoutId);
+        const err = await res.json().catch(() => ({ message: `Server error (${res.status}).` }));
         throw new Error(err.message);
       }
-      return res.json();
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        clearTimeout(timeoutId);
+        throw new Error("Could not read server response stream.");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalResult: any = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith(":") || line.trim() === "" || line.startsWith("event:")) continue;
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === "progress") {
+              setProgressMessages(prev => [...prev, `${event.step}: ${event.detail}`]);
+            } else if (event.type === "complete") {
+              finalResult = event.result;
+            } else if (event.type === "error") {
+              clearTimeout(timeoutId);
+              throw new Error(event.message);
+            }
+          } catch (parseErr: any) {
+            if (parseErr.message && !parseErr.message.includes("JSON")) throw parseErr;
+          }
+        }
+      }
+
+      clearTimeout(timeoutId);
+      if (!finalResult) throw new Error("Analysis completed but no result was received. Please check the catalog page.");
+      return finalResult;
     },
     onSuccess: (data: { projectId: number; filesScanned: number; catalogEntries: number; totalEndpoints: number; totalEntities: number; resolutionErrors?: string[] }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/analysis-runs/recent"] });
+      setProgressMessages([]);
       if (data.resolutionErrors && data.resolutionErrors.length > 0) {
         toast({
           title: "Analysis complete with warnings",
@@ -259,6 +305,7 @@ export default function UploadPage() {
       setLocation(`/catalog?projectId=${data.projectId}`);
     },
     onError: (error: Error) => {
+      setProgressMessages([]);
       toast({
         title: "Upload failed",
         description: error.message,
@@ -605,6 +652,24 @@ export default function UploadPage() {
             </>
           )}
         </Button>
+
+        {isAnalyzing && progressMessages.length > 0 && (
+          <Card className="mt-4">
+            <CardContent className="pt-4 pb-3">
+              <p className="text-xs font-medium text-muted-foreground mb-2">Analysis Progress</p>
+              <div className="space-y-1 max-h-48 overflow-y-auto" data-testid="progress-log">
+                {progressMessages.map((msg, i) => (
+                  <p
+                    key={i}
+                    className={`text-xs font-mono ${i === progressMessages.length - 1 ? "text-foreground" : "text-muted-foreground"}`}
+                  >
+                    {msg}
+                  </p>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );

@@ -53,7 +53,7 @@ async function ensureEngineRunning(): Promise<void> {
     javaProcess = null;
   }
 
-  javaProcess = spawn("java", ["-Xmx1g", "-Xms256m", "-jar", JAR_PATH, String(JAVA_ENGINE_PORT)], {
+  javaProcess = spawn("java", ["-Xmx2g", "-Xms512m", "-jar", JAR_PATH, String(JAVA_ENGINE_PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
   });
@@ -112,7 +112,7 @@ async function callJavaEngine(
   await ensureEngineRunning();
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15 * 60 * 1000);
+  const timeout = setTimeout(() => controller.abort(), 20 * 60 * 1000);
 
   const sendStart = Date.now();
   let res: Response;
@@ -127,7 +127,7 @@ async function callJavaEngine(
     clearTimeout(timeout);
     const elapsed = ((Date.now() - sendStart) / 1000).toFixed(1);
     if (err.name === "AbortError") {
-      throw new Error(`Java engine analysis timed out after ${elapsed}s (15 min limit). The project may be too large for a single analysis pass.`);
+      throw new Error(`Java engine analysis timed out after ${elapsed}s (20 min limit). The project may be too large for a single analysis pass.`);
     }
     console.error(`[analysis] Java engine fetch failed after ${elapsed}s:`, err.message);
     throw err;
