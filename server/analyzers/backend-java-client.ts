@@ -107,11 +107,25 @@ async function callJavaEngine(
 ): Promise<JavaEngineResult> {
   await ensureEngineRunning();
 
-  const res = await fetch(`${JAVA_ENGINE_URL}/analyze`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(javaFiles),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+
+  let res: Response;
+  try {
+    res = await fetch(`${JAVA_ENGINE_URL}/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(javaFiles),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") {
+      throw new Error("Java engine analysis timed out after 5 minutes. The project may be too large for a single analysis pass.");
+    }
+    throw err;
+  }
+  clearTimeout(timeout);
 
   if (!res.ok) {
     const errBody = await res.text();

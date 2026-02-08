@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -134,6 +134,8 @@ export default function UploadPage() {
   const [bulkContent, setBulkContent] = useState("");
   const [uploadMode, setUploadMode] = useState<UploadMode>("zip");
   const [zipFile, setZipFile] = useState<File | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const addFile = useCallback(() => {
     if (!currentPath.trim() || !currentContent.trim()) {
@@ -216,14 +218,22 @@ export default function UploadPage() {
       if (description) formData.append("description", description);
 
       let res: Response;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
       try {
         res = await fetch("/api/projects/upload-zip", {
           method: "POST",
           body: formData,
+          signal: controller.signal,
         });
-      } catch (networkError) {
+      } catch (networkError: any) {
+        clearTimeout(timeoutId);
+        if (networkError.name === "AbortError") {
+          throw new Error("The analysis timed out after 5 minutes. Your project may be very large — try uploading fewer files or splitting into smaller ZIPs.");
+        }
         throw new Error("Network error: could not reach the server. Please check your connection and try again.");
       }
+      clearTimeout(timeoutId);
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: `Server error (${res.status}). Please try again.` }));
         throw new Error(err.message);
@@ -256,6 +266,25 @@ export default function UploadPage() {
       });
     },
   });
+
+  const isAnalyzing = zipUploadMutation.isPending || uploadMutation.isPending;
+
+  useEffect(() => {
+    if (isAnalyzing) {
+      setElapsedSeconds(0);
+      timerRef.current = setInterval(() => setElapsedSeconds(s => s + 1), 1000);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [isAnalyzing]);
+
+  const formatElapsed = (s: number) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+  };
 
   const handleSubmit = () => {
     if (!projectName.trim()) {
@@ -563,10 +592,10 @@ export default function UploadPage() {
           }
           data-testid="button-upload-project"
         >
-          {(uploadMutation.isPending || zipUploadMutation.isPending) ? (
+          {isAnalyzing ? (
             <>
               <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-              {zipUploadMutation.isPending ? "Scanning & Analyzing..." : "Uploading..."}
+              {zipUploadMutation.isPending ? "Analyzing..." : "Uploading..."} {formatElapsed(elapsedSeconds)}
             </>
           ) : (
             <>

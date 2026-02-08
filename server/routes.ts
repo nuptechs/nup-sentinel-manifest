@@ -139,12 +139,22 @@ export async function registerRoutes(
           content: f.content,
         }));
 
+        const javaCount2 = fileData.filter(f => f.filePath.endsWith(".java")).length;
+        const frontendCount2 = fileData.length - javaCount2;
+        console.log(`[analysis] Step 1/4: Building application graph (${javaCount2} Java files, ${frontendCount2} frontend files)...`);
+        const graphStart2 = Date.now();
         const buildResult = await buildApplicationGraph(fileData);
         const appGraph = buildResult.graph;
         const resolutionErrors = buildResult.resolutionErrors;
-        const endpointImpacts = analyzeGraphEndpoints(appGraph);
+        console.log(`[analysis] Step 1/4 done in ${((Date.now() - graphStart2) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
 
+        console.log(`[analysis] Step 2/4: Analyzing graph endpoints...`);
+        const endpointImpacts = analyzeGraphEndpoints(appGraph);
+        console.log(`[analysis] Step 2/4 done — ${endpointImpacts.length} endpoints found`);
+
+        console.log(`[analysis] Step 3/4: Analyzing frontend interactions...`);
         const frontendInteractions = analyzeFrontend(fileData, appGraph);
+        console.log(`[analysis] Step 3/4 done — ${frontendInteractions.length} frontend interactions found`);
 
         let catalogEntryData = interactionsToCatalogEntries(
           frontendInteractions, appGraph, analysisRun.id, projectId
@@ -156,10 +166,12 @@ export async function registerRoutes(
           );
         }
 
+        console.log(`[analysis] Step 4/4: LLM classification of ${catalogEntryData.length} entries...`);
         try {
           catalogEntryData = await classifyEntries(catalogEntryData);
+          console.log(`[analysis] Step 4/4 done — LLM classification complete`);
         } catch (llmError) {
-          console.error("LLM classification failed, using inferred values:", llmError);
+          console.error("[analysis] Step 4/4 — LLM classification failed, using inferred values:", llmError);
         }
 
         const created = await storage.createCatalogEntries(catalogEntryData);
@@ -276,12 +288,22 @@ export async function registerRoutes(
           content: f.content,
         }));
 
+        const javaCount = fileData.filter(f => f.filePath.endsWith(".java")).length;
+        const frontendCount = fileData.length - javaCount;
+        console.log(`[analysis] Step 1/4: Building application graph (${javaCount} Java files, ${frontendCount} frontend files)...`);
+        const graphStart = Date.now();
         const buildResult = await buildApplicationGraph(fileData);
         const appGraph = buildResult.graph;
         const resolutionErrors = buildResult.resolutionErrors;
-        const endpointImpacts = analyzeGraphEndpoints(appGraph);
+        console.log(`[analysis] Step 1/4 done in ${((Date.now() - graphStart) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
 
+        console.log(`[analysis] Step 2/4: Analyzing graph endpoints...`);
+        const endpointImpacts = analyzeGraphEndpoints(appGraph);
+        console.log(`[analysis] Step 2/4 done — ${endpointImpacts.length} endpoints found`);
+
+        console.log(`[analysis] Step 3/4: Analyzing frontend interactions...`);
         const frontendInteractions = analyzeFrontend(fileData, appGraph);
+        console.log(`[analysis] Step 3/4 done — ${frontendInteractions.length} frontend interactions found`);
 
         let catalogEntryData = interactionsToCatalogEntries(
           frontendInteractions, appGraph, analysisRun.id, project.id
@@ -293,10 +315,12 @@ export async function registerRoutes(
           );
         }
 
+        console.log(`[analysis] Step 4/4: LLM classification of ${catalogEntryData.length} entries...`);
         try {
           catalogEntryData = await classifyEntries(catalogEntryData);
+          console.log(`[analysis] Step 4/4 done — LLM classification complete`);
         } catch (llmError) {
-          console.error("LLM classification failed, using inferred values:", llmError);
+          console.error("[analysis] Step 4/4 — LLM classification failed, using inferred values:", llmError);
         }
 
         const created = await storage.createCatalogEntries(catalogEntryData);
