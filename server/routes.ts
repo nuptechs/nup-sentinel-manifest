@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { analyzeFrontend } from "./analyzers/frontend-analyzer";
 import { buildApplicationGraph, analyzeGraphEndpoints } from "./analyzers/backend-java-client";
-import { interactionsToCatalogEntries } from "./analyzers/graph-connector";
+import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries } from "./analyzers/graph-connector";
 import { classifyEntries } from "./analyzers/semantic-engine";
 import { z } from "zod";
 
@@ -124,6 +124,7 @@ export async function registerRoutes(
       try {
         await storage.updateProjectStatus(projectId, "analyzing");
         await storage.updateAnalysisRun(analysisRun.id, { status: "analyzing" });
+        await storage.deleteCatalogEntriesByProject(projectId);
 
         const sourceFiles = await storage.getSourceFiles(projectId);
         const fileData = sourceFiles.map((f) => ({
@@ -141,6 +142,12 @@ export async function registerRoutes(
         let catalogEntryData = interactionsToCatalogEntries(
           frontendInteractions, appGraph, analysisRun.id, projectId
         );
+
+        if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
+          catalogEntryData = endpointImpactsToCatalogEntries(
+            endpointImpacts, analysisRun.id, projectId
+          );
+        }
 
         try {
           catalogEntryData = await classifyEntries(catalogEntryData);

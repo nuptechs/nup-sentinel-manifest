@@ -43,6 +43,7 @@ export interface IStorage {
   createCatalogEntries(entries: InsertCatalogEntry[]): Promise<CatalogEntry[]>;
   updateCatalogEntry(id: number, data: Partial<CatalogEntry>): Promise<void>;
   deleteCatalogEntriesByRun(runId: number): Promise<void>;
+  deleteCatalogEntriesByProject(projectId: number): Promise<void>;
 
   getStats(): Promise<{
     totalProjects: number;
@@ -143,6 +144,10 @@ export class DatabaseStorage implements IStorage {
 
   async deleteCatalogEntriesByRun(runId: number): Promise<void> {
     await db.delete(catalogEntries).where(eq(catalogEntries.analysisRunId, runId));
+  }
+
+  async deleteCatalogEntriesByProject(projectId: number): Promise<void> {
+    await db.delete(catalogEntries).where(eq(catalogEntries.projectId, projectId));
   }
 
   async getStats() {

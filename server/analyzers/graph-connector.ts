@@ -1,6 +1,51 @@
 import type { FrontendInteraction } from "./frontend-analyzer";
-import type { ApplicationGraph } from "./application-graph";
+import type { ApplicationGraph, EndpointImpact } from "./application-graph";
 import type { InsertCatalogEntry } from "@shared/schema";
+
+export function endpointImpactsToCatalogEntries(
+  impacts: EndpointImpact[],
+  analysisRunId: number,
+  projectId: number
+): InsertCatalogEntry[] {
+  return impacts.map((impact) => {
+    const serviceMethods = impact.involvedNodes
+      .filter((n) => n.type === "SERVICE" && n.methodName)
+      .map((n) => `${n.className}.${n.methodName}`);
+    const repositoryMethods = impact.involvedNodes
+      .filter((n) => n.type === "REPOSITORY" && n.methodName)
+      .map((n) => `${n.className}.${n.methodName}`);
+
+    const technicalOperation = inferOperationType(
+      serviceMethods,
+      repositoryMethods,
+      impact.httpMethod,
+      impact.persistenceOperations
+    );
+
+    return {
+      analysisRunId,
+      projectId,
+      screen: `API: ${impact.controllerClass}`,
+      interaction: `${impact.httpMethod} ${impact.endpoint}`,
+      interactionType: "endpoint",
+      endpoint: impact.endpoint,
+      httpMethod: impact.httpMethod,
+      controllerClass: impact.controllerClass,
+      controllerMethod: impact.controllerMethod,
+      serviceMethods,
+      repositoryMethods,
+      entitiesTouched: impact.entitiesTouched,
+      fullCallChain: impact.fullCallChain,
+      persistenceOperations: impact.persistenceOperations,
+      technicalOperation,
+      criticalityScore: null,
+      suggestedMeaning: null,
+      humanClassification: null,
+      sourceFile: impact.sourceFile,
+      lineNumber: impact.lineNumber,
+    };
+  });
+}
 
 export function interactionsToCatalogEntries(
   interactions: FrontendInteraction[],
