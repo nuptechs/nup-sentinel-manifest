@@ -422,7 +422,7 @@ export default function UploadPage() {
                     <input
                       id="zip-input"
                       type="file"
-                      accept=".zip"
+                      accept=".zip,application/zip,application/x-zip-compressed"
                       className="hidden"
                       onChange={(e) => {
                         const f = e.target.files?.[0];
