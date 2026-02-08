@@ -11,13 +11,15 @@ Enterprise-grade static code intelligence tool that analyzes frontend (Vue/React
 - **Semantic Engine**: OpenAI LLM (via Replit AI Integrations) for classifying technical operations and criticality scores
 
 ## Key Features
-1. Upload project source files (Vue/React/Angular frontend + Java Spring Boot backend)
-2. Analyze frontend for interaction points (buttons, forms, HTTP calls, navigation) using real AST parsers
-3. Parse Java controllers, services, repositories, and entities using JavaParser (JVM-based AST)
-4. Build a graph connecting frontend interactions to backend endpoints with full method tracing
-5. LLM-powered semantic classification of technical operations and criticality scores
-6. Editable catalog with human classification support
-7. JSON export of the full catalog
+1. **ZIP Repository Upload**: Upload a ZIP of an entire repository for automatic scanning and analysis
+2. Upload individual project source files (Vue/React/Angular frontend + Java Spring Boot backend)
+3. Analyze frontend for interaction points (buttons, forms, HTTP calls, navigation) using real AST parsers
+4. Parse Java controllers, services, repositories, and entities using JavaParser (JVM-based AST)
+5. Build a graph connecting frontend interactions to backend endpoints with full method tracing
+6. LLM-powered semantic classification of technical operations and criticality scores
+7. Backend-only catalog generation from endpoint impacts when no frontend files exist
+8. Editable catalog with human classification support
+9. JSON export of the full catalog
 
 ## Project Structure
 ```
@@ -54,7 +56,8 @@ server/
     application-graph.ts        - ApplicationGraph model (GraphNode, GraphEdge, analyzeEndpoints)
     backend-java-client.ts      - Node.js client that spawns/communicates with Java engine
     frontend-analyzer.ts        - AST-based frontend analyzer (Vue/React/Angular)
-    graph-connector.ts          - Converts FrontendInteractions to catalog entries
+    graph-connector.ts          - Converts FrontendInteractions/EndpointImpacts to catalog entries
+    repository-scanner.ts       - ZIP extraction and recursive directory scanning
     semantic-engine.ts          - LLM classification of operations
 
 shared/
@@ -124,10 +127,20 @@ The backend is represented as a navigable in-memory graph:
 - GET /api/projects - List all projects
 - POST /api/projects - Create project with source files
 - POST /api/projects/:id/analyze - Run analysis pipeline
+- POST /api/projects/upload-zip - Upload ZIP repository, auto-scan, and analyze (multipart/form-data)
 - GET /api/catalog-entries/:projectId - Get catalog entries
 - PATCH /api/catalog-entries/:id - Update human classification
 - GET /api/catalog-entries/:projectId/export - Export catalog as JSON
 - GET /api/analysis-runs/recent - Recent analysis runs
+
+## Repository Scanner Module
+- **File**: `server/analyzers/repository-scanner.ts`
+- **Function**: `extractAndScanZip(zipBuffer: Buffer)` → `ScannedFile[]`
+- **Supported extensions**: .java, .ts, .tsx, .js, .jsx, .vue, .py, .cs
+- **Ignored directories**: node_modules, .git, dist, build, target, .idea, .vscode, .gradle, __pycache__, etc.
+- **Max file size**: 512 KB per file
+- **ZIP root stripping**: Automatically strips the top-level folder from ZIP paths
+- Uses `adm-zip` for ZIP extraction, no filesystem I/O needed (in-memory processing)
 
 ## System Dependencies
 - Java JDK 17 (for JavaParser-based analyzer engine)

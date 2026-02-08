@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { Loader2 } from "lucide-react";
 import {
   FolderUp,
   FileCode,
@@ -19,6 +20,7 @@ import {
   Upload,
   Info,
   FileStack,
+  Archive,
 } from "lucide-react";
 
 interface FileEntry {
@@ -119,6 +121,8 @@ function FileTypeBadge({ type }: { type: string }) {
   );
 }
 
+type UploadMode = "single" | "bulk" | "zip";
+
 export default function UploadPage() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -128,7 +132,8 @@ export default function UploadPage() {
   const [currentPath, setCurrentPath] = useState("");
   const [currentContent, setCurrentContent] = useState("");
   const [bulkContent, setBulkContent] = useState("");
-  const [showBulk, setShowBulk] = useState(false);
+  const [uploadMode, setUploadMode] = useState<UploadMode>("zip");
+  const [zipFile, setZipFile] = useState<File | null>(null);
 
   const addFile = useCallback(() => {
     if (!currentPath.trim() || !currentContent.trim()) {
@@ -202,6 +207,51 @@ export default function UploadPage() {
     },
   });
 
+  const zipUploadMutation = useMutation({
+    mutationFn: async () => {
+      if (!zipFile) throw new Error("No ZIP file selected");
+      const formData = new FormData();
+      formData.append("zipFile", zipFile);
+      formData.append("name", projectName);
+      if (description) formData.append("description", description);
+
+      const res = await fetch("/api/projects/upload-zip", {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: "Upload failed" }));
+        throw new Error(err.message);
+      }
+      return res.json();
+    },
+    onSuccess: (data: { projectId: number; filesScanned: number; catalogEntries: number; totalEndpoints: number; totalEntities: number; resolutionErrors?: string[] }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/analysis-runs/recent"] });
+      if (data.resolutionErrors && data.resolutionErrors.length > 0) {
+        toast({
+          title: "Analysis complete with warnings",
+          description: `${data.filesScanned} files scanned, ${data.catalogEntries} catalog entries generated. ${data.resolutionErrors.length} issue(s) detected.`,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Repository analyzed",
+          description: `${data.filesScanned} files scanned, ${data.catalogEntries} catalog entries, ${data.totalEndpoints} endpoints, ${data.totalEntities} entities.`,
+        });
+      }
+      setLocation(`/catalog?projectId=${data.projectId}`);
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Upload failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   const handleSubmit = () => {
     if (!projectName.trim()) {
       toast({
@@ -211,15 +261,27 @@ export default function UploadPage() {
       });
       return;
     }
-    if (files.length === 0) {
-      toast({
-        title: "No files added",
-        description: "Please add at least one source file.",
-        variant: "destructive",
-      });
-      return;
+    if (uploadMode === "zip") {
+      if (!zipFile) {
+        toast({
+          title: "No ZIP file selected",
+          description: "Please select a ZIP file containing your repository.",
+          variant: "destructive",
+        });
+        return;
+      }
+      zipUploadMutation.mutate();
+    } else {
+      if (files.length === 0) {
+        toast({
+          title: "No files added",
+          description: "Please add at least one source file.",
+          variant: "destructive",
+        });
+        return;
+      }
+      uploadMutation.mutate();
     }
-    uploadMutation.mutate();
   };
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -281,9 +343,16 @@ export default function UploadPage() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
           <CardTitle className="text-base">Source Files</CardTitle>
-          <Badge variant="secondary" className="text-xs">
-            {files.length} file{files.length !== 1 ? "s" : ""} added
-          </Badge>
+          {uploadMode !== "zip" && (
+            <Badge variant="secondary" className="text-xs">
+              {files.length} file{files.length !== 1 ? "s" : ""} added
+            </Badge>
+          )}
+          {uploadMode === "zip" && zipFile && (
+            <Badge variant="secondary" className="text-xs">
+              ZIP: {zipFile.name}
+            </Badge>
+          )}
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center gap-3 p-4 rounded-md bg-accent/50">
@@ -294,41 +363,30 @@ export default function UploadPage() {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <label className="cursor-pointer" htmlFor="file-input">
-              <div className="flex items-center gap-1.5 text-sm font-medium text-primary hover:underline">
-                <Upload className="h-3.5 w-3.5" />
-                Upload files from disk
-              </div>
-              <input
-                id="file-input"
-                type="file"
-                multiple
-                accept=".java,.vue,.jsx,.tsx,.ts,.js,.html,.xml"
-                className="hidden"
-                onChange={handleFileUpload}
-                data-testid="input-file-upload"
-              />
-            </label>
-          </div>
-
-          <Separator />
-
           <div className="space-y-3">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
-                variant={!showBulk ? "secondary" : "outline"}
+                variant={uploadMode === "zip" ? "secondary" : "outline"}
                 size="sm"
-                onClick={() => setShowBulk(false)}
+                onClick={() => setUploadMode("zip")}
+                data-testid="button-mode-zip"
+              >
+                <Archive className="h-3.5 w-3.5 mr-1.5" />
+                ZIP Repository
+              </Button>
+              <Button
+                variant={uploadMode === "single" ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => setUploadMode("single")}
                 data-testid="button-mode-single"
               >
                 <Plus className="h-3.5 w-3.5 mr-1.5" />
                 Single File
               </Button>
               <Button
-                variant={showBulk ? "secondary" : "outline"}
+                variant={uploadMode === "bulk" ? "secondary" : "outline"}
                 size="sm"
-                onClick={() => setShowBulk(true)}
+                onClick={() => setUploadMode("bulk")}
                 data-testid="button-mode-bulk"
               >
                 <FileStack className="h-3.5 w-3.5 mr-1.5" />
@@ -336,8 +394,65 @@ export default function UploadPage() {
               </Button>
             </div>
 
-            {!showBulk ? (
+            {uploadMode === "zip" ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-3 p-4 rounded-md bg-accent/50">
+                  <Info className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <p className="text-xs text-muted-foreground">
+                    Upload a ZIP file of your entire repository. The system will automatically scan all folders,
+                    filter supported file types (.java, .ts, .tsx, .js, .vue, .py, .cs), and run the full analysis pipeline.
+                    Directories like node_modules, .git, dist, build, and target are automatically ignored.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="zip-file">Repository ZIP File</Label>
+                  <div className="flex items-center gap-3">
+                    <label
+                      htmlFor="zip-input"
+                      className="flex items-center gap-2 px-4 py-2 border rounded-md cursor-pointer hover-elevate text-sm font-medium"
+                    >
+                      <Archive className="h-4 w-4" />
+                      {zipFile ? zipFile.name : "Choose ZIP file..."}
+                    </label>
+                    <input
+                      id="zip-input"
+                      type="file"
+                      accept=".zip"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) setZipFile(f);
+                      }}
+                      data-testid="input-zip-upload"
+                    />
+                    {zipFile && (
+                      <Badge variant="secondary" className="text-xs">
+                        {(zipFile.size / (1024 * 1024)).toFixed(1)} MB
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : uploadMode === "single" ? (
               <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <label className="cursor-pointer" htmlFor="file-input">
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-primary hover:underline">
+                      <Upload className="h-3.5 w-3.5" />
+                      Upload files from disk
+                    </div>
+                    <input
+                      id="file-input"
+                      type="file"
+                      multiple
+                      accept=".java,.vue,.jsx,.tsx,.ts,.js,.html,.xml"
+                      className="hidden"
+                      onChange={handleFileUpload}
+                      data-testid="input-file-upload"
+                    />
+                  </label>
+                </div>
+                <Separator />
                 <div className="space-y-2">
                   <Label htmlFor="file-path">File Path</Label>
                   <Input
@@ -399,7 +514,7 @@ export default function UploadPage() {
             )}
           </div>
 
-          {files.length > 0 && (
+          {uploadMode !== "zip" && files.length > 0 && (
             <>
               <Separator />
               <div className="space-y-2">
@@ -436,15 +551,22 @@ export default function UploadPage() {
       <div className="flex justify-end">
         <Button
           onClick={handleSubmit}
-          disabled={uploadMutation.isPending || files.length === 0 || !projectName.trim()}
+          disabled={
+            (uploadMode === "zip"
+              ? zipUploadMutation.isPending || !zipFile || !projectName.trim()
+              : uploadMutation.isPending || files.length === 0 || !projectName.trim())
+          }
           data-testid="button-upload-project"
         >
-          {uploadMutation.isPending ? (
-            "Uploading..."
+          {(uploadMutation.isPending || zipUploadMutation.isPending) ? (
+            <>
+              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              {zipUploadMutation.isPending ? "Scanning & Analyzing..." : "Uploading..."}
+            </>
           ) : (
             <>
               <FolderUp className="h-4 w-4 mr-1.5" />
-              Upload & Analyze
+              {uploadMode === "zip" ? "Upload ZIP & Analyze" : "Upload & Analyze"}
               <ArrowRight className="h-4 w-4 ml-1.5" />
             </>
           )}

@@ -1,11 +1,18 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import multer from "multer";
 import { storage } from "./storage";
 import { analyzeFrontend } from "./analyzers/frontend-analyzer";
 import { buildApplicationGraph, analyzeGraphEndpoints } from "./analyzers/backend-java-client";
 import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries } from "./analyzers/graph-connector";
 import { classifyEntries } from "./analyzers/semantic-engine";
+import { extractAndScanZip, getFileType } from "./analyzers/repository-scanner";
 import { z } from "zod";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 },
+});
 
 const createProjectSchema = z.object({
   name: z.string().min(1, "Project name is required"),
@@ -211,6 +218,133 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error analyzing project:", error);
       const msg = error instanceof Error ? error.message : "Analysis failed";
+      res.status(500).json({ message: msg });
+    }
+  });
+
+  app.post("/api/projects/upload-zip", upload.single("zipFile"), async (req, res) => {
+    try {
+      const file = req.file;
+      if (!file) {
+        return res.status(400).json({ message: "No ZIP file uploaded" });
+      }
+
+      const projectName = req.body.name || "Uploaded Repository";
+      const projectDescription = req.body.description || null;
+
+      const scannedFiles = extractAndScanZip(file.buffer);
+      if (scannedFiles.length === 0) {
+        return res.status(400).json({ message: "No supported source files found in the ZIP" });
+      }
+
+      const project = await storage.createProject({
+        name: projectName,
+        description: projectDescription,
+      });
+
+      for (const sf of scannedFiles) {
+        await storage.createSourceFile({
+          projectId: project.id,
+          filePath: sf.filePath,
+          fileType: getFileType(sf.filePath),
+          content: sf.content,
+        });
+      }
+
+      await storage.updateProjectStatus(project.id, "uploaded", scannedFiles.length);
+
+      const analysisRun = await storage.createAnalysisRun({ projectId: project.id });
+
+      try {
+        await storage.updateProjectStatus(project.id, "analyzing");
+        await storage.updateAnalysisRun(analysisRun.id, { status: "analyzing" });
+
+        const fileData = scannedFiles.map((f) => ({
+          filePath: f.filePath,
+          content: f.content,
+        }));
+
+        const buildResult = await buildApplicationGraph(fileData);
+        const appGraph = buildResult.graph;
+        const resolutionErrors = buildResult.resolutionErrors;
+        const endpointImpacts = analyzeGraphEndpoints(appGraph);
+
+        const frontendInteractions = analyzeFrontend(fileData, appGraph);
+
+        let catalogEntryData = interactionsToCatalogEntries(
+          frontendInteractions, appGraph, analysisRun.id, project.id
+        );
+
+        if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
+          catalogEntryData = endpointImpactsToCatalogEntries(
+            endpointImpacts, analysisRun.id, project.id
+          );
+        }
+
+        try {
+          catalogEntryData = await classifyEntries(catalogEntryData);
+        } catch (llmError) {
+          console.error("LLM classification failed, using inferred values:", llmError);
+        }
+
+        const created = await storage.createCatalogEntries(catalogEntryData);
+
+        const graphSummary = appGraph.toJSON();
+
+        await storage.updateAnalysisRun(analysisRun.id, {
+          status: "completed",
+          completedAt: new Date(),
+          totalInteractions: frontendInteractions.length,
+          totalEndpoints: endpointImpacts.length,
+          totalEntities: appGraph.getNodesByType("ENTITY").length,
+        });
+
+        await storage.updateProjectStatus(project.id, "completed");
+
+        res.status(201).json({
+          projectId: project.id,
+          projectName: projectName,
+          filesScanned: scannedFiles.length,
+          analysisRunId: analysisRun.id,
+          totalInteractions: frontendInteractions.length,
+          totalEndpoints: endpointImpacts.length,
+          totalEntities: appGraph.getNodesByType("ENTITY").length,
+          catalogEntries: created.length,
+          graph: {
+            totalNodes: graphSummary.nodes.length,
+            totalEdges: graphSummary.edges.length,
+            nodesByType: {
+              controllers: appGraph.getNodesByType("CONTROLLER").length,
+              services: appGraph.getNodesByType("SERVICE").length,
+              repositories: appGraph.getNodesByType("REPOSITORY").length,
+              entities: appGraph.getNodesByType("ENTITY").length,
+            },
+          },
+          endpointImpacts: endpointImpacts.map((ei) => ({
+            endpoint: ei.endpoint,
+            httpMethod: ei.httpMethod,
+            controllerClass: ei.controllerClass,
+            controllerMethod: ei.controllerMethod,
+            callDepth: ei.callDepth,
+            entitiesTouched: ei.entitiesTouched,
+            fullCallChain: ei.fullCallChain,
+            persistenceOperations: ei.persistenceOperations,
+          })),
+          resolutionErrors: resolutionErrors.length > 0 ? resolutionErrors : undefined,
+        });
+      } catch (analysisError) {
+        const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";
+        await storage.updateAnalysisRun(analysisRun.id, {
+          status: "failed",
+          completedAt: new Date(),
+          errorMessage: errorMsg,
+        });
+        await storage.updateProjectStatus(project.id, "failed");
+        throw analysisError;
+      }
+    } catch (error) {
+      console.error("Error processing ZIP upload:", error);
+      const msg = error instanceof Error ? error.message : "Failed to process ZIP";
       res.status(500).json({ message: msg });
     }
   });
