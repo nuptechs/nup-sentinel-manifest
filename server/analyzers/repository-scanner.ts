@@ -20,16 +20,27 @@ interface ScannedFile {
 }
 
 export function extractAndScanZip(zipBuffer: Buffer): ScannedFile[] {
+  console.log(`[scanner] Starting ZIP extraction — buffer size: ${(zipBuffer.length / (1024 * 1024)).toFixed(1)} MB`);
+  const parseStart = Date.now();
   const zip = new AdmZip(zipBuffer);
   const entries = zip.getEntries();
+  console.log(`[scanner] ZIP parsed in ${((Date.now() - parseStart) / 1000).toFixed(1)}s — ${entries.length} total entries`);
 
   const allPaths = entries
     .filter((e) => !e.isDirectory)
     .map((e) => e.entryName.replace(/\\/g, "/"));
 
   const commonPrefix = findCommonRootFolder(allPaths);
+  if (commonPrefix) {
+    console.log(`[scanner] Stripping common root folder: "${commonPrefix}"`);
+  }
 
   const files: ScannedFile[] = [];
+  let ignoredByDir = 0;
+  let ignoredByExt = 0;
+  let ignoredBySize = 0;
+  let ignoredEmpty = 0;
+  let readErrors = 0;
 
   for (const entry of entries) {
     if (entry.isDirectory) continue;
@@ -40,26 +51,33 @@ export function extractAndScanZip(zipBuffer: Buffer): ScannedFile[] {
     }
 
     if (!entryPath) continue;
-    if (isIgnoredPath(entryPath)) continue;
+    if (isIgnoredPath(entryPath)) { ignoredByDir++; continue; }
 
     const ext = path.extname(entryPath).toLowerCase();
-    if (!SUPPORTED_EXTENSIONS.has(ext)) continue;
+    if (!SUPPORTED_EXTENSIONS.has(ext)) { ignoredByExt++; continue; }
 
-    if (entry.header.size > MAX_FILE_SIZE) continue;
+    if (entry.header.size > MAX_FILE_SIZE) {
+      ignoredBySize++;
+      console.log(`[scanner] Skipping large file: ${entryPath} (${(entry.header.size / 1024).toFixed(0)} KB > ${MAX_FILE_SIZE / 1024} KB limit)`);
+      continue;
+    }
 
     try {
       const content = entry.getData().toString("utf-8");
-      if (content.trim().length === 0) continue;
+      if (content.trim().length === 0) { ignoredEmpty++; continue; }
 
       files.push({
         filePath: entryPath,
         content,
       });
-    } catch {
+    } catch (err) {
+      readErrors++;
+      console.error(`[scanner] Error reading file ${entryPath}:`, err);
       continue;
     }
   }
 
+  console.log(`[scanner] Scan complete — ${files.length} files accepted, ${ignoredByDir} ignored (directory), ${ignoredByExt} ignored (extension), ${ignoredBySize} ignored (too large), ${ignoredEmpty} ignored (empty), ${readErrors} read errors`);
   return files;
 }
 

@@ -107,20 +107,31 @@ async function callJavaEngine(
 ): Promise<JavaEngineResult> {
   const fileCount = Object.keys(javaFiles).length;
   const totalBytes = Object.values(javaFiles).reduce((sum, content) => sum + content.length, 0);
-  console.log(`[analysis] Sending ${fileCount} Java files (${(totalBytes / 1024).toFixed(1)} KB) to Java engine...`);
+  const totalKB = (totalBytes / 1024).toFixed(1);
+  const totalMB = (totalBytes / (1024 * 1024)).toFixed(1);
+  console.log(`[java-client] Preparing to send ${fileCount} Java files (${totalKB} KB / ${totalMB} MB) to Java engine...`);
 
+  const engineStart = Date.now();
   await ensureEngineRunning();
+  console.log(`[java-client] Engine ready in ${Date.now() - engineStart}ms`);
+
+  console.log(`[java-client] Serializing JSON payload...`);
+  const serializeStart = Date.now();
+  const jsonBody = JSON.stringify(javaFiles);
+  const jsonSizeMB = (jsonBody.length / (1024 * 1024)).toFixed(1);
+  console.log(`[java-client] JSON payload: ${jsonSizeMB} MB — serialized in ${Date.now() - serializeStart}ms`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20 * 60 * 1000);
 
   const sendStart = Date.now();
+  console.log(`[java-client] Sending POST /analyze (${jsonSizeMB} MB payload)...`);
   let res: Response;
   try {
     res = await fetch(`${JAVA_ENGINE_URL}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(javaFiles),
+      body: jsonBody,
       signal: controller.signal,
     });
   } catch (err: any) {
@@ -129,20 +140,22 @@ async function callJavaEngine(
     if (err.name === "AbortError") {
       throw new Error(`Java engine analysis timed out after ${elapsed}s (20 min limit). The project may be too large for a single analysis pass.`);
     }
-    console.error(`[analysis] Java engine fetch failed after ${elapsed}s:`, err.message);
+    console.error(`[java-client] Fetch failed after ${elapsed}s: ${err.message}`);
     throw err;
   }
   clearTimeout(timeout);
-  console.log(`[analysis] Java engine responded in ${((Date.now() - sendStart) / 1000).toFixed(1)}s (status ${res.status})`);
+  const fetchElapsed = ((Date.now() - sendStart) / 1000).toFixed(1);
+  console.log(`[java-client] Engine responded in ${fetchElapsed}s (status ${res.status})`);
 
   if (!res.ok) {
     const errBody = await res.text();
+    console.error(`[java-client] Engine error response: ${errBody.substring(0, 500)}`);
     throw new Error(`Java engine returned ${res.status}: ${errBody}`);
   }
 
   const parseStart = Date.now();
   const result = await res.json() as JavaEngineResult;
-  console.log(`[analysis] JSON response parsed in ${Date.now() - parseStart}ms — ${result.nodes.length} nodes, ${result.edges.length} edges`);
+  console.log(`[java-client] JSON response parsed in ${Date.now() - parseStart}ms — ${result.nodes.length} nodes, ${result.edges.length} edges, ${result.resolutionErrors?.length || 0} resolution errors`);
   return result;
 }
 

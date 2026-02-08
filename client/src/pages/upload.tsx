@@ -222,6 +222,8 @@ export default function UploadPage() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 20 * 60 * 1000);
 
+      setProgressMessages(prev => [...prev, `upload: Uploading ${(zipFile.size / (1024 * 1024)).toFixed(1)} MB ZIP file...`]);
+
       let res: Response;
       try {
         res = await fetch("/api/projects/upload-zip", {
@@ -235,13 +237,21 @@ export default function UploadPage() {
         if (networkError.name === "AbortError") {
           throw new Error("The analysis timed out after 20 minutes. Your project may be very large — try uploading fewer files or splitting into smaller ZIPs.");
         }
-        throw new Error("Network error: could not reach the server. Please check your connection and try again.");
+        throw new Error(`Network error: could not reach the server (${networkError.message}). For very large files, the upload may have been interrupted.`);
       }
 
-      if (!res.ok && res.headers.get("content-type")?.includes("application/json")) {
+      if (!res.ok) {
         clearTimeout(timeoutId);
-        const err = await res.json().catch(() => ({ message: `Server error (${res.status}).` }));
-        throw new Error(err.message);
+        const contentType = res.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const err = await res.json().catch(() => ({ message: `Server error (${res.status}).` }));
+          throw new Error(err.message);
+        }
+        if (res.status === 413) {
+          throw new Error("File too large. Maximum allowed size is 2GB. Please reduce your ZIP by excluding build artifacts and dependencies.");
+        }
+        const text = await res.text().catch(() => "");
+        throw new Error(`Server error (${res.status}): ${text || "Unknown error"}`);
       }
 
       const reader = res.body?.getReader();

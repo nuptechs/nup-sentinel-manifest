@@ -11,7 +11,7 @@ import { z } from "zod";
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 },
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 });
 
 const createProjectSchema = z.object({
@@ -234,16 +234,48 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/projects/upload-zip", upload.single("zipFile"), async (req, res) => {
+  function logMemory(label: string) {
+    const mem = process.memoryUsage();
+    console.log(`[memory:${label}] RSS=${(mem.rss / 1024 / 1024).toFixed(0)}MB Heap=${(mem.heapUsed / 1024 / 1024).toFixed(0)}/${(mem.heapTotal / 1024 / 1024).toFixed(0)}MB External=${(mem.external / 1024 / 1024).toFixed(0)}MB`);
+  }
+
+  app.post("/api/projects/upload-zip", (req, res, next) => {
+    console.log(`[upload] Incoming ZIP upload request — Content-Length: ${req.headers['content-length'] || 'unknown'}`);
+    logMemory("before-upload");
+
+    const uploadHandler = upload.single("zipFile");
+    uploadHandler(req, res, (err) => {
+      if (err) {
+        const isMulterError = err instanceof multer.MulterError;
+        if (isMulterError && err.code === "LIMIT_FILE_SIZE") {
+          const limitMB = 2048;
+          console.error(`[upload] MULTER ERROR: File too large (limit: ${limitMB}MB). Code: ${err.code}`);
+          return res.status(413).json({
+            message: `File too large. Maximum allowed size is ${limitMB}MB. Please reduce your ZIP file size by excluding build artifacts, dependencies, and binary files.`,
+          });
+        }
+        console.error(`[upload] MULTER ERROR: ${isMulterError ? err.code : "UNKNOWN"} — ${err.message}`);
+        return res.status(400).json({ message: `Upload error: ${err.message}` });
+      }
+      logMemory("after-multer");
+      next();
+    });
+  }, async (req, res) => {
+    const uploadStartTime = Date.now();
     const useSSE = req.headers.accept === "text/event-stream";
 
     let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
     function sendProgress(step: string, detail: string) {
+      const elapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
       if (useSSE) {
-        res.write(`data: ${JSON.stringify({ type: "progress", step, detail })}\n\n`);
+        try {
+          res.write(`data: ${JSON.stringify({ type: "progress", step, detail })}\n\n`);
+        } catch (writeErr) {
+          console.error(`[upload] SSE write failed: ${writeErr}`);
+        }
       }
-      console.log(`[analysis] ${step}: ${detail}`);
+      console.log(`[upload][+${elapsed}s] ${step}: ${detail}`);
     }
 
     if (useSSE) {
@@ -254,30 +286,40 @@ export async function registerRoutes(
         "X-Accel-Buffering": "no",
       });
       heartbeatInterval = setInterval(() => {
-        res.write(`: heartbeat\n\n`);
+        try {
+          res.write(`: heartbeat\n\n`);
+        } catch {}
       }, 15000);
     }
 
     try {
       const file = req.file;
       if (!file) {
-        console.error("ZIP upload: No file received in request");
+        console.error("[upload] No file received in request body. Headers:", JSON.stringify(req.headers));
         if (useSSE) {
-          res.write(`data: ${JSON.stringify({ type: "error", message: "No ZIP file uploaded" })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: "error", message: "No ZIP file uploaded. Make sure the file field is named 'zipFile'." })}\n\n`);
           return res.end();
         }
         return res.status(400).json({ message: "No ZIP file uploaded" });
       }
 
-      console.log(`ZIP upload: Received file "${file.originalname}" (${(file.size / 1024).toFixed(1)} KB)`);
-      sendProgress("upload", `Received ${file.originalname} (${(file.size / 1024).toFixed(1)} KB)`);
+      const fileSizeMB = (file.size / (1024 * 1024)).toFixed(1);
+      console.log(`[upload] Received file "${file.originalname}" — ${fileSizeMB} MB (${file.size} bytes)`);
+      sendProgress("upload", `Received ${file.originalname} (${fileSizeMB} MB)`);
+      logMemory("after-receive");
 
       const projectName = req.body.name || "Uploaded Repository";
       const projectDescription = req.body.description || null;
 
-      sendProgress("scan", "Scanning ZIP for source files...");
+      sendProgress("scan", "Extracting and scanning ZIP for source files...");
+      const scanStart = Date.now();
       const scannedFiles = extractAndScanZip(file.buffer);
-      console.log(`ZIP upload: Scanned ${scannedFiles.length} supported files from ZIP`);
+      const scanElapsed = ((Date.now() - scanStart) / 1000).toFixed(1);
+      logMemory("after-scan");
+
+      const totalContentKB = scannedFiles.reduce((sum, f) => sum + f.content.length, 0) / 1024;
+      console.log(`[upload] ZIP scan done in ${scanElapsed}s — ${scannedFiles.length} files, ${totalContentKB.toFixed(0)} KB total content`);
+
       if (scannedFiles.length > 0) {
         const exts = new Map<string, number>();
         for (const f of scannedFiles) {
@@ -285,8 +327,7 @@ export async function registerRoutes(
           exts.set(ext, (exts.get(ext) || 0) + 1);
         }
         const typeStr = Array.from(exts.entries()).map(([e, c]) => `${e}:${c}`).join(", ");
-        console.log(`ZIP upload: File types: ${typeStr}`);
-        sendProgress("scan", `Found ${scannedFiles.length} files (${typeStr})`);
+        sendProgress("scan", `Found ${scannedFiles.length} files (${typeStr}) — ${totalContentKB.toFixed(0)} KB source code — scan took ${scanElapsed}s`);
       }
       if (scannedFiles.length === 0) {
         const msg = "No supported source files found in the ZIP. Supported extensions: .java, .ts, .tsx, .js, .jsx, .vue, .py, .cs";
@@ -297,12 +338,14 @@ export async function registerRoutes(
         return res.status(400).json({ message: msg });
       }
 
-      sendProgress("save", "Saving project to database...");
+      sendProgress("save", `Saving ${scannedFiles.length} files to database...`);
+      const saveStart = Date.now();
       const project = await storage.createProject({
         name: projectName,
         description: projectDescription,
       });
 
+      let savedCount = 0;
       for (const sf of scannedFiles) {
         await storage.createSourceFile({
           projectId: project.id,
@@ -310,7 +353,14 @@ export async function registerRoutes(
           fileType: getFileType(sf.filePath),
           content: sf.content,
         });
+        savedCount++;
+        if (savedCount % 100 === 0) {
+          sendProgress("save", `Saved ${savedCount}/${scannedFiles.length} files to database...`);
+        }
       }
+      const saveElapsed = ((Date.now() - saveStart) / 1000).toFixed(1);
+      sendProgress("save", `All ${scannedFiles.length} files saved in ${saveElapsed}s`);
+      logMemory("after-save");
 
       await storage.updateProjectStatus(project.id, "uploaded", scannedFiles.length);
 
@@ -327,20 +377,24 @@ export async function registerRoutes(
 
         const javaCount = fileData.filter(f => f.filePath.endsWith(".java")).length;
         const frontendCount = fileData.length - javaCount;
-        sendProgress("Step 1/4", `Building application graph (${javaCount} Java files, ${frontendCount} frontend files)...`);
+        const javaContentKB = fileData.filter(f => f.filePath.endsWith(".java")).reduce((sum, f) => sum + f.content.length, 0) / 1024;
+        sendProgress("Step 1/4", `Building application graph (${javaCount} Java files — ${javaContentKB.toFixed(0)} KB, ${frontendCount} frontend files)...`);
         const graphStart = Date.now();
+        logMemory("before-java-engine");
         const buildResult = await buildApplicationGraph(fileData);
         const appGraph = buildResult.graph;
         const resolutionErrors = buildResult.resolutionErrors;
+        logMemory("after-java-engine");
         sendProgress("Step 1/4", `Done in ${((Date.now() - graphStart) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
 
         sendProgress("Step 2/4", "Analyzing graph endpoints...");
         const endpointImpacts = analyzeGraphEndpoints(appGraph);
         sendProgress("Step 2/4", `Done — ${endpointImpacts.length} endpoints found`);
 
-        sendProgress("Step 3/4", "Analyzing frontend interactions...");
+        sendProgress("Step 3/4", `Analyzing frontend interactions (${frontendCount} files)...`);
+        const feStart = Date.now();
         const frontendInteractions = analyzeFrontend(fileData, appGraph);
-        sendProgress("Step 3/4", `Done — ${frontendInteractions.length} frontend interactions found`);
+        sendProgress("Step 3/4", `Done in ${((Date.now() - feStart) / 1000).toFixed(1)}s — ${frontendInteractions.length} frontend interactions found`);
 
         let catalogEntryData = interactionsToCatalogEntries(
           frontendInteractions, appGraph, analysisRun.id, project.id
@@ -357,7 +411,7 @@ export async function registerRoutes(
           catalogEntryData = await classifyEntries(catalogEntryData);
           sendProgress("Step 4/4", "LLM classification complete");
         } catch (llmError) {
-          console.error("[analysis] Step 4/4 — LLM classification failed, using inferred values:", llmError);
+          console.error("[upload] Step 4/4 — LLM classification failed, using inferred values:", llmError);
           sendProgress("Step 4/4", "LLM classification failed, using inferred values");
         }
 
@@ -374,6 +428,10 @@ export async function registerRoutes(
         });
 
         await storage.updateProjectStatus(project.id, "completed");
+
+        const totalElapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+        console.log(`[upload] COMPLETE — Project "${projectName}" — ${scannedFiles.length} files, ${created.length} catalog entries, ${endpointImpacts.length} endpoints — total ${totalElapsed}s`);
+        logMemory("complete");
 
         const result = {
           projectId: project.id,
@@ -416,6 +474,7 @@ export async function registerRoutes(
         }
       } catch (analysisError) {
         const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";
+        console.error(`[upload] ANALYSIS FAILED: ${errorMsg}`, analysisError instanceof Error ? analysisError.stack : "");
         await storage.updateAnalysisRun(analysisRun.id, {
           status: "failed",
           completedAt: new Date(),
@@ -426,13 +485,19 @@ export async function registerRoutes(
       }
     } catch (error) {
       if (heartbeatInterval) clearInterval(heartbeatInterval);
-      console.error("Error processing ZIP upload:", error);
+      const elapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
       const msg = error instanceof Error ? error.message : "Failed to process ZIP";
+      console.error(`[upload] ERROR after ${elapsed}s: ${msg}`, error instanceof Error ? error.stack : "");
+      logMemory("error");
       if (useSSE) {
-        res.write(`data: ${JSON.stringify({ type: "error", message: msg })}\n\n`);
-        res.end();
+        try {
+          res.write(`data: ${JSON.stringify({ type: "error", message: msg })}\n\n`);
+          res.end();
+        } catch {}
       } else {
-        res.status(500).json({ message: msg });
+        if (!res.headersSent) {
+          res.status(500).json({ message: msg });
+        }
       }
     }
   });
