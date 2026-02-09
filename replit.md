@@ -50,7 +50,7 @@ The system constructs an in-memory Application Graph model to represent the back
   - Result: every function that transitively leads to an HTTP call gets the resolved URLs
 - **Lookup** (`lookupGlobalCallGraph`): Given handler name + file path, tries qualified key lookup, then import-resolved lookup
 - **Integration**: Built after HttpServiceMap in `analyzeFrontend`, passed to Vue/React/Angular file analyzers via `resolveBindingsViaNodes`
-- **Resolution order**: (1) `ScriptSymbolTable.traceHttpCalls` → (2) `resolveExternalCallsToHttpCalls` → (3) `lookupGlobalCallGraph` → (4) `lookupEventGraph`
+- **Resolution order**: (1) `ScriptSymbolTable.traceHttpCalls` → (2) `resolveExternalCallsToHttpCalls` → (3) `lookupGlobalCallGraph` → (4) `lookupEventGraph` → (5) `lookupStateFlowGraph`
 
 ### Component Event Graph (Fourth-Tier Resolution)
 - **Purpose**: Propagates HTTP resolution through component event boundaries ($emit in Vue, callback props in React, @Output in Angular). When a child component handler emits an event that is listened to by a parent handler which resolves to HTTP, the child handler inherits that HTTP mapping.
@@ -75,6 +75,34 @@ The system constructs an in-memory Application Graph model to represent the back
 - **Resolution** (`lookupEventGraph`): finds emitted events for handler → scans all parent listeners for matching events → resolves parent handler via full 3-tier pipeline (local → cross-file → global call graph)
 - **Integration**: Built as pre-pass in `analyzeFrontend` alongside serviceMap and globalCallGraph, passed through to `resolveBindingsViaNodes` → `resolveHandlerHttpCalls`
 - **Validated on easynup**: endpoints 972→1014 (+42), controller matches 657→683 (+26), {base} URLs 306→317 (+11)
+
+### State Flow Graph (Fifth-Tier Resolution)
+- **Purpose**: Resolves HTTP calls through state management boundaries. When a handler writes to a state container (Pinia/Vuex store, Redux slice, Angular service, composable) and a separate function reads that state field and makes an HTTP call, the handler inherits the HTTP mapping.
+- **Data structures**:
+  - `StateFlowGraph`: `{ writers, readers, containerFiles }`
+  - `writers`: `Map<qualifiedField, StateFieldWrite[]>` where entry = `{ containerFile, containerName, fieldName, writerFunction, qualifiedField }`
+  - `readers`: `Map<qualifiedField, StateFieldRead[]>` where entry = `{ containerFile, containerName, fieldName, readerFunction, httpCalls }`
+  - `containerFiles`: `Set<string>` of detected state container file paths
+  - Qualified field format: `${containerFilePath}::${containerName}.${fieldName}`
+- **Container detection** (`detectStateContainers`):
+  - Pinia: `defineStore('name', ...)` — extracts store name and state fields from setup function or options object
+  - Vuex: `createStore({...})` — extracts state fields from state option
+  - Redux: `createSlice({name, initialState, reducers})` — extracts fields from initialState, writers from reducer functions
+  - Angular: `@Injectable()` class declarations — extracts class properties as state fields
+  - Composables: Functions returning objects with `ref()`, `reactive()`, or `useState()` calls — extracts reactive variable names
+- **Write detection** (`detectStateWrites`): Scans all source files for:
+  - Vuex mutations/actions: `commit('mutationName')`, `dispatch('actionName')`
+  - Pinia direct assignment: `store.field = value`, `store.$patch({field: value})`
+  - Redux dispatch: `dispatch(actionCreator())` 
+  - Angular service assignment: `this.service.field = value`
+  - Generic setter calls: `setFieldName(value)` patterns matching container fields
+- **Read detection** (`detectStateReads`): Scans functions that contain HTTP calls for:
+  - Direct property access: `store.field`, `this.service.field`
+  - Computed/getter patterns: functions referencing state fields
+  - Watch/effect patterns: `watch(() => store.field, ...)`, `useEffect` with state dependencies
+- **Lookup** (`lookupStateFlowGraph`): Given handler name + file path, checks if handler calls any state-writing function → finds readers of same state fields with HTTP calls → returns those HTTP calls
+- **Integration**: Built as pre-pass in `analyzeFrontend` alongside serviceMap, globalCallGraph, and eventGraph, passed through to `resolveBindingsViaNodes` → `resolveHandlerHttpCalls`
+- **Validated on easynup**: no change in metrics (1014 endpoints, 683 controllers, 317 {base} URLs) as expected for WS operation-based architecture that doesn't use state management patterns for HTTP triggering
 
 ## External Dependencies
 - PostgreSQL
