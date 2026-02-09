@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
+import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -22,6 +23,45 @@ const upload = multer({
   }),
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 });
+
+const chunkUpload = multer({
+  storage: multer.diskStorage({
+    destination: os.tmpdir(),
+    filename: (_req, _file, cb) => {
+      const uniqueName = `permacat-chunk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      cb(null, uniqueName);
+    },
+  }),
+  limits: { fileSize: 60 * 1024 * 1024 },
+});
+
+interface ChunkedUploadSession {
+  uploadId: string;
+  fileName: string;
+  totalSize: number;
+  totalChunks: number;
+  receivedChunks: Set<number>;
+  tempFilePath: string;
+  createdAt: number;
+  projectName: string;
+  projectDescription: string | null;
+}
+
+const chunkedUploads = new Map<string, ChunkedUploadSession>();
+
+setInterval(() => {
+  const now = Date.now();
+  const maxAge = 60 * 60 * 1000;
+  chunkedUploads.forEach((session, id) => {
+    if (now - session.createdAt > maxAge) {
+      try {
+        if (fs.existsSync(session.tempFilePath)) fs.unlinkSync(session.tempFilePath);
+      } catch {}
+      chunkedUploads.delete(id);
+      console.log(`[chunked-upload] Expired session ${id} cleaned up`);
+    }
+  });
+}, 5 * 60 * 1000);
 
 const createProjectSchema = z.object({
   name: z.string().min(1, "Project name is required"),
@@ -247,6 +287,361 @@ export async function registerRoutes(
     const mem = process.memoryUsage();
     console.log(`[memory:${label}] RSS=${(mem.rss / 1024 / 1024).toFixed(0)}MB Heap=${(mem.heapUsed / 1024 / 1024).toFixed(0)}/${(mem.heapTotal / 1024 / 1024).toFixed(0)}MB External=${(mem.external / 1024 / 1024).toFixed(0)}MB`);
   }
+
+  app.post("/api/uploads/init", async (req, res) => {
+    try {
+      const schema = z.object({
+        fileName: z.string().min(1),
+        totalSize: z.number().positive(),
+        totalChunks: z.number().int().positive(),
+        projectName: z.string().min(1),
+        projectDescription: z.string().optional().nullable(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Validation failed", errors: parsed.error.issues.map(i => i.message) });
+      }
+      const { fileName, totalSize, totalChunks, projectName, projectDescription } = parsed.data;
+      const uploadId = crypto.randomUUID();
+      const tempFilePath = path.join(os.tmpdir(), `permacat-chunked-${uploadId}.zip`);
+      const fd = fs.openSync(tempFilePath, "w");
+      fs.closeSync(fd);
+
+      const session: ChunkedUploadSession = {
+        uploadId,
+        fileName,
+        totalSize,
+        totalChunks,
+        receivedChunks: new Set(),
+        tempFilePath,
+        createdAt: Date.now(),
+        projectName,
+        projectDescription: projectDescription || null,
+      };
+      chunkedUploads.set(uploadId, session);
+      console.log(`[chunked-upload] Init session ${uploadId} — ${fileName} — ${(totalSize / (1024 * 1024)).toFixed(1)} MB — ${totalChunks} chunks`);
+      res.json({ uploadId, totalChunks });
+    } catch (error) {
+      console.error("[chunked-upload] Init error:", error);
+      res.status(500).json({ message: "Failed to initialize upload" });
+    }
+  });
+
+  app.post("/api/uploads/:uploadId/chunk", (req, res, next) => {
+    const uploadHandler = chunkUpload.single("chunk");
+    uploadHandler(req, res, (err) => {
+      if (err) {
+        console.error(`[chunked-upload] Chunk upload error: ${err.message}`);
+        return res.status(400).json({ message: `Chunk upload error: ${err.message}` });
+      }
+      next();
+    });
+  }, async (req, res) => {
+    try {
+      const { uploadId } = req.params;
+      const chunkIndex = parseInt(req.body.chunkIndex);
+      const session = chunkedUploads.get(uploadId);
+
+      if (!session) {
+        if (req.file) try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(404).json({ message: "Upload session not found or expired" });
+      }
+      if (isNaN(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
+        if (req.file) try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(400).json({ message: "Invalid chunk index" });
+      }
+      if (!req.file) {
+        return res.status(400).json({ message: "No chunk data received" });
+      }
+
+      if (session.receivedChunks.has(chunkIndex)) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        const received = session.receivedChunks.size;
+        console.log(`[chunked-upload] ${uploadId} — chunk ${chunkIndex + 1} already received, skipping`);
+        return res.json({ received, total: session.totalChunks, complete: received === session.totalChunks });
+      }
+
+      const chunkData = fs.readFileSync(req.file.path);
+      const chunkSize = 50 * 1024 * 1024;
+      const offset = chunkIndex * chunkSize;
+      const fd = fs.openSync(session.tempFilePath, "r+");
+      fs.writeSync(fd, chunkData, 0, chunkData.length, offset);
+      fs.closeSync(fd);
+
+      try { fs.unlinkSync(req.file.path); } catch {}
+
+      session.receivedChunks.add(chunkIndex);
+      const received = session.receivedChunks.size;
+      const pct = ((received / session.totalChunks) * 100).toFixed(0);
+      console.log(`[chunked-upload] ${uploadId} — chunk ${chunkIndex + 1}/${session.totalChunks} (${pct}%) — ${(chunkData.length / (1024 * 1024)).toFixed(1)} MB`);
+
+      res.json({
+        received,
+        total: session.totalChunks,
+        complete: received === session.totalChunks,
+      });
+    } catch (error) {
+      if (req.file) try { fs.unlinkSync(req.file.path); } catch {}
+      console.error("[chunked-upload] Chunk error:", error);
+      res.status(500).json({ message: "Failed to process chunk" });
+    }
+  });
+
+  app.post("/api/uploads/:uploadId/complete", async (req, res) => {
+    const { uploadId } = req.params;
+    const session = chunkedUploads.get(uploadId);
+
+    if (!session) {
+      return res.status(404).json({ message: "Upload session not found or expired" });
+    }
+    if (session.receivedChunks.size !== session.totalChunks) {
+      return res.status(400).json({
+        message: `Upload incomplete: received ${session.receivedChunks.size}/${session.totalChunks} chunks`,
+      });
+    }
+
+    const actualSize = fs.statSync(session.tempFilePath).size;
+    if (actualSize < session.totalSize * 0.95) {
+      console.error(`[chunked-upload] File size mismatch: expected ~${session.totalSize}, got ${actualSize}`);
+      return res.status(400).json({
+        message: `Assembled file appears incomplete (${(actualSize / (1024 * 1024)).toFixed(1)} MB vs expected ${(session.totalSize / (1024 * 1024)).toFixed(1)} MB). Please try uploading again.`,
+      });
+    }
+
+    const uploadStartTime = Date.now();
+    const useSSE = req.headers.accept === "text/event-stream";
+    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+
+    function sendProgress(step: string, detail: string) {
+      const elapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+      if (useSSE) {
+        try { res.write(`data: ${JSON.stringify({ type: "progress", step, detail })}\n\n`); } catch {}
+      }
+      console.log(`[chunked-upload][+${elapsed}s] ${step}: ${detail}`);
+    }
+
+    if (useSSE) {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      heartbeatInterval = setInterval(() => {
+        try { res.write(`: heartbeat\n\n`); } catch {}
+      }, 15000);
+    }
+
+    const cleanupSession = () => {
+      try {
+        if (fs.existsSync(session.tempFilePath)) {
+          fs.unlinkSync(session.tempFilePath);
+          console.log(`[chunked-upload] Cleaned up temp file: ${session.tempFilePath}`);
+        }
+      } catch {}
+      chunkedUploads.delete(uploadId);
+    };
+
+    try {
+      const fileSizeMB = (fs.statSync(session.tempFilePath).size / (1024 * 1024)).toFixed(1);
+      logMemory("chunked-before-scan");
+      sendProgress("upload", `File assembled: ${session.fileName} (${fileSizeMB} MB)`);
+
+      sendProgress("scan", "Extracting and scanning ZIP for source files...");
+      const scanStart = Date.now();
+      const scannedFiles = extractAndScanZip(session.tempFilePath);
+      const scanElapsed = ((Date.now() - scanStart) / 1000).toFixed(1);
+      logMemory("chunked-after-scan");
+
+      const totalContentKB = scannedFiles.reduce((sum, f) => sum + f.content.length, 0) / 1024;
+      console.log(`[chunked-upload] ZIP scan done in ${scanElapsed}s — ${scannedFiles.length} files, ${totalContentKB.toFixed(0)} KB total content`);
+
+      if (scannedFiles.length > 0) {
+        const exts = new Map<string, number>();
+        for (const f of scannedFiles) {
+          const ext = f.filePath.split(".").pop() || "?";
+          exts.set(ext, (exts.get(ext) || 0) + 1);
+        }
+        const typeStr = Array.from(exts.entries()).map(([e, c]) => `${e}:${c}`).join(", ");
+        sendProgress("scan", `Found ${scannedFiles.length} files (${typeStr}) — ${totalContentKB.toFixed(0)} KB source code — scan took ${scanElapsed}s`);
+      }
+      if (scannedFiles.length === 0) {
+        const msg = "No supported source files found in the ZIP. Supported extensions: .java, .ts, .tsx, .js, .jsx, .vue, .py, .cs";
+        if (useSSE) {
+          res.write(`data: ${JSON.stringify({ type: "error", message: msg })}\n\n`);
+          if (heartbeatInterval) clearInterval(heartbeatInterval);
+          cleanupSession();
+          return res.end();
+        }
+        cleanupSession();
+        return res.status(400).json({ message: msg });
+      }
+
+      sendProgress("save", `Saving ${scannedFiles.length} files to database...`);
+      const saveStart = Date.now();
+      const project = await storage.createProject({
+        name: session.projectName,
+        description: session.projectDescription,
+      });
+
+      let savedCount = 0;
+      for (const sf of scannedFiles) {
+        await storage.createSourceFile({
+          projectId: project.id,
+          filePath: sf.filePath,
+          fileType: getFileType(sf.filePath),
+          content: sf.content,
+        });
+        savedCount++;
+        if (savedCount % 100 === 0) {
+          sendProgress("save", `Saved ${savedCount}/${scannedFiles.length} files to database...`);
+        }
+      }
+      const saveElapsed = ((Date.now() - saveStart) / 1000).toFixed(1);
+      sendProgress("save", `All ${scannedFiles.length} files saved in ${saveElapsed}s`);
+      logMemory("chunked-after-save");
+
+      await storage.updateProjectStatus(project.id, "uploaded", scannedFiles.length);
+
+      const analysisRun = await storage.createAnalysisRun({ projectId: project.id });
+
+      try {
+        await storage.updateProjectStatus(project.id, "analyzing");
+        await storage.updateAnalysisRun(analysisRun.id, { status: "analyzing" });
+
+        const fileData = scannedFiles.map((f) => ({
+          filePath: f.filePath,
+          content: f.content,
+        }));
+
+        const javaCount = fileData.filter(f => f.filePath.endsWith(".java")).length;
+        const frontendCount = fileData.length - javaCount;
+        const javaContentKB = fileData.filter(f => f.filePath.endsWith(".java")).reduce((sum, f) => sum + f.content.length, 0) / 1024;
+        sendProgress("Step 1/4", `Building application graph (${javaCount} Java files — ${javaContentKB.toFixed(0)} KB, ${frontendCount} frontend files)...`);
+        const graphStart = Date.now();
+        logMemory("chunked-before-java-engine");
+        const buildResult = await buildApplicationGraph(fileData);
+        const appGraph = buildResult.graph;
+        const resolutionErrors = buildResult.resolutionErrors;
+        logMemory("chunked-after-java-engine");
+        sendProgress("Step 1/4", `Done in ${((Date.now() - graphStart) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
+
+        sendProgress("Step 2/4", "Analyzing graph endpoints...");
+        const endpointImpacts = analyzeGraphEndpoints(appGraph);
+        sendProgress("Step 2/4", `Done — ${endpointImpacts.length} endpoints found`);
+
+        sendProgress("Step 3/4", `Analyzing frontend interactions (${frontendCount} files)...`);
+        const feStart = Date.now();
+        const frontendInteractions = analyzeFrontend(fileData, appGraph);
+        sendProgress("Step 3/4", `Done in ${((Date.now() - feStart) / 1000).toFixed(1)}s — ${frontendInteractions.length} frontend interactions found`);
+
+        let catalogEntryData = interactionsToCatalogEntries(
+          frontendInteractions, appGraph, analysisRun.id, project.id
+        );
+
+        if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
+          catalogEntryData = endpointImpactsToCatalogEntries(
+            endpointImpacts, analysisRun.id, project.id
+          );
+        }
+
+        sendProgress("Step 4/4", `LLM classification of ${catalogEntryData.length} entries...`);
+        try {
+          catalogEntryData = await classifyEntries(catalogEntryData);
+          sendProgress("Step 4/4", "LLM classification complete");
+        } catch (llmError) {
+          console.error("[chunked-upload] Step 4/4 — LLM classification failed, using inferred values:", llmError);
+          sendProgress("Step 4/4", "LLM classification failed, using inferred values");
+        }
+
+        const created = await storage.createCatalogEntries(catalogEntryData);
+        const graphSummary = appGraph.toJSON();
+
+        await storage.updateAnalysisRun(analysisRun.id, {
+          status: "completed",
+          completedAt: new Date(),
+          totalInteractions: frontendInteractions.length,
+          totalEndpoints: endpointImpacts.length,
+          totalEntities: appGraph.getNodesByType("ENTITY").length,
+        });
+
+        await storage.updateProjectStatus(project.id, "completed");
+
+        const totalElapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+        console.log(`[chunked-upload] COMPLETE — Project "${session.projectName}" — ${scannedFiles.length} files, ${created.length} catalog entries, ${endpointImpacts.length} endpoints — total ${totalElapsed}s`);
+        logMemory("chunked-complete");
+
+        const result = {
+          projectId: project.id,
+          projectName: session.projectName,
+          filesScanned: scannedFiles.length,
+          analysisRunId: analysisRun.id,
+          totalInteractions: frontendInteractions.length,
+          totalEndpoints: endpointImpacts.length,
+          totalEntities: appGraph.getNodesByType("ENTITY").length,
+          catalogEntries: created.length,
+          graph: {
+            totalNodes: graphSummary.nodes.length,
+            totalEdges: graphSummary.edges.length,
+            nodesByType: {
+              controllers: appGraph.getNodesByType("CONTROLLER").length,
+              services: appGraph.getNodesByType("SERVICE").length,
+              repositories: appGraph.getNodesByType("REPOSITORY").length,
+              entities: appGraph.getNodesByType("ENTITY").length,
+            },
+          },
+          endpointImpacts: endpointImpacts.map((ei) => ({
+            endpoint: ei.endpoint,
+            httpMethod: ei.httpMethod,
+            controllerClass: ei.controllerClass,
+            controllerMethod: ei.controllerMethod,
+            callDepth: ei.callDepth,
+            entitiesTouched: ei.entitiesTouched,
+            fullCallChain: ei.fullCallChain,
+            persistenceOperations: ei.persistenceOperations,
+          })),
+          resolutionErrors: resolutionErrors.length > 0 ? resolutionErrors : undefined,
+        };
+
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        cleanupSession();
+
+        if (useSSE) {
+          res.write(`data: ${JSON.stringify({ type: "complete", result })}\n\n`);
+          res.end();
+        } else {
+          res.status(201).json(result);
+        }
+      } catch (analysisError) {
+        const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";
+        console.error(`[chunked-upload] ANALYSIS FAILED: ${errorMsg}`, analysisError instanceof Error ? analysisError.stack : "");
+        await storage.updateAnalysisRun(analysisRun.id, {
+          status: "failed",
+          completedAt: new Date(),
+          errorMessage: errorMsg,
+        });
+        await storage.updateProjectStatus(project.id, "failed");
+        throw analysisError;
+      }
+    } catch (error) {
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      cleanupSession();
+      const elapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+      const msg = error instanceof Error ? error.message : "Failed to process ZIP";
+      console.error(`[chunked-upload] ERROR after ${elapsed}s: ${msg}`, error instanceof Error ? error.stack : "");
+      logMemory("chunked-error");
+      if (useSSE) {
+        try {
+          res.write(`data: ${JSON.stringify({ type: "error", message: msg })}\n\n`);
+          res.end();
+        } catch {}
+      } else {
+        if (!res.headersSent) {
+          res.status(500).json({ message: msg });
+        }
+      }
+    }
+  });
 
   app.post("/api/projects/upload-zip", (req, res, next) => {
     console.log(`[upload] Incoming ZIP upload request — Content-Length: ${req.headers['content-length'] || 'unknown'}`);

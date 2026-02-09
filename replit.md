@@ -127,7 +127,10 @@ The backend is represented as a navigable in-memory graph:
 - GET /api/projects - List all projects
 - POST /api/projects - Create project with source files
 - POST /api/projects/:id/analyze - Run analysis pipeline
-- POST /api/projects/upload-zip - Upload ZIP repository, auto-scan, and analyze (multipart/form-data)
+- POST /api/projects/upload-zip - Upload ZIP repository, auto-scan, and analyze (multipart/form-data, legacy single-request)
+- POST /api/uploads/init - Initialize chunked upload session (returns uploadId)
+- POST /api/uploads/:uploadId/chunk - Upload a single chunk (multipart/form-data, max 60MB per chunk)
+- POST /api/uploads/:uploadId/complete - Finalize chunked upload and trigger analysis (SSE streaming)
 - GET /api/catalog-entries/:projectId - Get catalog entries
 - PATCH /api/catalog-entries/:id - Update human classification
 - GET /api/catalog-entries/:projectId/export - Export catalog as JSON
@@ -144,9 +147,19 @@ The backend is represented as a navigable in-memory graph:
 - **Disk-based upload**: multer writes ZIP to /tmp via diskStorage, scanner reads from disk path — avoids loading entire ZIP into Node.js heap (critical for 1GB+ ZIPs)
 - Temp files cleaned up after processing (success and error paths)
 
+## Chunked Upload System
+- **Purpose**: Bypass Replit proxy limits (~200-500MB per single request) for large ZIP uploads (1GB+)
+- **Chunk size**: 50 MB per chunk (within proxy limits)
+- **Flow**: Browser splits ZIP → init session → send chunks sequentially → complete triggers analysis
+- **Backend state**: In-memory `Map<uploadId, ChunkedUploadSession>` with 1-hour auto-expiry
+- **Chunk assembly**: Each chunk written at correct offset via `fs.writeSync(fd, data, 0, len, offset)` into a single temp file
+- **Retry**: Frontend retries each chunk up to 3 times with exponential backoff
+- **Cleanup**: Temp file and session deleted after analysis completes (success or error)
+- **Legacy**: Single-request `/api/projects/upload-zip` still available for smaller files
+
 ## Upload & Analysis Timeouts
 - HTTP server: 25-minute timeout (requestTimeout, headersTimeout, keepAliveTimeout, timeout)
-- Multer: 2GB max file size, diskStorage to /tmp (avoids OOM for large uploads)
+- Multer: 2GB max file size (legacy), 60MB per chunk (chunked upload), diskStorage to /tmp
 - Java engine fetch: 25-minute abort controller timeout
 - Frontend fetch: 25-minute abort controller timeout
 - JVM heap: -Xmx2g -Xms512m for large projects

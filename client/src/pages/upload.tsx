@@ -210,51 +210,98 @@ export default function UploadPage() {
     },
   });
 
+  const CHUNK_SIZE = 50 * 1024 * 1024;
+
   const zipUploadMutation = useMutation({
     mutationFn: async () => {
       if (!zipFile) throw new Error("No ZIP file selected");
       setProgressMessages([]);
-      const formData = new FormData();
-      formData.append("zipFile", zipFile);
-      formData.append("name", projectName);
-      if (description) formData.append("description", description);
+
+      const totalChunks = Math.ceil(zipFile.size / CHUNK_SIZE);
+      const fileSizeMB = (zipFile.size / (1024 * 1024)).toFixed(1);
+
+      setProgressMessages(prev => [...prev, `upload: Initializing chunked upload — ${fileSizeMB} MB in ${totalChunks} parts...`]);
+
+      const initRes = await fetch("/api/uploads/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: zipFile.name,
+          totalSize: zipFile.size,
+          totalChunks,
+          projectName,
+          projectDescription: description || null,
+        }),
+      });
+      if (!initRes.ok) {
+        const err = await initRes.json().catch(() => ({ message: "Failed to initialize upload" }));
+        throw new Error(err.message);
+      }
+      const { uploadId } = await initRes.json();
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, zipFile.size);
+        const chunk = zipFile.slice(start, end);
+        const chunkMB = ((end - start) / (1024 * 1024)).toFixed(1);
+
+        setProgressMessages(prev => [...prev, `upload: Sending part ${i + 1}/${totalChunks} (${chunkMB} MB)...`]);
+
+        const formData = new FormData();
+        formData.append("chunk", chunk, "chunk.bin");
+        formData.append("chunkIndex", String(i));
+
+        let retries = 0;
+        const maxRetries = 3;
+        while (true) {
+          try {
+            const chunkRes = await fetch(`/api/uploads/${uploadId}/chunk`, {
+              method: "POST",
+              body: formData,
+            });
+            if (!chunkRes.ok) {
+              const err = await chunkRes.json().catch(() => ({ message: `Chunk ${i + 1} upload failed` }));
+              throw new Error(err.message);
+            }
+            break;
+          } catch (err: any) {
+            retries++;
+            if (retries >= maxRetries) {
+              throw new Error(`Failed to upload part ${i + 1}/${totalChunks} after ${maxRetries} attempts: ${err.message}`);
+            }
+            setProgressMessages(prev => [...prev, `upload: Part ${i + 1} failed, retrying (${retries}/${maxRetries})...`]);
+            await new Promise(r => setTimeout(r, 2000 * retries));
+          }
+        }
+      }
+
+      setProgressMessages(prev => [...prev, `upload: All ${totalChunks} parts uploaded. Starting analysis...`]);
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 25 * 60 * 1000);
 
-      setProgressMessages(prev => [...prev, `upload: Uploading ${(zipFile.size / (1024 * 1024)).toFixed(1)} MB ZIP file...`]);
-
-      let res: Response;
+      let completeRes: Response;
       try {
-        res = await fetch("/api/projects/upload-zip", {
+        completeRes = await fetch(`/api/uploads/${uploadId}/complete`, {
           method: "POST",
-          body: formData,
           signal: controller.signal,
           headers: { Accept: "text/event-stream" },
         });
       } catch (networkError: any) {
         clearTimeout(timeoutId);
         if (networkError.name === "AbortError") {
-          throw new Error("The analysis timed out after 25 minutes. Your project may be very large — try uploading fewer files or splitting into smaller ZIPs.");
+          throw new Error("The analysis timed out after 25 minutes.");
         }
-        throw new Error(`Network error: could not reach the server (${networkError.message}). For very large files, the upload may have been interrupted.`);
+        throw new Error(`Network error during analysis: ${networkError.message}`);
       }
 
-      if (!res.ok) {
+      if (!completeRes.ok && completeRes.headers.get("content-type")?.includes("application/json")) {
         clearTimeout(timeoutId);
-        const contentType = res.headers.get("content-type") || "";
-        if (contentType.includes("application/json")) {
-          const err = await res.json().catch(() => ({ message: `Server error (${res.status}).` }));
-          throw new Error(err.message);
-        }
-        if (res.status === 413) {
-          throw new Error("File too large. Maximum allowed size is 2GB. Please reduce your ZIP by excluding build artifacts and dependencies.");
-        }
-        const text = await res.text().catch(() => "");
-        throw new Error(`Server error (${res.status}): ${text || "Unknown error"}`);
+        const err = await completeRes.json().catch(() => ({ message: "Analysis failed" }));
+        throw new Error(err.message);
       }
 
-      const reader = res.body?.getReader();
+      const reader = completeRes.body?.getReader();
       if (!reader) {
         clearTimeout(timeoutId);
         throw new Error("Could not read server response stream.");
