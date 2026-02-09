@@ -33,7 +33,24 @@ The system constructs an in-memory Application Graph model to represent the back
   - `buildEndpoint()` / `buildUrl()` pattern: extracts string arguments → `{base}/operation`
   - BaseApiService pattern: `buildEndpoint('create', true)` → `{base}/create`, enabling 100% match rate to WS operation controllers
 - **Architecture detection** (`architecture-detector.ts`): Classifies backend as REST_CONTROLLER (standard `/api/` paths) or WS_OPERATION_BASED (WebSocket-like controllers using className matching); affects URL-to-controller matching strategy
-- **Validated on large production codebase** (easynup): URL extraction 6.3x improvement (146→918), controller matching 4.4x improvement (146→636), {base} URLs 100% matched (304/304)
+- **Validated on large production codebase** (easynup): URL extraction 6.3x improvement (146→922), controller matching 4.4x improvement (146→640), {base} URLs 100% matched (306/306)
+
+### Global Function Call Graph (Three-Tier Resolution)
+- **Purpose**: Third-tier fallback for HTTP resolution when local tracing and cross-file service map both fail. Handles deeply nested call chains where handler → composable → service → HTTP call spans multiple intermediate functions.
+- **Architecture**: `GlobalCallGraph = Map<qualifiedKey, GlobalCallGraphNode>` where key = `filePath::functionName`
+- **Node structure**: `{ filePath, functionName, httpCalls (direct), callees (Set<qualifiedKey>), callers (Set<qualifiedKey>), propagatedHttpCalls (HttpCall[]) }`
+- **Build phase** (`buildGlobalCallGraph`):
+  1. Scan all source files, extract function/method declarations with qualified keys
+  2. For each function body, detect direct HTTP calls (fetch, axios, etc.) and call sites to other functions
+  3. Resolve cross-file edges: parse imports via `parseImportBindingsInternal`, create callee edges like `targetPath::default.methodName`
+  4. Seed HTTP leaves from both direct calls and HttpServiceMap entries
+- **Propagation phase** (`propagateHttpCapability`): BFS from HTTP leaf functions backward through reverse call graph edges
+  - Merges propagated HTTP calls into callers
+  - Handles cycles via visited set tracking
+  - Result: every function that transitively leads to an HTTP call gets the resolved URLs
+- **Lookup** (`lookupGlobalCallGraph`): Given handler name + file path, tries qualified key lookup, then import-resolved lookup
+- **Integration**: Built after HttpServiceMap in `analyzeFrontend`, passed to Vue/React/Angular file analyzers via `resolveBindingsViaNodes`
+- **Resolution order**: (1) `ScriptSymbolTable.traceHttpCalls` → (2) `resolveExternalCallsToHttpCalls` → (3) `lookupGlobalCallGraph`
 
 ## External Dependencies
 - PostgreSQL

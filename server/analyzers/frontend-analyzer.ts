@@ -895,6 +895,338 @@ function buildHttpServiceMap(files: { filePath: string; content: string }[]): Ht
   return serviceMap;
 }
 
+interface GlobalCallGraphNode {
+  key: string;
+  filePath: string;
+  functionName: string;
+  httpCalls: HttpCall[];
+  callees: Set<string>;
+  callers: Set<string>;
+  propagatedHttpCalls: HttpCall[] | null;
+}
+
+type GlobalCallGraph = Map<string, GlobalCallGraphNode>;
+
+function makeGlobalKey(filePath: string, fnName: string): string {
+  return filePath + "::" + fnName;
+}
+
+function buildGlobalCallGraph(files: { filePath: string; content: string }[], serviceMap: HttpServiceMap): GlobalCallGraph {
+  const graph: GlobalCallGraph = new Map();
+  const allFilePaths = files.map(f => f.filePath);
+
+  for (const file of files) {
+    if (file.filePath.includes("node_modules") || file.filePath.includes("dist/") || file.filePath.includes("build/") || file.filePath.includes("__tests__")) {
+      continue;
+    }
+    const ext = file.filePath.substring(file.filePath.lastIndexOf("."));
+    if (![".ts", ".js", ".tsx", ".jsx", ".vue"].includes(ext)) continue;
+
+    try {
+      let scriptContent = file.content;
+      if (ext === ".vue") {
+        const sfcResult = vueSfc.parse(file.content);
+        const descriptor = sfcResult.descriptor;
+        if (descriptor.scriptSetup) scriptContent = descriptor.scriptSetup.content;
+        else if (descriptor.script) scriptContent = descriptor.script.content;
+        else continue;
+      }
+
+      const sourceFile = parseTypeScript(scriptContent, file.filePath + (ext === ".vue" ? ".script.ts" : ""));
+      const httpClients = ImportedHttpClients.build(sourceFile);
+      const importBindings = parseImportBindingsInternal(sourceFile, file.filePath, allFilePaths);
+
+      const localFunctions = new Map<string, { node: ts.Node; name: string }>();
+      const classInstanceTypes = new Map<string, string>();
+      let currentClassName: string | null = null;
+
+      const indexDecls = (node: ts.Node) => {
+        if (ts.isClassDeclaration(node)) {
+          const prevClass = currentClassName;
+          currentClassName = node.name ? node.name.text : null;
+          ts.forEachChild(node, indexDecls);
+          currentClassName = prevClass;
+          return;
+        }
+        if (ts.isFunctionDeclaration(node) && node.name) {
+          localFunctions.set(node.name.text, { node, name: node.name.text });
+        } else if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) {
+          const methodName = node.name.text;
+          localFunctions.set(methodName, { node, name: methodName });
+          if (currentClassName) {
+            const qualifiedName = currentClassName + "." + methodName;
+            localFunctions.set(qualifiedName, { node, name: qualifiedName });
+            localFunctions.set("default." + methodName, { node, name: "default." + methodName });
+          }
+        } else if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && node.parent) {
+          let declName: string | null = null;
+          if (ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name)) declName = node.parent.name.text;
+          else if (ts.isPropertyAssignment(node.parent) && ts.isIdentifier(node.parent.name)) declName = node.parent.name.text;
+          else if (ts.isPropertyDeclaration(node.parent) && ts.isIdentifier(node.parent.name)) declName = node.parent.name.text;
+          if (declName) {
+            localFunctions.set(declName, { node, name: declName });
+            if (currentClassName) {
+              localFunctions.set(currentClassName + "." + declName, { node, name: currentClassName + "." + declName });
+              localFunctions.set("default." + declName, { node, name: "default." + declName });
+            }
+          }
+        }
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isNewExpression(node.initializer)) {
+          const ctorExpr = node.initializer.expression;
+          if (ts.isIdentifier(ctorExpr)) classInstanceTypes.set(node.name.text, ctorExpr.text);
+        }
+        ts.forEachChild(node, indexDecls);
+      };
+      indexDecls(sourceFile);
+
+      const localFnEntries = Array.from(localFunctions.entries());
+      for (const [fnName, fnInfo] of localFnEntries) {
+        const key = makeGlobalKey(file.filePath, fnName);
+        if (!graph.has(key)) {
+          graph.set(key, { key, filePath: file.filePath, functionName: fnName, httpCalls: [], callees: new Set(), callers: new Set(), propagatedHttpCalls: null });
+        }
+        const gNode = graph.get(key)!;
+
+        const body = getFnBody(fnInfo.node);
+        if (!body) continue;
+
+        const varMap = buildLocalVarMap(body);
+
+        const walkCalls = (n: ts.Node) => {
+          if (ts.isCallExpression(n)) {
+            const httpCall = extractHttpCallFromExpression(n, sourceFile, httpClients, fnName, varMap);
+            if (httpCall) {
+              gNode.httpCalls.push(httpCall);
+            } else {
+              const callExpr = n.expression;
+
+              if (ts.isIdentifier(callExpr)) {
+                const calledName = callExpr.text;
+                if (localFunctions.has(calledName)) {
+                  const calleeKey = makeGlobalKey(file.filePath, calledName);
+                  gNode.callees.add(calleeKey);
+                } else if (importBindings.has(calledName)) {
+                  const binding = importBindings.get(calledName)!;
+                  const targetName = binding.isDefault ? "default" : binding.originalName;
+                  const calleeKey = makeGlobalKey(binding.sourcePath, targetName);
+                  gNode.callees.add(calleeKey);
+                }
+              }
+
+              if (ts.isPropertyAccessExpression(callExpr)) {
+                const methodName = callExpr.name.text;
+                const obj = callExpr.expression;
+
+                if (obj.kind === ts.SyntaxKind.ThisKeyword || (ts.isIdentifier(obj) && obj.text === "this")) {
+                  if (localFunctions.has(methodName)) {
+                    gNode.callees.add(makeGlobalKey(file.filePath, methodName));
+                  }
+                } else if (ts.isIdentifier(obj)) {
+                  const objName = obj.text;
+                  if (importBindings.has(objName)) {
+                    const binding = importBindings.get(objName)!;
+                    if (binding.originalName === "*") {
+                      gNode.callees.add(makeGlobalKey(binding.sourcePath, methodName));
+                      gNode.callees.add(makeGlobalKey(binding.sourcePath, "default." + methodName));
+                    } else {
+                      const calleeKey = makeGlobalKey(binding.sourcePath, binding.originalName + "." + methodName);
+                      gNode.callees.add(calleeKey);
+                      const altKey = makeGlobalKey(binding.sourcePath, "default." + methodName);
+                      gNode.callees.add(altKey);
+                      const altKey2 = makeGlobalKey(binding.sourcePath, methodName);
+                      gNode.callees.add(altKey2);
+                    }
+                  }
+                  const instanceClass = classInstanceTypes.get(objName);
+                  if (instanceClass) {
+                    const qualifiedKey = makeGlobalKey(file.filePath, instanceClass + "." + methodName);
+                    gNode.callees.add(qualifiedKey);
+                    if (localFunctions.has(methodName)) {
+                      gNode.callees.add(makeGlobalKey(file.filePath, methodName));
+                    }
+                  }
+                }
+              }
+            }
+          }
+          ts.forEachChild(n, walkCalls);
+        };
+        walkCalls(body);
+      }
+    } catch (err) {
+      console.warn(`[frontend-analyzer] GlobalCallGraph: failed to process ${file.filePath}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const serviceMapEntries = Array.from(serviceMap.entries());
+  for (const [filePath, entry] of serviceMapEntries) {
+    const methodEntries = Array.from(entry.methods.entries());
+    for (const [methodKey, methodEntry] of methodEntries) {
+      const key = makeGlobalKey(filePath, methodKey);
+      if (!graph.has(key)) {
+        graph.set(key, { key, filePath, functionName: methodKey, httpCalls: methodEntry.httpCalls, callees: new Set(), callers: new Set(), propagatedHttpCalls: null });
+      } else {
+        const gNode = graph.get(key)!;
+        if (gNode.httpCalls.length === 0 && methodEntry.httpCalls.length > 0) {
+          gNode.httpCalls = methodEntry.httpCalls;
+        }
+      }
+    }
+    const fnEntries = Array.from(entry.directFunctions.entries());
+    for (const [fnName, httpCalls] of fnEntries) {
+      const key = makeGlobalKey(filePath, fnName);
+      if (!graph.has(key)) {
+        graph.set(key, { key, filePath, functionName: fnName, httpCalls, callees: new Set(), callers: new Set(), propagatedHttpCalls: null });
+      } else {
+        const gNode = graph.get(key)!;
+        if (gNode.httpCalls.length === 0 && httpCalls.length > 0) {
+          gNode.httpCalls = httpCalls;
+        }
+      }
+    }
+  }
+
+  const graphNodes = Array.from(graph.values());
+  for (const node of graphNodes) {
+    const calleeKeys = Array.from(node.callees);
+    for (const calleeKey of calleeKeys) {
+      const callee = graph.get(calleeKey);
+      if (callee) {
+        callee.callers.add(node.key);
+      }
+    }
+  }
+
+  propagateHttpCapability(graph);
+
+  let httpLeaves = 0;
+  let propagatedCount = 0;
+  const graphNodes2 = Array.from(graph.values());
+  for (const node of graphNodes2) {
+    if (node.httpCalls.length > 0) httpLeaves++;
+    if (node.propagatedHttpCalls && node.propagatedHttpCalls.length > 0) propagatedCount++;
+  }
+  console.log(`[frontend-analyzer] GlobalCallGraph: ${graph.size} nodes, ${httpLeaves} HTTP leaves, ${propagatedCount} HTTP-capable (propagated)`);
+
+  return graph;
+}
+
+function getFnBody(node: ts.Node): ts.Node | null {
+  if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) return node.body || null;
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return node.body;
+  return null;
+}
+
+function parseImportBindingsInternal(sourceFile: ts.SourceFile, importerPath: string, allFilePaths: string[]): Map<string, ImportBinding> {
+  const bindings = new Map<string, ImportBinding>();
+  const visit = (node: ts.Node) => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      const moduleSpec = node.moduleSpecifier.text;
+      const resolvedPath = normalizeModulePath(importerPath, moduleSpec, allFilePaths);
+      if (!resolvedPath) { ts.forEachChild(node, visit); return; }
+      if (node.importClause) {
+        if (node.importClause.name) {
+          bindings.set(node.importClause.name.text, { sourcePath: resolvedPath, originalName: "default", isDefault: true });
+        }
+        if (node.importClause.namedBindings) {
+          if (ts.isNamedImports(node.importClause.namedBindings)) {
+            for (const spec of node.importClause.namedBindings.elements) {
+              const localName = spec.name.text;
+              const originalName = spec.propertyName ? spec.propertyName.text : localName;
+              bindings.set(localName, { sourcePath: resolvedPath, originalName, isDefault: false });
+            }
+          } else if (ts.isNamespaceImport(node.importClause.namedBindings)) {
+            bindings.set(node.importClause.namedBindings.name.text, { sourcePath: resolvedPath, originalName: "*", isDefault: false });
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return bindings;
+}
+
+function propagateHttpCapability(graph: GlobalCallGraph): void {
+  const queue: string[] = [];
+
+  const allEntries = Array.from(graph.entries());
+  for (const [key, node] of allEntries) {
+    if (node.httpCalls.length > 0) {
+      node.propagatedHttpCalls = [...node.httpCalls];
+      queue.push(key);
+    }
+  }
+
+  while (queue.length > 0) {
+    const currentKey = queue.shift()!;
+    const currentNode = graph.get(currentKey)!;
+    const httpCalls = currentNode.propagatedHttpCalls || currentNode.httpCalls;
+    if (httpCalls.length === 0) continue;
+
+    const callerKeys = Array.from(currentNode.callers);
+    for (const callerKey of callerKeys) {
+      const caller = graph.get(callerKey);
+      if (!caller) continue;
+
+      if (caller.propagatedHttpCalls === null) {
+        caller.propagatedHttpCalls = [...httpCalls];
+        queue.push(callerKey);
+      } else {
+        const existingUrls = new Set(caller.propagatedHttpCalls.map(c => c.method + ":" + c.url));
+        let added = false;
+        for (const call of httpCalls) {
+          const callKey = call.method + ":" + call.url;
+          if (!existingUrls.has(callKey)) {
+            caller.propagatedHttpCalls.push(call);
+            existingUrls.add(callKey);
+            added = true;
+          }
+        }
+        if (added) {
+          queue.push(callerKey);
+        }
+      }
+    }
+  }
+}
+
+function lookupGlobalCallGraph(
+  globalGraph: GlobalCallGraph,
+  filePath: string,
+  handlerName: string,
+  importBindings?: Map<string, ImportBinding>
+): HttpCall[] {
+  const directKey = makeGlobalKey(filePath, handlerName);
+  const node = globalGraph.get(directKey);
+  if (node) {
+    if (node.propagatedHttpCalls && node.propagatedHttpCalls.length > 0) return node.propagatedHttpCalls;
+    if (node.httpCalls.length > 0) return node.httpCalls;
+  }
+
+  if (importBindings) {
+    const binding = importBindings.get(handlerName);
+    if (binding) {
+      const importKey = makeGlobalKey(binding.sourcePath, binding.isDefault ? "default" : binding.originalName);
+      const importNode = globalGraph.get(importKey);
+      if (importNode) {
+        if (importNode.propagatedHttpCalls && importNode.propagatedHttpCalls.length > 0) return importNode.propagatedHttpCalls;
+        if (importNode.httpCalls.length > 0) return importNode.httpCalls;
+      }
+    }
+  }
+
+  const allNodes = Array.from(globalGraph.values());
+  for (const gNode of allNodes) {
+    if (gNode.filePath === filePath && gNode.functionName.endsWith("." + handlerName)) {
+      if (gNode.propagatedHttpCalls && gNode.propagatedHttpCalls.length > 0) return gNode.propagatedHttpCalls;
+      if (gNode.httpCalls.length > 0) return gNode.httpCalls;
+    }
+  }
+
+  return [];
+}
+
 function parseImportBindings(sourceFile: ts.SourceFile, importerPath: string, allFilePaths: string[]): Map<string, ImportBinding> {
   const bindings = new Map<string, ImportBinding>();
 
@@ -1390,7 +1722,8 @@ function resolveBindingsViaNodes(
   component: string,
   filePath: string,
   graph: ApplicationGraph,
-  crossFileContext?: { sourceFile: ts.SourceFile; importBindings: Map<string, ImportBinding>; serviceMap: HttpServiceMap }
+  crossFileContext?: { sourceFile: ts.SourceFile; importBindings: Map<string, ImportBinding>; serviceMap: HttpServiceMap },
+  globalCallGraph?: GlobalCallGraph
 ): FrontendInteraction[] {
   const interactions: FrontendInteraction[] = [];
 
@@ -1411,113 +1744,72 @@ function resolveBindingsViaNodes(
   }
 
   for (const binding of bindings) {
-    const handlerNode = symbolTable.resolveHandlerNode(binding.handlerName);
+    const resolvedCalls = resolveHandlerHttpCalls(
+      binding.handlerName, symbolTable, filePath, graph,
+      externalCalls, crossFileContext, globalCallGraph
+    );
 
-    if (handlerNode) {
-      const httpCalls = symbolTable.traceHttpCalls(handlerNode);
-      if (httpCalls.length > 0) {
-        for (const call of httpCalls) {
-          const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
-          interactions.push({
-            component,
-            elementType: binding.elementType,
-            actionName: binding.handlerName,
-            httpMethod: call.method,
-            url: call.url,
-            mappedBackendNode: backendNode,
-            sourceFile: filePath,
-            lineNumber: binding.lineNumber,
-          });
-        }
-      } else if (externalCalls && crossFileContext) {
-        const resolved = resolveExternalCallsToHttpCalls(
-          externalCalls, crossFileContext.importBindings, crossFileContext.serviceMap, binding.handlerName, symbolTable
-        );
-        if (resolved.length > 0) {
-          for (const call of resolved) {
-            const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
-            interactions.push({
-              component,
-              elementType: binding.elementType,
-              actionName: binding.handlerName,
-              httpMethod: call.method,
-              url: call.url,
-              mappedBackendNode: backendNode,
-              sourceFile: filePath,
-              lineNumber: binding.lineNumber,
-            });
-          }
-        } else {
-          interactions.push({
-            component,
-            elementType: binding.elementType,
-            actionName: binding.handlerName,
-            httpMethod: null,
-            url: null,
-            mappedBackendNode: null,
-            sourceFile: filePath,
-            lineNumber: binding.lineNumber,
-          });
-        }
-      } else {
+    if (resolvedCalls.length > 0) {
+      for (const call of resolvedCalls) {
+        const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
         interactions.push({
           component,
           elementType: binding.elementType,
           actionName: binding.handlerName,
-          httpMethod: null,
-          url: null,
-          mappedBackendNode: null,
+          httpMethod: call.method,
+          url: call.url,
+          mappedBackendNode: backendNode,
           sourceFile: filePath,
           lineNumber: binding.lineNumber,
         });
       }
     } else {
-      if (externalCalls && crossFileContext) {
-        const resolved = resolveExternalCallsToHttpCalls(
-          externalCalls, crossFileContext.importBindings, crossFileContext.serviceMap, binding.handlerName, symbolTable
-        );
-        if (resolved.length > 0) {
-          for (const call of resolved) {
-            const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
-            interactions.push({
-              component,
-              elementType: binding.elementType,
-              actionName: binding.handlerName,
-              httpMethod: call.method,
-              url: call.url,
-              mappedBackendNode: backendNode,
-              sourceFile: filePath,
-              lineNumber: binding.lineNumber,
-            });
-          }
-        } else {
-          interactions.push({
-            component,
-            elementType: binding.elementType,
-            actionName: binding.handlerName,
-            httpMethod: null,
-            url: null,
-            mappedBackendNode: null,
-            sourceFile: filePath,
-            lineNumber: binding.lineNumber,
-          });
-        }
-      } else {
-        interactions.push({
-          component,
-          elementType: binding.elementType,
-          actionName: binding.handlerName,
-          httpMethod: null,
-          url: null,
-          mappedBackendNode: null,
-          sourceFile: filePath,
-          lineNumber: binding.lineNumber,
-        });
-      }
+      interactions.push({
+        component,
+        elementType: binding.elementType,
+        actionName: binding.handlerName,
+        httpMethod: null,
+        url: null,
+        mappedBackendNode: null,
+        sourceFile: filePath,
+        lineNumber: binding.lineNumber,
+      });
     }
   }
 
   return interactions;
+}
+
+function resolveHandlerHttpCalls(
+  handlerName: string,
+  symbolTable: ScriptSymbolTable,
+  filePath: string,
+  graph: ApplicationGraph,
+  externalCalls: ExternalCall[] | null,
+  crossFileContext?: { sourceFile: ts.SourceFile; importBindings: Map<string, ImportBinding>; serviceMap: HttpServiceMap },
+  globalCallGraph?: GlobalCallGraph
+): HttpCall[] {
+  const handlerNode = symbolTable.resolveHandlerNode(handlerName);
+
+  if (handlerNode) {
+    const httpCalls = symbolTable.traceHttpCalls(handlerNode);
+    if (httpCalls.length > 0) return httpCalls;
+  }
+
+  if (externalCalls && crossFileContext) {
+    const resolved = resolveExternalCallsToHttpCalls(
+      externalCalls, crossFileContext.importBindings, crossFileContext.serviceMap, handlerName, symbolTable
+    );
+    if (resolved.length > 0) return resolved;
+  }
+
+  if (globalCallGraph) {
+    const importBindings = crossFileContext?.importBindings;
+    const graphCalls = lookupGlobalCallGraph(globalCallGraph, filePath, handlerName, importBindings);
+    if (graphCalls.length > 0) return graphCalls;
+  }
+
+  return [];
 }
 
 function analyzeVueFile(
@@ -1525,7 +1817,8 @@ function analyzeVueFile(
   content: string,
   graph: ApplicationGraph,
   serviceMap?: HttpServiceMap,
-  allFilePaths?: string[]
+  allFilePaths?: string[],
+  globalCallGraph?: GlobalCallGraph
 ): FrontendInteraction[] {
   const component = getComponentName(filePath);
   const { bindings: templateBindings, scriptContent } = parseVueTemplateAST(content);
@@ -1546,7 +1839,7 @@ function analyzeVueFile(
   }
 
   const interactions = symbolTable
-    ? resolveBindingsViaNodes(templateBindings, symbolTable, component, filePath, graph, crossFileContext)
+    ? resolveBindingsViaNodes(templateBindings, symbolTable, component, filePath, graph, crossFileContext, globalCallGraph)
     : templateBindings.map(b => ({
         component,
         elementType: b.elementType,
@@ -1568,7 +1861,8 @@ function analyzeReactFile(
   content: string,
   graph: ApplicationGraph,
   serviceMap?: HttpServiceMap,
-  allFilePaths?: string[]
+  allFilePaths?: string[],
+  globalCallGraph?: GlobalCallGraph
 ): FrontendInteraction[] {
   const component = getComponentName(filePath);
   const sourceFile = parseTypeScript(content, filePath);
@@ -1583,7 +1877,7 @@ function analyzeReactFile(
   }
 
   const interactions = resolveBindingsViaNodes(
-    jsxBindings, symbolTable, component, filePath, graph, crossFileContext
+    jsxBindings, symbolTable, component, filePath, graph, crossFileContext, globalCallGraph
   );
 
   addUnmappedHttpCalls(interactions, allHttpCalls, component, filePath, graph);
@@ -1597,7 +1891,8 @@ function analyzeAngularFile(
   graph: ApplicationGraph,
   htmlTemplates: Map<string, string>,
   serviceMap?: HttpServiceMap,
-  allFilePaths?: string[]
+  allFilePaths?: string[],
+  globalCallGraph?: GlobalCallGraph
 ): FrontendInteraction[] {
   const component = getComponentName(filePath);
   const interactions: FrontendInteraction[] = [];
@@ -1654,7 +1949,7 @@ function analyzeAngularFile(
   if (templateContent) {
     const templateBindings = parseAngularTemplateAST(templateContent);
     const resolved = resolveBindingsViaNodes(
-      templateBindings, symbolTable, component, filePath, graph, crossFileContext
+      templateBindings, symbolTable, component, filePath, graph, crossFileContext, globalCallGraph
     );
     interactions.push(...resolved);
   }
@@ -1758,9 +2053,8 @@ export function analyzeFrontend(
   const htmlTemplates = new Map<string, string>();
 
   const serviceMap = buildHttpServiceMap(files);
+  const globalCallGraph = buildGlobalCallGraph(files, serviceMap);
   const allFilePaths = files.map(f => f.filePath);
-  let crossFileResolved = 0;
-  let crossFileAttempted = 0;
 
   for (const file of files) {
     if (file.filePath.endsWith(".html")) {
@@ -1779,18 +2073,18 @@ export function analyzeFrontend(
     try {
       switch (fileType) {
         case "vue":
-          interactions.push(...analyzeVueFile(file.filePath, file.content, graph, serviceMap, allFilePaths));
+          interactions.push(...analyzeVueFile(file.filePath, file.content, graph, serviceMap, allFilePaths, globalCallGraph));
           break;
 
         case "react":
-          interactions.push(...analyzeReactFile(file.filePath, file.content, graph, serviceMap, allFilePaths));
+          interactions.push(...analyzeReactFile(file.filePath, file.content, graph, serviceMap, allFilePaths, globalCallGraph));
           break;
 
         case "javascript":
           if (isAngularComponent(file.content)) {
-            interactions.push(...analyzeAngularFile(file.filePath, file.content, graph, htmlTemplates, serviceMap, allFilePaths));
+            interactions.push(...analyzeAngularFile(file.filePath, file.content, graph, htmlTemplates, serviceMap, allFilePaths, globalCallGraph));
           } else {
-            interactions.push(...analyzeReactFile(file.filePath, file.content, graph, serviceMap, allFilePaths));
+            interactions.push(...analyzeReactFile(file.filePath, file.content, graph, serviceMap, allFilePaths, globalCallGraph));
           }
           break;
 
