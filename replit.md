@@ -58,7 +58,8 @@ server/
     frontend-analyzer.ts        - AST-based frontend analyzer (Vue/React/Angular)
     graph-connector.ts          - Converts FrontendInteractions/EndpointImpacts to catalog entries
     repository-scanner.ts       - ZIP extraction and recursive directory scanning
-    semantic-engine.ts          - LLM classification of operations
+    deterministic-classifier.ts - Rule-based classification (httpMethod, persistenceOps, entities)
+    semantic-engine.ts          - Optional LLM enrichment (POST /api/enrich-with-llm/:projectId)
 
 shared/
   schema.ts                     - Drizzle ORM schema (projects, source_files, analysis_runs, catalog_entries)
@@ -118,9 +119,10 @@ The backend is represented as a navigable in-memory graph:
 5. analyzeGraphEndpoints() traverses the graph per controller endpoint to produce EndpointImpact
 6. analyzeFrontend() uses framework-specific AST parsers to extract UI elements with event handlers, trace handler functions to HTTP calls, and match URLs to controller nodes in ApplicationGraph
 7. Graph connector converts FrontendInteractions (with mapped GraphNodes) into catalog entries, traversing ApplicationGraph for full call chains
-8. Semantic engine classifies operations via LLM
+8. Deterministic classifier assigns technicalOperation, criticalityScore, suggestedMeaning using rules (httpMethod, persistenceOps, entities)
 9. Catalog entries stored in database
-10. UI displays with filtering, search, editing, and JSON export
+10. (Optional) User triggers LLM enrichment via POST /api/enrich-with-llm/:projectId to refine classifications
+11. UI displays with filtering, search, editing, and JSON export
 
 ## API Endpoints
 - GET /api/stats - Dashboard statistics
@@ -134,6 +136,7 @@ The backend is represented as a navigable in-memory graph:
 - GET /api/catalog-entries/:projectId - Get catalog entries
 - PATCH /api/catalog-entries/:id - Update human classification
 - GET /api/catalog-entries/:projectId/export - Export catalog as JSON
+- POST /api/enrich-with-llm/:projectId - Optional LLM enrichment of existing catalog entries
 - GET /api/analysis-runs/recent - Recent analysis runs
 
 ## Repository Scanner Module

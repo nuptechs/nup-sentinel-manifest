@@ -10,6 +10,7 @@ import { analyzeFrontend } from "./analyzers/frontend-analyzer";
 import { buildApplicationGraph, analyzeGraphEndpoints } from "./analyzers/backend-java-client";
 import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries } from "./analyzers/graph-connector";
 import { classifyEntries } from "./analyzers/semantic-engine";
+import { classifyEntriesDeterministic } from "./analyzers/deterministic-classifier";
 import { extractAndScanZip, getFileType } from "./analyzers/repository-scanner";
 import { z } from "zod";
 
@@ -215,13 +216,9 @@ export async function registerRoutes(
           );
         }
 
-        console.log(`[analysis] Step 4/4: LLM classification of ${catalogEntryData.length} entries...`);
-        try {
-          catalogEntryData = await classifyEntries(catalogEntryData);
-          console.log(`[analysis] Step 4/4 done — LLM classification complete`);
-        } catch (llmError) {
-          console.error("[analysis] Step 4/4 — LLM classification failed, using inferred values:", llmError);
-        }
+        console.log(`[analysis] Step 4/4: Deterministic classification of ${catalogEntryData.length} entries...`);
+        catalogEntryData = classifyEntriesDeterministic(catalogEntryData);
+        console.log(`[analysis] Step 4/4 done — deterministic classification complete`);
 
         const created = await storage.createCatalogEntries(catalogEntryData);
 
@@ -545,14 +542,9 @@ export async function registerRoutes(
           );
         }
 
-        sendProgress("Step 4/4", `LLM classification of ${catalogEntryData.length} entries...`);
-        try {
-          catalogEntryData = await classifyEntries(catalogEntryData);
-          sendProgress("Step 4/4", "LLM classification complete");
-        } catch (llmError) {
-          console.error("[chunked-upload] Step 4/4 — LLM classification failed, using inferred values:", llmError);
-          sendProgress("Step 4/4", "LLM classification failed, using inferred values");
-        }
+        sendProgress("Step 4/4", `Deterministic classification of ${catalogEntryData.length} entries...`);
+        catalogEntryData = classifyEntriesDeterministic(catalogEntryData);
+        sendProgress("Step 4/4", "Deterministic classification complete");
 
         const created = await storage.createCatalogEntries(catalogEntryData);
         const graphSummary = appGraph.toJSON();
@@ -823,14 +815,9 @@ export async function registerRoutes(
           );
         }
 
-        sendProgress("Step 4/4", `LLM classification of ${catalogEntryData.length} entries...`);
-        try {
-          catalogEntryData = await classifyEntries(catalogEntryData);
-          sendProgress("Step 4/4", "LLM classification complete");
-        } catch (llmError) {
-          console.error("[upload] Step 4/4 — LLM classification failed, using inferred values:", llmError);
-          sendProgress("Step 4/4", "LLM classification failed, using inferred values");
-        }
+        sendProgress("Step 4/4", `Deterministic classification of ${catalogEntryData.length} entries...`);
+        catalogEntryData = classifyEntriesDeterministic(catalogEntryData);
+        sendProgress("Step 4/4", "Deterministic classification complete");
 
         const created = await storage.createCatalogEntries(catalogEntryData);
 
@@ -1016,6 +1003,66 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error exporting catalog:", error);
       res.status(500).json({ message: "Failed to export catalog" });
+    }
+  });
+
+  app.post("/api/enrich-with-llm/:projectId", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+
+      const entries = await storage.getCatalogEntries(projectId);
+      if (entries.length === 0) {
+        return res.status(404).json({ message: "No catalog entries found for this project" });
+      }
+
+      console.log(`[enrich-llm] Starting LLM enrichment for project ${projectId} — ${entries.length} entries`);
+
+      const asInsert = entries.map((e) => ({
+        analysisRunId: e.analysisRunId,
+        projectId: e.projectId,
+        screen: e.screen,
+        interaction: e.interaction,
+        interactionType: e.interactionType,
+        endpoint: e.endpoint,
+        httpMethod: e.httpMethod,
+        controllerClass: e.controllerClass,
+        controllerMethod: e.controllerMethod,
+        serviceMethods: e.serviceMethods,
+        repositoryMethods: e.repositoryMethods,
+        entitiesTouched: e.entitiesTouched,
+        fullCallChain: e.fullCallChain,
+        persistenceOperations: e.persistenceOperations,
+        technicalOperation: e.technicalOperation,
+        criticalityScore: e.criticalityScore,
+        suggestedMeaning: e.suggestedMeaning,
+        humanClassification: e.humanClassification,
+        sourceFile: e.sourceFile,
+        lineNumber: e.lineNumber,
+      }));
+
+      const enriched = await classifyEntries(asInsert);
+
+      let updated = 0;
+      for (let i = 0; i < entries.length; i++) {
+        const original = entries[i];
+        const enrichedEntry = enriched[i];
+        if (enrichedEntry) {
+          await storage.updateCatalogEntry(original.id, {
+            technicalOperation: enrichedEntry.technicalOperation,
+            criticalityScore: enrichedEntry.criticalityScore,
+            suggestedMeaning: enrichedEntry.suggestedMeaning,
+          });
+          updated++;
+        }
+      }
+
+      console.log(`[enrich-llm] Done — ${updated} entries enriched with LLM classifications`);
+      res.json({ message: "LLM enrichment complete", entriesUpdated: updated });
+    } catch (error) {
+      console.error("Error enriching with LLM:", error);
+      const msg = error instanceof Error ? error.message : "LLM enrichment failed";
+      res.status(500).json({ message: msg });
     }
   });
 
