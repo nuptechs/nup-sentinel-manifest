@@ -102,7 +102,6 @@ export const catalogEntries = pgTable("catalog_entries", {
   sourceFile: text("source_file"),
   lineNumber: integer("line_number"),
   resolutionPath: jsonb("resolution_path").$type<{ tier: string; file: string; function: string | null; detail: string | null }[]>(),
-  resolutionStrategy: text("resolution_strategy"),
   architectureType: text("architecture_type"),
   interactionCategory: text("interaction_category"),
   confidence: real("confidence"),

@@ -623,6 +623,32 @@ function walkCallChain(
   };
 }
 
+function computeStructuralConfidence(
+  resolutionPath: { tier: string; file: string; function: string | null; detail: string | null }[] | undefined | null,
+  controllerClass: string | null,
+  repositoryMethods: string[]
+): number | null {
+  if (!resolutionPath || resolutionPath.length === 0) return null;
+
+  let score = 0.3;
+
+  const hasController = controllerClass !== null;
+  const hasRepository = repositoryMethods.length > 0;
+
+  if (hasController) score += 0.35;
+  if (hasRepository) score += 0.2;
+
+  const realHops = resolutionPath.filter(
+    (step) => step.file && step.file !== "unknown"
+  ).length;
+
+  if (realHops === 1) score += 0.15;
+  else if (realHops === 2) score += 0.1;
+  else if (realHops >= 3) score += 0.05;
+
+  return Math.min(1.0, Math.round(score * 100) / 100);
+}
+
 export function endpointImpactsToCatalogEntries(
   impacts: EndpointImpact[],
   analysisRunId: number,
@@ -665,7 +691,6 @@ export function endpointImpactsToCatalogEntries(
       sourceFile: impact.sourceFile,
       lineNumber: impact.lineNumber,
       resolutionPath: [{ tier: "backend_only", file: impact.sourceFile || impact.controllerClass, function: impact.controllerMethod, detail: "backend endpoint analysis" }],
-      resolutionStrategy: "backend_only",
       architectureType: "REST_CONTROLLER",
       interactionCategory: "HTTP",
       confidence: 1.0,
@@ -765,10 +790,9 @@ export function interactionsToCatalogEntries(
       sourceFile: interaction.sourceFile,
       lineNumber: interaction.lineNumber,
       resolutionPath: interaction.resolutionPath || null,
-      resolutionStrategy: interaction.resolutionStrategy || null,
       architectureType: architectureType,
       interactionCategory: interaction.interactionCategory || null,
-      confidence: interaction.confidence ?? null,
+      confidence: computeStructuralConfidence(interaction.resolutionPath, controllerClass, repositoryMethods),
     };
   });
 

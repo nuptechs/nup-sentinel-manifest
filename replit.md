@@ -30,11 +30,12 @@ The Java Backend Analyzer uses JavaParser with JavaSymbolSolver for semantic AST
 
 ### Enriched Catalog Model
 Each catalog entry now carries full resolution metadata directly from the analyzer (no inference/heuristics):
-- **resolutionPath** (jsonb): Ordered array of `{ tier, file, function, detail }` steps showing exactly how the endpoint was discovered
-- **resolutionStrategy** (text): Which tier(s) resolved the call (e.g., "local", "serviceMap", "eventGraph+serviceMap", "architecturalLayerGraph")
+- **resolutionPath** (jsonb): Ordered array of `{ tier, file, function, detail }` steps showing exactly how the endpoint was discovered — the structural truth of the code path
 - **architectureType** (text): "REST_CONTROLLER" or "WS_OPERATION_BASED"
 - **interactionCategory** (text): "HTTP", "UI_ONLY", or "STATE_ONLY" — entries with null endpoint are UI_ONLY, not errors
-- **confidence** (real, 0–1): Based on resolution tier depth (local=1.0, serviceMap=0.95, globalCallGraph=0.85, eventGraph=0.80, stateFlowGraph=0.65, architecturalLayerGraph=0.55)
+- **confidence** (real, 0–1): Computed in graph-connector from structural quality of resolutionPath — NOT from analyzer tier. Scoring criteria: base 0.3, +0.35 if controller resolved, +0.2 if repository methods found, +0.05–0.15 based on hop count (1 hop best). Capped at 1.0.
+
+**Design principle**: `resolutionStrategy` was intentionally removed — it leaked analyzer internals (tier names like "serviceMap", "architecturalLayerGraph") into the catalog model, creating incorrect coupling. The catalog should be agnostic to the analyzer's internal resolution mechanism. Only the `resolutionPath` (structural truth) is persisted. Confidence is derived from the path's structural quality, not from which tier discovered it.
 
 Resolution metadata is attached via `__resolution` property on `HttpCall[]` arrays inside `resolveHandlerHttpCalls`, read in `resolveBindingsViaNodes`, stored in `FrontendInteraction`, and persisted to the catalog by graph-connector. The analyzer functions themselves are unchanged — only the data propagation was added.
 
