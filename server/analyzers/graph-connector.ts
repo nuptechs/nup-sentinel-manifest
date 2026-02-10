@@ -273,6 +273,8 @@ export function endpointImpactsToCatalogEntries(
       sensitiveFieldsAccessed,
       frontendRoute: null,
       routeGuards: [],
+      duplicateCount: 1,
+      operationHint: null,
     };
   });
 }
@@ -384,14 +386,167 @@ export function interactionsToCatalogEntries(
       sensitiveFieldsAccessed,
       frontendRoute: interaction.frontendRoute || null,
       routeGuards: interaction.routeGuards || [],
+      duplicateCount: 1,
+      operationHint: interaction.operationHint || null,
     };
   });
+
+  const gatewayResolved = resolveGatewayOperations(entries, graph);
+
+  const deduped = deduplicateEntries(gatewayResolved);
+  const duplicatesRemoved = gatewayResolved.length - deduped.length;
 
   console.log(`[graph-connector] === RESOLUTION SUMMARY ===`);
   console.log(`[graph-connector]   Total interactions: ${interactions.length}`);
   console.log(`[graph-connector]   Resolved via resolutionPath: ${resolved}`);
   console.log(`[graph-connector]   No controller in resolutionPath: ${unresolved}`);
+  if (duplicatesRemoved > 0) {
+    console.log(`[graph-connector]   Deduplication: ${gatewayResolved.length} → ${deduped.length} (${duplicatesRemoved} exact duplicates merged, multiplicity preserved in duplicateCount)`);
+  }
   console.log(`[graph-connector] === END SUMMARY ===`);
 
-  return entries;
+  return deduped;
+}
+
+function resolveGatewayOperations(entries: InsertCatalogEntry[], graph: ApplicationGraph): InsertCatalogEntry[] {
+  const endpointFanIn = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.endpoint) {
+      endpointFanIn.set(entry.endpoint, (endpointFanIn.get(entry.endpoint) || 0) + 1);
+    }
+  }
+
+  const GATEWAY_THRESHOLD = 5;
+  const gatewayEndpoints = new Set<string>();
+  for (const [ep, count] of endpointFanIn) {
+    if (count >= GATEWAY_THRESHOLD) {
+      gatewayEndpoints.add(ep);
+    }
+  }
+
+  if (gatewayEndpoints.size === 0) return entries;
+
+  console.log(`[graph-connector] Gateway detection: ${gatewayEndpoints.size} concentrator endpoint(s) found (${GATEWAY_THRESHOLD}+ references)`);
+  for (const ep of gatewayEndpoints) {
+    console.log(`[graph-connector]   Gateway endpoint: ${ep} (${endpointFanIn.get(ep)} references)`);
+  }
+
+  const controllers = graph.getNodesByType("CONTROLLER");
+  const controllerIndex = new Map<string, GraphNode>();
+  for (const c of controllers) {
+    controllerIndex.set(c.className.toLowerCase(), c);
+    const shortName = c.className.replace(/Controller$/i, "").replace(/WsV\d+$/i, "").replace(/Ws$/i, "");
+    if (shortName) controllerIndex.set(shortName.toLowerCase(), c);
+  }
+
+  let gatewayMatches = 0;
+
+  const result = entries.map(entry => {
+    if (!entry.endpoint || !gatewayEndpoints.has(entry.endpoint)) return entry;
+    if (entry.controllerClass && entry.controllerMethod) return entry;
+
+    const hint = entry.operationHint;
+    if (!hint) return entry;
+
+    const normalizedHint = hint.replace(/\./g, "").replace(/[-_]/g, "").replace(/v\d+$/i, "").toLowerCase();
+
+    let matchedNode: GraphNode | null = null;
+    let bestMatchLen = 0;
+
+    for (const [key, node] of controllerIndex) {
+      const normalizedKey = key.replace(/[-_]/g, "").toLowerCase();
+      if (normalizedHint === normalizedKey) {
+        matchedNode = node;
+        break;
+      }
+      if (normalizedHint.includes(normalizedKey) && normalizedKey.length > bestMatchLen) {
+        matchedNode = node;
+        bestMatchLen = normalizedKey.length;
+      }
+      if (normalizedKey.includes(normalizedHint) && normalizedHint.length > 3 && normalizedHint.length > bestMatchLen) {
+        matchedNode = node;
+        bestMatchLen = normalizedHint.length;
+      }
+    }
+
+    if (matchedNode) {
+      const chain = walkCallChain(graph, matchedNode.id);
+
+      const resPath = entry.resolutionPath ? [...(entry.resolutionPath as any[])] : [];
+      resPath.push({
+        tier: "gateway_operation",
+        file: matchedNode.className,
+        function: matchedNode.methodName,
+        detail: `gateway operation hint "${hint}" matched to ${matchedNode.className}.${matchedNode.methodName}`,
+      });
+
+      const technicalOperation = inferOperationType(
+        chain.serviceMethods,
+        chain.repositoryMethods,
+        entry.httpMethod,
+        chain.persistenceOperations
+      );
+
+      gatewayMatches++;
+
+      return {
+        ...entry,
+        controllerClass: matchedNode.className,
+        controllerMethod: matchedNode.methodName,
+        serviceMethods: chain.serviceMethods,
+        repositoryMethods: chain.repositoryMethods,
+        entitiesTouched: chain.entitiesTouched,
+        fullCallChain: chain.fullCallChain,
+        persistenceOperations: chain.persistenceOperations,
+        technicalOperation,
+        resolutionPath: resPath,
+        architectureType: "WS_OPERATION_BASED",
+        confidence: computeStructuralConfidence(resPath, matchedNode.className, chain.repositoryMethods),
+        requiredRoles: chain.requiredRoles,
+        securityAnnotations: chain.securityAnnotations,
+        entityFieldsMetadata: chain.entityFieldsMetadata,
+        sensitiveFieldsAccessed: chain.sensitiveFieldsAccessed,
+      };
+    }
+
+    return entry;
+  });
+
+  if (gatewayMatches > 0) {
+    console.log(`[graph-connector]   Gateway resolution: ${gatewayMatches} entries matched to specific controllers via operation hints`);
+  }
+
+  return result;
+}
+
+function deduplicateEntries(entries: InsertCatalogEntry[]): InsertCatalogEntry[] {
+  const groups = new Map<string, InsertCatalogEntry[]>();
+
+  for (const entry of entries) {
+    const key = [
+      entry.sourceFile || "",
+      String(entry.lineNumber || 0),
+      entry.interaction || "",
+      entry.httpMethod || "",
+      entry.endpoint || "",
+      entry.controllerClass || "",
+      entry.controllerMethod || "",
+    ].join("||");
+
+    const group = groups.get(key);
+    if (group) {
+      group.push(entry);
+    } else {
+      groups.set(key, [entry]);
+    }
+  }
+
+  const result: InsertCatalogEntry[] = [];
+  groups.forEach((group) => {
+    const representative = group[0];
+    representative.duplicateCount = group.length;
+    result.push(representative);
+  });
+
+  return result;
 }

@@ -111,6 +111,8 @@ export const catalogEntries = pgTable("catalog_entries", {
   sensitiveFieldsAccessed: jsonb("sensitive_fields_accessed").$type<string[]>().default([]),
   frontendRoute: text("frontend_route"),
   routeGuards: jsonb("route_guards").$type<string[]>().default([]),
+  duplicateCount: integer("duplicate_count").default(1),
+  operationHint: text("operation_hint"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

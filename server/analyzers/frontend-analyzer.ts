@@ -32,6 +32,7 @@ export interface FrontendInteraction {
   frontendRoute?: string | null;
   routeGuards?: string[];
   externalDomain?: string | null;
+  operationHint?: string | null;
 }
 
 interface HttpCall {
@@ -39,6 +40,7 @@ interface HttpCall {
   url: string;
   lineNumber: number;
   callerFunction: string | null;
+  operationHint?: string | null;
 }
 
 interface TemplateBinding {
@@ -421,11 +423,13 @@ class ScriptSymbolTable {
         if (isHttp && node.arguments.length > 0) {
           const url = extractUrlFromNode(node.arguments[0]);
           if (url) {
+            const operationHint = extractOperationHint(node, sourceFile, 1);
             return {
               method: methodName.toUpperCase(),
               url,
               lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
               callerFunction: callerName,
+              operationHint,
             };
           }
         }
@@ -449,11 +453,13 @@ class ScriptSymbolTable {
               }
             }
           }
+          const operationHint = extractOperationHint(node, sourceFile, 1);
           return {
             method,
             url,
             lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
             callerFunction: callerName,
+            operationHint,
           };
         }
       }
@@ -465,11 +471,13 @@ class ScriptSymbolTable {
         if (ts.isStringLiteral(firstArg) && node.arguments.length >= 2) {
           const possibleUrl = extractUrlFromNode(node.arguments[1]);
           if (possibleUrl) {
+            const operationHint = extractOperationHint(node, sourceFile, 2);
             return {
               method: firstArg.text.toUpperCase(),
               url: possibleUrl,
               lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
               callerFunction: callerName,
+              operationHint,
             };
           }
         }
@@ -817,7 +825,8 @@ function extractHttpCallFromExpression(node: ts.CallExpression, sourceFile: ts.S
           ? resolveUrlFromExpression(node.arguments[0] as ts.Expression, varMap)
           : extractUrlFromNode(node.arguments[0]);
         if (url) {
-          return { method: methodName.toUpperCase(), url, lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)), callerFunction: callerName };
+          const operationHint = extractOperationHint(node, sourceFile, 1);
+          return { method: methodName.toUpperCase(), url, lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)), callerFunction: callerName, operationHint };
         }
       }
     }
@@ -837,7 +846,8 @@ function extractHttpCallFromExpression(node: ts.CallExpression, sourceFile: ts.S
             }
           }
         }
-        return { method, url, lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)), callerFunction: callerName };
+        const operationHint = extractOperationHint(node, sourceFile, 1);
+        return { method, url, lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)), callerFunction: callerName, operationHint };
       }
     }
   }
@@ -3397,6 +3407,95 @@ function extractUrlFromNode(node: ts.Node): string | null {
   return null;
 }
 
+const OPERATION_HINT_FIELDS = new Set([
+  "service", "action", "command", "operation", "type", "query", "method",
+  "operationName", "serviceName", "actionName", "commandName", "queryName",
+  "rpc", "endpoint", "handler", "procedure", "topic",
+]);
+
+function extractOperationHint(
+  callNode: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  bodyArgIndex: number
+): string | null {
+  if (callNode.arguments.length <= bodyArgIndex) return null;
+  const bodyArg = callNode.arguments[bodyArgIndex];
+
+  if (ts.isObjectLiteralExpression(bodyArg)) {
+    return extractOperationFromObject(bodyArg, sourceFile);
+  }
+
+  if (ts.isIdentifier(bodyArg)) {
+    let current: ts.Node | undefined = bodyArg.parent;
+    while (current && !ts.isSourceFile(current) && !ts.isBlock(current)) {
+      current = current.parent;
+    }
+    if (current) {
+      let found: string | null = null;
+      const visit = (node: ts.Node) => {
+        if (found) return;
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === bodyArg.text) {
+          if (node.initializer && ts.isObjectLiteralExpression(node.initializer)) {
+            found = extractOperationFromObject(node.initializer, sourceFile);
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(current);
+      return found;
+    }
+  }
+
+  const urlArg = callNode.arguments[0];
+  if (urlArg && (ts.isStringLiteral(urlArg) || ts.isNoSubstitutionTemplateLiteral(urlArg))) {
+    const url = urlArg.text;
+    const queryIdx = url.indexOf("?");
+    if (queryIdx >= 0) {
+      const queryStr = url.substring(queryIdx + 1);
+      const params = queryStr.split("&");
+      for (const param of params) {
+        const [key, value] = param.split("=");
+        if (key && value && OPERATION_HINT_FIELDS.has(key)) {
+          return value;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractOperationFromObject(obj: ts.ObjectLiteralExpression, sourceFile: ts.SourceFile): string | null {
+  for (const prop of obj.properties) {
+    if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name)) {
+      if (OPERATION_HINT_FIELDS.has(prop.name.text)) {
+        if (ts.isStringLiteral(prop.initializer) || ts.isNoSubstitutionTemplateLiteral(prop.initializer)) {
+          return prop.initializer.text;
+        }
+      }
+    }
+    if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "params") {
+      if (ts.isObjectLiteralExpression(prop.initializer)) {
+        const nested = extractOperationFromObject(prop.initializer, sourceFile);
+        if (nested) return nested;
+      }
+    }
+    if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "data") {
+      if (ts.isObjectLiteralExpression(prop.initializer)) {
+        const nested = extractOperationFromObject(prop.initializer, sourceFile);
+        if (nested) return nested;
+      }
+    }
+    if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "body") {
+      if (ts.isObjectLiteralExpression(prop.initializer)) {
+        const nested = extractOperationFromObject(prop.initializer, sourceFile);
+        if (nested) return nested;
+      }
+    }
+  }
+  return null;
+}
+
 function traceLocalConstant(id: ts.Identifier): string | null {
   let current: ts.Node | undefined = id.parent;
   while (current) {
@@ -4060,6 +4159,7 @@ function resolveBindingsViaNodes(
           interactionCategory: "HTTP",
           confidence: tierToConfidence(resolution?.tier || null),
           routeGuards: handlerGuards.length > 0 ? handlerGuards : undefined,
+          operationHint: call.operationHint || null,
         });
       }
     } else {
@@ -4484,6 +4584,7 @@ function addUnmappedHttpCalls(
         resolutionPath: unmappedPath,
         interactionCategory: "HTTP",
         confidence: 1.0,
+        operationHint: call.operationHint || null,
       });
       mappedUrls.add(key);
     }

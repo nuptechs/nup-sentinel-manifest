@@ -50,6 +50,8 @@ import {
   Server,
   MonitorSmartphone,
   Zap,
+  Copy,
+  BarChart3,
 } from "lucide-react";
 import type { CatalogEntry, Project } from "@shared/schema";
 
@@ -175,6 +177,26 @@ function EntryDetailDialog({
               <p className="text-sm font-mono mt-0.5">{entry.architectureType || "N/A"}</p>
             </div>
           </div>
+          {entry.operationHint && (
+            <div className="flex items-center gap-2 rounded-md bg-indigo-50 dark:bg-indigo-900/20 p-2">
+              <Zap className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <p className="text-xs text-indigo-700 dark:text-indigo-300">
+                <span className="font-medium">Gateway Operation:</span>{" "}
+                <span className="font-mono">{entry.operationHint}</span>
+                {entry.architectureType === "WS_OPERATION_BASED" && (
+                  <span className="ml-1 text-green-600 dark:text-green-400">(resolved to controller)</span>
+                )}
+              </p>
+            </div>
+          )}
+          {(entry.duplicateCount ?? 1) > 1 && (
+            <div className="flex items-center gap-2 rounded-md bg-amber-50 dark:bg-amber-900/20 p-2">
+              <Copy className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+              <p className="text-xs text-amber-700 dark:text-amber-300">
+                This interaction appeared {entry.duplicateCount} times in the template (merged into one catalog entry). High multiplicity may indicate shared handlers across multiple UI elements or excessive coupling.
+              </p>
+            </div>
+          )}
           <Separator />
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -449,6 +471,53 @@ export default function CatalogPage() {
     });
   }, [entries, searchTerm, filterOp, filterCategory]);
 
+  const developmentInsights = useMemo(() => {
+    if (!entries || entries.length === 0) return null;
+    const totalMergedDuplicates = entries.reduce((sum, e) => sum + ((e.duplicateCount ?? 1) - 1), 0);
+    const entriesWithDuplicates = entries.filter(e => (e.duplicateCount ?? 1) > 1);
+
+    const endpointCounts = new Map<string, number>();
+    for (const e of entries) {
+      if (e.endpoint) {
+        endpointCounts.set(e.endpoint, (endpointCounts.get(e.endpoint) || 0) + 1);
+      }
+    }
+    const concentratorEndpoints = Array.from(endpointCounts.entries())
+      .filter(([, count]) => count >= 5)
+      .sort((a, b) => b[1] - a[1]);
+
+    const screenCounts = new Map<string, number>();
+    for (const e of entries) {
+      if (e.interactionCategory === "HTTP") {
+        screenCounts.set(e.screen, (screenCounts.get(e.screen) || 0) + 1);
+      }
+    }
+    const heavyScreens = Array.from(screenCounts.entries())
+      .filter(([, count]) => count >= 10)
+      .sort((a, b) => b[1] - a[1]);
+
+    const withController = entries.filter(e => e.controllerClass).length;
+    const matchRate = entries.length > 0 ? Math.round((withController / entries.length) * 100) : 0;
+
+    const gatewayResolved = entries.filter(e => e.architectureType === "WS_OPERATION_BASED").length;
+    const withOperationHint = entries.filter(e => e.operationHint).length;
+
+    if (totalMergedDuplicates === 0 && concentratorEndpoints.length === 0 && heavyScreens.length === 0 && gatewayResolved === 0) return null;
+
+    return {
+      totalMergedDuplicates,
+      entriesWithDuplicates: entriesWithDuplicates.length,
+      concentratorEndpoints: concentratorEndpoints.slice(0, 5),
+      heavyScreens: heavyScreens.slice(0, 5),
+      matchRate,
+      withController,
+      gatewayResolved,
+      withOperationHint,
+    };
+  }, [entries]);
+
+  const [showInsights, setShowInsights] = useState(false);
+
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -562,6 +631,86 @@ export default function CatalogPage() {
         </CardContent>
       </Card>
 
+      {developmentInsights && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-1 pb-2">
+            <div className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-sm font-medium">Development Insights</CardTitle>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowInsights(!showInsights)}
+              data-testid="button-toggle-insights"
+            >
+              {showInsights ? "Hide" : "Show"}
+            </Button>
+          </CardHeader>
+          {showInsights && (
+            <CardContent className="pt-0">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Catalog Entries</p>
+                  <p className="text-xl font-semibold" data-testid="text-total-entries">{entries?.length || 0}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {developmentInsights.withController} with controller ({developmentInsights.matchRate}%)
+                  </p>
+                </div>
+                {developmentInsights.totalMergedDuplicates > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Duplicates Merged</p>
+                    <p className="text-xl font-semibold text-amber-600 dark:text-amber-400" data-testid="text-duplicates-merged">
+                      {developmentInsights.totalMergedDuplicates}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      across {developmentInsights.entriesWithDuplicates} entries
+                    </p>
+                  </div>
+                )}
+                {developmentInsights.concentratorEndpoints.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Concentrator Endpoints</p>
+                    <div className="space-y-0.5">
+                      {developmentInsights.concentratorEndpoints.map(([endpoint, count], i) => (
+                        <div key={i} className="flex items-center gap-1.5">
+                          <span className="text-xs font-mono truncate max-w-[140px]" title={endpoint}>{endpoint}</span>
+                          <Badge variant="secondary" className="text-xs">{count}</Badge>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {developmentInsights.gatewayResolved > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Gateway Resolution</p>
+                    <p className="text-xl font-semibold text-indigo-600 dark:text-indigo-400" data-testid="text-gateway-resolved">
+                      {developmentInsights.gatewayResolved}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      entries resolved via operation hints ({developmentInsights.withOperationHint} hints found)
+                    </p>
+                  </div>
+                )}
+                {developmentInsights.heavyScreens.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Complex Screens</p>
+                    <div className="space-y-0.5">
+                      {developmentInsights.heavyScreens.map(([screen, count], i) => (
+                        <div key={i} className="flex items-center gap-1.5">
+                          <span className="text-xs truncate max-w-[140px]" title={screen}>{screen}</span>
+                          <Badge variant="secondary" className="text-xs">{count} HTTP</Badge>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          )}
+        </Card>
+      )}
+
       <Card>
         <CardContent className="p-0">
           {loadingEntries ? (
@@ -617,7 +766,15 @@ export default function CatalogPage() {
                   {filteredEntries.map((entry) => (
                     <TableRow key={entry.id} data-testid={`row-entry-${entry.id}`}>
                       <TableCell className="text-sm font-medium">
-                        {entry.screen}
+                        <div className="flex items-center gap-1.5">
+                          {entry.screen}
+                          {(entry.duplicateCount ?? 1) > 1 && (
+                            <span className="inline-flex items-center gap-0.5 rounded-md bg-amber-50 px-1 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" title={`${entry.duplicateCount} identical interactions merged`}>
+                              <Copy className="h-2.5 w-2.5" />
+                              {entry.duplicateCount}x
+                            </span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell>
                         <CategoryBadge category={entry.interactionCategory} />

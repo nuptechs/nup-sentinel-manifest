@@ -581,6 +581,7 @@ public class JavaASTAnalyzer {
                 BlockStmt body = method.getBody().get();
                 extractMethodCalls(body, mi);
                 detectEntityMutations(body, mi);
+                detectProgrammaticSecurity(body, mi);
             }
 
             info.methods.add(mi);
@@ -619,6 +620,68 @@ public class JavaASTAnalyzer {
                 }
             }
         }, null);
+    }
+
+    private static final Set<String> SECURITY_CHECK_METHODS = Set.of(
+        "isUserInRole", "hasRole", "hasAuthority", "hasPermission", "hasAccess",
+        "checkPermission", "checkAccess", "authorize", "isAllowed", "isAuthorized",
+        "isAuthenticated", "checkRole", "validatePermission", "verifyPermission",
+        "requireRole", "requirePermission", "requireAuth", "requireAuthentication"
+    );
+
+    private void detectProgrammaticSecurity(BlockStmt body, MethodInfo mi) {
+        body.accept(new VoidVisitorAdapter<Void>() {
+            @Override
+            public void visit(MethodCallExpr callExpr, Void arg) {
+                super.visit(callExpr, arg);
+                String methodName = callExpr.getNameAsString();
+
+                if (SECURITY_CHECK_METHODS.contains(methodName)) {
+                    String expression = callExpr.toString();
+                    List<String> roles = extractRolesFromProgrammaticCall(callExpr);
+                    mi.securityAnnotations.add(new SecurityAnnotation(
+                        "Programmatic:" + methodName, expression, roles
+                    ));
+                    return;
+                }
+
+                if (methodName.equals("getAuthentication") || methodName.equals("getContext")) {
+                    if (callExpr.getScope().isPresent()) {
+                        String scope = callExpr.getScope().get().toString();
+                        if (scope.contains("SecurityContextHolder") || scope.contains("SecurityContext")) {
+                            mi.securityAnnotations.add(new SecurityAnnotation(
+                                "Programmatic:SecurityContext", callExpr.toString(), List.of()
+                            ));
+                        }
+                    }
+                }
+
+                if (methodName.equals("isUserInRole") && callExpr.getScope().isPresent()) {
+                    List<String> roles = new ArrayList<>();
+                    for (var argExpr : callExpr.getArguments()) {
+                        if (argExpr.isStringLiteralExpr()) {
+                            roles.add(argExpr.asStringLiteralExpr().getValue());
+                        }
+                    }
+                    mi.securityAnnotations.add(new SecurityAnnotation(
+                        "Programmatic:isUserInRole", callExpr.toString(), roles
+                    ));
+                }
+            }
+        }, null);
+    }
+
+    private List<String> extractRolesFromProgrammaticCall(MethodCallExpr callExpr) {
+        List<String> roles = new ArrayList<>();
+        for (var argExpr : callExpr.getArguments()) {
+            if (argExpr.isStringLiteralExpr()) {
+                String val = argExpr.asStringLiteralExpr().getValue();
+                if (val.startsWith("ROLE_") || val.matches("[A-Z_]{3,}")) {
+                    roles.add(val);
+                }
+            }
+        }
+        return roles;
     }
 
     private void detectEntityMutations(BlockStmt body, MethodInfo mi) {
