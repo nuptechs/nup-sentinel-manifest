@@ -70,6 +70,109 @@ interface ComponentEventGraph {
   componentRegistry: Map<string, string>;
 }
 
+type BaseURLRegistry = Map<string, string>;
+
+function buildBaseURLRegistry(files: { filePath: string; content: string }[]): BaseURLRegistry {
+  const registry: BaseURLRegistry = new Map();
+
+  for (const file of files) {
+    const ext = file.filePath.substring(file.filePath.lastIndexOf("."));
+    if (![".ts", ".js", ".tsx", ".jsx"].includes(ext)) continue;
+    if (file.filePath.includes("node_modules") || file.filePath.includes("dist/") || file.filePath.includes("build/")) continue;
+
+    try {
+      const sourceFile = parseTypeScript(file.content, file.filePath);
+      const visit = (node: ts.Node) => {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+          const name = node.name.text;
+          const nameLower = name.toLowerCase();
+
+          if (ts.isStringLiteral(node.initializer) || ts.isNoSubstitutionTemplateLiteral(node.initializer)) {
+            const value = node.initializer.text;
+            if ((nameLower.includes("base") || nameLower.includes("prefix") || nameLower.includes("api_url") || nameLower.includes("apiurl")) && value.startsWith("/")) {
+              registry.set(`${file.filePath}::${name}`, value);
+            }
+          }
+
+          if (ts.isCallExpression(node.initializer)) {
+            const callExpr = node.initializer.expression;
+            if (ts.isPropertyAccessExpression(callExpr) && callExpr.name.text === "create") {
+              const args = node.initializer.arguments;
+              if (args.length > 0 && ts.isObjectLiteralExpression(args[0])) {
+                for (const prop of args[0].properties) {
+                  if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "baseURL") {
+                    if (ts.isStringLiteral(prop.initializer) || ts.isNoSubstitutionTemplateLiteral(prop.initializer)) {
+                      registry.set(`${file.filePath}::${name}`, prop.initializer.text);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        if (ts.isExpressionStatement(node) && ts.isBinaryExpression(node.expression)) {
+          const bin = node.expression;
+          if (bin.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+            const leftText = bin.left.getText(sourceFile);
+            if (leftText.includes("defaults.baseURL") || leftText.includes("defaults.baseUrl")) {
+              if (ts.isStringLiteral(bin.right) || ts.isNoSubstitutionTemplateLiteral(bin.right)) {
+                registry.set(`${file.filePath}::__defaults__`, bin.right.text);
+              }
+            }
+          }
+        }
+
+        ts.forEachChild(node, visit);
+      };
+      visit(sourceFile);
+    } catch (err) {
+    }
+  }
+
+  if (registry.size > 0) {
+    console.log(`[frontend-analyzer] BaseURLRegistry: ${registry.size} entries found`);
+    registry.forEach((value, key) => {
+      console.log(`[frontend-analyzer]   ${key} → ${value}`);
+    });
+  }
+
+  return registry;
+}
+
+function resolveBaseURL(url: string, filePath: string, baseURLRegistry: BaseURLRegistry): string {
+  if (!url || url.startsWith("http://") || url.startsWith("https://") || url.startsWith("/")) return url;
+
+  if (url.startsWith("{base}/") || url.startsWith("{base}")) {
+    const suffix = url.replace(/^\{base\}\/?/, "");
+    for (const [key, base] of Array.from(baseURLRegistry.entries())) {
+      if (key.startsWith(filePath + "::") || key.includes("::__defaults__")) {
+        const resolved = base.replace(/\/$/, "") + "/" + suffix;
+        return resolved.replace(/\/+/g, "/");
+      }
+    }
+    for (const [, base] of Array.from(baseURLRegistry.entries())) {
+      const resolved = base.replace(/\/$/, "") + "/" + suffix;
+      return resolved.replace(/\/+/g, "/");
+    }
+  }
+
+  if (!url.startsWith("/") && !url.startsWith("http")) {
+    for (const [key, base] of Array.from(baseURLRegistry.entries())) {
+      if (key.startsWith(filePath + "::") || key.includes("::__defaults__")) {
+        const resolved = base.replace(/\/$/, "") + "/" + url;
+        return resolved.replace(/\/+/g, "/");
+      }
+    }
+    for (const [, base] of Array.from(baseURLRegistry.entries())) {
+      const resolved = base.replace(/\/$/, "") + "/" + url;
+      return resolved.replace(/\/+/g, "/");
+    }
+  }
+
+  return url;
+}
+
 class ImportedHttpClients {
   private httpIdentifiers = new Set<string>();
   private fetchIdentifier = "fetch";
@@ -3499,8 +3602,16 @@ function matchUrlToEndpoint(
   return bestNode;
 }
 
+function normalizeSegment(seg: string): string {
+  return seg.replace(/\.v\d+$/, "").replace(/\.(json|xml|html|csv|pdf)$/i, "");
+}
+
+function isParamSegment(seg: string): boolean {
+  return seg === "{param}" || seg.startsWith("{") || seg.startsWith(":");
+}
+
 function endpointMatchScore(frontendUrl: string, backendPath: string): number {
-  const normFront = frontendUrl.replace(/\/+/g, "/").replace(/\/$/, "");
+  const normFront = frontendUrl.replace(/\/+/g, "/").replace(/\/$/, "").replace(/\?.*$/, "");
   const normBack = backendPath.replace(/\/+/g, "/").replace(/\/$/, "");
 
   if (normFront === normBack) return 100;
@@ -3508,23 +3619,82 @@ function endpointMatchScore(frontendUrl: string, backendPath: string): number {
   const frontParts = normFront.split("/").filter(Boolean);
   const backParts = normBack.split("/").filter(Boolean);
 
-  if (frontParts.length !== backParts.length) {
-    if (normFront.includes(normBack) || normBack.includes(normFront)) return 60;
+  const hasBasePrefix = frontParts.length > 0 && frontParts[0] === "{base}";
+
+  if (hasBasePrefix) {
+    const suffixParts = frontParts.slice(1);
+    if (suffixParts.length === 0) return 0;
+
+    if (backParts.length >= suffixParts.length) {
+      const backSuffix = backParts.slice(backParts.length - suffixParts.length);
+      let matchCount = 0;
+      for (let i = 0; i < suffixParts.length; i++) {
+        const fp = normalizeSegment(suffixParts[i]);
+        const bp = normalizeSegment(backSuffix[i]);
+        if (fp === bp) {
+          matchCount++;
+        } else if (isParamSegment(bp) || isParamSegment(fp)) {
+          matchCount += 0.8;
+        } else {
+          return 0;
+        }
+      }
+      return (matchCount / suffixParts.length) * 85;
+    }
     return 0;
   }
 
-  let matchCount = 0;
-  for (let i = 0; i < frontParts.length; i++) {
-    const fp = frontParts[i];
-    const bp = backParts[i];
-    if (fp === bp) {
-      matchCount++;
-    } else if (bp.startsWith("{") || fp === "{param}" || fp.startsWith(":")) {
-      matchCount += 0.8;
+  if (frontParts.length === backParts.length) {
+    let matchCount = 0;
+    for (let i = 0; i < frontParts.length; i++) {
+      const fp = normalizeSegment(frontParts[i]);
+      const bp = normalizeSegment(backParts[i]);
+      if (fp === bp) {
+        matchCount++;
+      } else if (isParamSegment(bp) || isParamSegment(fp)) {
+        matchCount += 0.8;
+      }
     }
+    return (matchCount / frontParts.length) * 100;
   }
 
-  return (matchCount / frontParts.length) * 100;
+  if (normFront.includes(normBack) || normBack.includes(normFront)) return 60;
+
+  if (frontParts.length > backParts.length) {
+    const offset = frontParts.length - backParts.length;
+    let matchCount = 0;
+    for (let i = 0; i < backParts.length; i++) {
+      const fp = normalizeSegment(frontParts[i + offset]);
+      const bp = normalizeSegment(backParts[i]);
+      if (fp === bp) {
+        matchCount++;
+      } else if (isParamSegment(bp) || isParamSegment(fp)) {
+        matchCount += 0.8;
+      } else {
+        return 0;
+      }
+    }
+    return (matchCount / backParts.length) * 70;
+  }
+
+  if (backParts.length > frontParts.length) {
+    const offset = backParts.length - frontParts.length;
+    let matchCount = 0;
+    for (let i = 0; i < frontParts.length; i++) {
+      const fp = normalizeSegment(frontParts[i]);
+      const bp = normalizeSegment(backParts[i + offset]);
+      if (fp === bp) {
+        matchCount++;
+      } else if (isParamSegment(bp) || isParamSegment(fp)) {
+        matchCount += 0.8;
+      } else {
+        return 0;
+      }
+    }
+    return (matchCount / frontParts.length) * 65;
+  }
+
+  return 0;
 }
 
 function resolveBindingsViaNodes(
@@ -4040,6 +4210,7 @@ export function analyzeFrontend(
   const interactions: FrontendInteraction[] = [];
   const htmlTemplates = new Map<string, string>();
 
+  const baseURLRegistry = buildBaseURLRegistry(files);
   const serviceMap = buildHttpServiceMap(files);
   const globalCallGraph = buildGlobalCallGraph(files, serviceMap);
   const allFilePaths = files.map(f => f.filePath);
@@ -4103,6 +4274,39 @@ export function analyzeFrontend(
       }
     } catch (err) {
       console.error(`[frontend-analyzer] Error analyzing ${file.filePath}:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  if (baseURLRegistry.size > 0) {
+    let baseResolved = 0;
+    let newMatches = 0;
+    for (const interaction of interactions) {
+      if (interaction.url && (interaction.url.includes("{base}") || (!interaction.url.startsWith("/") && !interaction.url.startsWith("http")))) {
+        const resolved = resolveBaseURL(interaction.url, interaction.sourceFile, baseURLRegistry);
+        if (resolved !== interaction.url) {
+          interaction.url = resolved;
+          baseResolved++;
+
+          if (!interaction.mappedBackendNode && interaction.httpMethod) {
+            const backendNode = matchUrlToEndpoint(interaction.httpMethod, resolved, graph);
+            if (backendNode) {
+              interaction.mappedBackendNode = backendNode;
+              newMatches++;
+              if (interaction.resolutionPath) {
+                interaction.resolutionPath = [...interaction.resolutionPath, { tier: "controller", file: backendNode.className, function: backendNode.methodName, detail: `matched ${interaction.httpMethod} ${resolved} (baseURL resolved)` }];
+              } else {
+                interaction.resolutionPath = [
+                  { tier: "local", file: interaction.sourceFile, function: interaction.actionName, detail: "baseURL resolution" },
+                  { tier: "controller", file: backendNode.className, function: backendNode.methodName, detail: `matched ${interaction.httpMethod} ${resolved} (baseURL resolved)` }
+                ];
+              }
+            }
+          }
+        }
+      }
+    }
+    if (baseResolved > 0) {
+      console.log(`[frontend-analyzer] BaseURL resolution: ${baseResolved} URLs resolved, ${newMatches} new controller matches`);
     }
   }
 

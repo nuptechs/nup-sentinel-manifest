@@ -28,6 +28,26 @@ The Java Backend Analyzer uses JavaParser with JavaSymbolSolver for semantic AST
 - **Role classification** (`classifyFileRole`): .vue→component, HTTP calls in serviceMap→repository, @Component/defineComponent/JSX→component, @Injectable/@Service→facade, class declarations→usecase, else→unknown
 - **Validated on easynup**: 2444 total entries, 1017 with endpoints, 685 with controllers, 317 {base} URLs (near-zero false positives, +3 genuine new resolutions vs baseline)
 
+### BaseURL Resolution System
+- **BaseURLRegistry**: Built at analysis start, scans all files for `axios.create({baseURL})`, `axios.defaults.baseURL`, and exported URL constants (e.g., `export const API_PREFIX = "/api/v1"`)
+- **Post-processing step**: After all interactions are collected, URLs with `{base}` prefix or relative paths (no `/` prefix, no `http`) are resolved using the registry
+- **Re-matching**: Unresolved interactions get a second chance at controller matching with resolved URLs
+- **Design**: Registry is keyed by `filePath::instanceName` for scoped resolution, with fallback to any registered base
+
+### Graph-Connector Architecture (100% ResolutionPath-Based)
+- graph-connector.ts contains **ZERO URL string matching, regex, or heuristics**
+- Controller resolution: reads `tier === "controller"` steps from `resolutionPath` to populate catalog entries
+- All heuristic functions (matchByOperationName, matchBySuffix, tokenize, etc.) have been permanently removed
+- This ensures the catalog is deterministic and traceable — every controller match has a structural proof in the resolutionPath
+
+### Endpoint Match Scoring (endpointMatchScore)
+- **Exact match**: 100 points
+- **Same length segments**: Up to 100 points (param segments score 0.8)
+- **{base} prefix URLs**: Suffix-based matching against backend path tail, capped at 85 points
+- **Substring containment**: 60 points
+- **Different segment counts**: Suffix alignment matching, capped at 70 (frontend longer) or 65 (backend longer)
+- **Minimum thresholds**: 50 for method-matched, 40 for method-agnostic fallback
+
 ### Enriched Catalog Model
 Each catalog entry now carries full resolution metadata directly from the analyzer (no inference/heuristics):
 - **resolutionPath** (jsonb): Ordered array of `{ tier, file, function, detail }` steps showing exactly how the endpoint was discovered — the structural truth of the code path
