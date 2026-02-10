@@ -47,6 +47,10 @@ import {
   ShieldAlert,
   ShieldCheck,
   Loader2,
+  Globe,
+  Server,
+  MonitorSmartphone,
+  Zap,
 } from "lucide-react";
 import type { CatalogEntry, Project } from "@shared/schema";
 
@@ -68,6 +72,25 @@ function OperationBadge({ operation }: { operation: string | null }) {
   return (
     <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium whitespace-nowrap ${colorMap[operation] || "bg-muted text-muted-foreground"}`}>
       {operation}
+    </span>
+  );
+}
+
+function CategoryBadge({ category }: { category: string | null }) {
+  if (!category) return null;
+  const config: Record<string, { icon: typeof Globe; label: string; className: string }> = {
+    HTTP: { icon: Zap, label: "HTTP", className: "bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" },
+    UI_ONLY: { icon: MonitorSmartphone, label: "UI Only", className: "bg-slate-50 text-slate-600 dark:bg-slate-900/30 dark:text-slate-400" },
+    STATE_ONLY: { icon: Zap, label: "State", className: "bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400" },
+    SERVICE_BRIDGE: { icon: Server, label: "Service Bridge", className: "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" },
+    EXTERNAL_SERVICE: { icon: Globe, label: "External", className: "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300" },
+  };
+  const c = config[category] || { icon: Zap, label: category, className: "bg-muted text-muted-foreground" };
+  const Icon = c.icon;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium whitespace-nowrap ${c.className}`}>
+      <Icon className="h-3 w-3" />
+      {c.label}
     </span>
   );
 }
@@ -139,6 +162,18 @@ function EntryDetailDialog({
             <div>
               <Label className="text-xs text-muted-foreground">Interaction</Label>
               <p className="text-sm font-medium mt-0.5" data-testid="text-detail-interaction">{entry.interaction}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label className="text-xs text-muted-foreground">Category</Label>
+              <div className="mt-1">
+                <CategoryBadge category={entry.interactionCategory} />
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">Architecture</Label>
+              <p className="text-sm font-mono mt-0.5">{entry.architectureType || "N/A"}</p>
             </div>
           </div>
           <Separator />
@@ -335,6 +370,7 @@ export default function CatalogPage() {
 
   const [searchTerm, setSearchTerm] = useState("");
   const [filterOp, setFilterOp] = useState<string>("all");
+  const [filterCategory, setFilterCategory] = useState<string>("all");
   const [selectedEntry, setSelectedEntry] = useState<CatalogEntry | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
 
@@ -408,9 +444,11 @@ export default function CatalogPage() {
         (entry.endpoint || "").toLowerCase().includes(searchTerm.toLowerCase());
       const matchesFilter =
         filterOp === "all" || entry.technicalOperation === filterOp;
-      return matchesSearch && matchesFilter;
+      const matchesCategory =
+        filterCategory === "all" || entry.interactionCategory === filterCategory;
+      return matchesSearch && matchesFilter && matchesCategory;
     });
-  }, [entries, searchTerm, filterOp]);
+  }, [entries, searchTerm, filterOp, filterCategory]);
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
@@ -506,6 +544,21 @@ export default function CatalogPage() {
                 </SelectContent>
               </Select>
             </div>
+            <div className="w-48">
+              <Select value={filterCategory} onValueChange={setFilterCategory}>
+                <SelectTrigger data-testid="select-filter-category">
+                  <SelectValue placeholder="All Categories" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Categories</SelectItem>
+                  <SelectItem value="HTTP">HTTP</SelectItem>
+                  <SelectItem value="UI_ONLY">UI Only</SelectItem>
+                  <SelectItem value="SERVICE_BRIDGE">Service Bridge</SelectItem>
+                  <SelectItem value="EXTERNAL_SERVICE">External Service</SelectItem>
+                  <SelectItem value="STATE_ONLY">State Only</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -551,6 +604,7 @@ export default function CatalogPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead className="min-w-[120px]">Screen</TableHead>
+                    <TableHead className="min-w-[80px]">Category</TableHead>
                     <TableHead className="min-w-[160px]">Interaction</TableHead>
                     <TableHead className="min-w-[180px]">Endpoint</TableHead>
                     <TableHead className="min-w-[100px]">Entities</TableHead>
@@ -565,6 +619,9 @@ export default function CatalogPage() {
                     <TableRow key={entry.id} data-testid={`row-entry-${entry.id}`}>
                       <TableCell className="text-sm font-medium">
                         {entry.screen}
+                      </TableCell>
+                      <TableCell>
+                        <CategoryBadge category={entry.interactionCategory} />
                       </TableCell>
                       <TableCell className="text-sm">{entry.interaction}</TableCell>
                       <TableCell>

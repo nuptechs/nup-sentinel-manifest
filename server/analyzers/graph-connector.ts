@@ -344,10 +344,19 @@ export function interactionsToCatalogEntries(
       ? `${interaction.elementType}: ${interaction.actionName} → ${interaction.httpMethod} ${interaction.url}`
       : `${interaction.elementType}: ${interaction.actionName}`;
 
+    let screenName = interaction.component;
+    const category = interaction.interactionCategory || "HTTP";
+    if (category === "SERVICE_BRIDGE") {
+      screenName = `[Service Bridge] ${interaction.component}`;
+    } else if (category === "EXTERNAL_SERVICE") {
+      const domain = interaction.externalDomain || "unknown";
+      screenName = `[External: ${domain}] ${interaction.component}`;
+    }
+
     return {
       analysisRunId,
       projectId,
-      screen: interaction.component,
+      screen: screenName,
       interaction: interactionDesc,
       interactionType: interaction.elementType,
       endpoint: interaction.url || null,
@@ -367,7 +376,7 @@ export function interactionsToCatalogEntries(
       lineNumber: interaction.lineNumber,
       resolutionPath: interaction.resolutionPath || null,
       architectureType: architectureType,
-      interactionCategory: interaction.interactionCategory || null,
+      interactionCategory: category,
       confidence: computeStructuralConfidence(interaction.resolutionPath, controllerClass, repositoryMethods),
       requiredRoles,
       securityAnnotations: securityAnns,

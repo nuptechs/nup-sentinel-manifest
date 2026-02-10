@@ -27,10 +27,11 @@ export interface FrontendInteraction {
   resolutionTier: string | null;
   resolutionStrategy: string | null;
   resolutionPath: ResolutionStep[] | null;
-  interactionCategory: "HTTP" | "UI_ONLY" | "STATE_ONLY";
+  interactionCategory: "HTTP" | "UI_ONLY" | "STATE_ONLY" | "SERVICE_BRIDGE" | "EXTERNAL_SERVICE";
   confidence: number;
   frontendRoute?: string | null;
   routeGuards?: string[];
+  externalDomain?: string | null;
 }
 
 interface HttpCall {
@@ -3681,11 +3682,83 @@ function normalizeUrl(url: string): string {
     .trim();
 }
 
+function isExternalUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+function extractExternalDomain(url: string): string | null {
+  const match = url.match(/^https?:\/\/([^\/]+)/i);
+  return match ? match[1] : null;
+}
+
+function isServerSideFile(filePath: string): boolean {
+  const serverIndicators = [
+    /^server\//i,
+    /\/server\//i,
+    /^backend\//i,
+    /\/backend\//i,
+    /\/middlewares?\//i,
+    /\/controllers?\//i,
+    /\/services?\//i,
+    /\/routes?\//i,
+    /\/api\//i,
+  ];
+  const fileContent = filePath.toLowerCase();
+  if (fileContent.includes("node_modules") || fileContent.includes("dist/") || fileContent.includes("build/")) {
+    return false;
+  }
+  for (const indicator of serverIndicators) {
+    if (indicator.test(filePath)) {
+      if (filePath.includes("/src/views/") || filePath.includes("/src/pages/") || 
+          filePath.includes("/src/components/") || filePath.includes("/src/layouts/")) {
+        return false;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+function extractOperationNameFromUrl(url: string): string | null {
+  const cleaned = url.replace(/\?.*$/, "").replace(/\/+/g, "/").replace(/\/$/, "");
+  const segments = cleaned.split("/").filter(Boolean);
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const seg = segments[i];
+    if (isParamSegment(seg)) continue;
+    const withoutVersion = seg.replace(/\.v\d+$/i, "");
+    if (/^[a-z][a-zA-Z]{4,}$/.test(withoutVersion) && /[A-Z]/.test(withoutVersion)) {
+      return withoutVersion;
+    }
+  }
+  return null;
+}
+
+function normalizeClassName(className: string): string {
+  return className
+    .replace(/(?:WsV\d+|ServiceV\d+|Ws|Handler|Action|Command|Controller|Resource|Endpoint)$/i, "")
+    .toLowerCase();
+}
+
+function operationNameMatchScore(operationName: string, className: string): number {
+  const normalizedOp = operationName.toLowerCase();
+  const normalizedClass = normalizeClassName(className);
+  if (normalizedOp === normalizedClass) return 90;
+  if (normalizedClass.includes(normalizedOp) || normalizedOp.includes(normalizedClass)) {
+    const longer = Math.max(normalizedOp.length, normalizedClass.length);
+    const shorter = Math.min(normalizedOp.length, normalizedClass.length);
+    if (shorter / longer >= 0.6) return 80;
+    return 70;
+  }
+  return 0;
+}
+
 function matchUrlToEndpoint(
   httpMethod: string,
   url: string,
   graph: ApplicationGraph
 ): GraphNode | null {
+  if (isExternalUrl(url)) return null;
+
   const normalizedUrl = normalizeUrl(url);
   const controllers = graph.getNodesByType("CONTROLLER");
   let bestNode: GraphNode | null = null;
@@ -3694,13 +3767,29 @@ function matchUrlToEndpoint(
   for (const node of controllers) {
     const meta = node.metadata as { httpMethod?: string; fullPath?: string };
     if (!meta.httpMethod || !meta.fullPath) continue;
-
     if (httpMethod && meta.httpMethod.toUpperCase() !== httpMethod.toUpperCase()) continue;
 
     const score = endpointMatchScore(normalizedUrl, meta.fullPath);
     if (score > bestScore && score >= 50) {
       bestScore = score;
       bestNode = node;
+    }
+  }
+
+  if (!bestNode) {
+    const operationName = extractOperationNameFromUrl(normalizedUrl);
+    if (operationName) {
+      let bestOpScore = 0;
+      for (const node of controllers) {
+        const meta = node.metadata as { httpMethod?: string; fullPath?: string };
+        if (httpMethod && meta.httpMethod && meta.httpMethod.toUpperCase() !== httpMethod.toUpperCase()) continue;
+
+        const opScore = operationNameMatchScore(operationName, node.className);
+        if (opScore > bestOpScore && opScore >= 70) {
+          bestOpScore = opScore;
+          bestNode = node;
+        }
+      }
     }
   }
 
@@ -3736,6 +3825,10 @@ function endpointMatchScore(frontendUrl: string, backendPath: string): number {
   const frontParts = normFront.split("/").filter(Boolean);
   const backParts = normBack.split("/").filter(Boolean);
 
+  if (backParts.length <= 1 && frontParts.length > 2) {
+    return 0;
+  }
+
   const hasBasePrefix = frontParts.length > 0 && frontParts[0] === "{base}";
 
   if (hasBasePrefix) {
@@ -3763,51 +3856,67 @@ function endpointMatchScore(frontendUrl: string, backendPath: string): number {
 
   if (frontParts.length === backParts.length) {
     let matchCount = 0;
+    let literalMatches = 0;
     for (let i = 0; i < frontParts.length; i++) {
       const fp = normalizeSegment(frontParts[i]);
       const bp = normalizeSegment(backParts[i]);
       if (fp === bp) {
         matchCount++;
+        literalMatches++;
       } else if (isParamSegment(bp) || isParamSegment(fp)) {
         matchCount += 0.8;
       }
     }
+    if (literalMatches === 0 && frontParts.length > 1) return 0;
     return (matchCount / frontParts.length) * 100;
   }
 
-  if (normFront.includes(normBack) || normBack.includes(normFront)) return 60;
+  if (frontParts.length > 0 && backParts.length > 0) {
+    const frontStr = frontParts.map(normalizeSegment).join("/");
+    const backStr = backParts.map(normalizeSegment).join("/");
+    if (backParts.length >= 2 && (frontStr.includes(backStr) || backStr.includes(frontStr))) {
+      const ratio = Math.min(frontParts.length, backParts.length) / Math.max(frontParts.length, backParts.length);
+      if (ratio >= 0.5) return 60;
+    }
+  }
 
-  if (frontParts.length > backParts.length) {
+  if (frontParts.length > backParts.length && backParts.length >= 2) {
     const offset = frontParts.length - backParts.length;
     let matchCount = 0;
+    let literalMatches = 0;
     for (let i = 0; i < backParts.length; i++) {
       const fp = normalizeSegment(frontParts[i + offset]);
       const bp = normalizeSegment(backParts[i]);
       if (fp === bp) {
         matchCount++;
+        literalMatches++;
       } else if (isParamSegment(bp) || isParamSegment(fp)) {
         matchCount += 0.8;
       } else {
         return 0;
       }
     }
+    if (literalMatches === 0) return 0;
     return (matchCount / backParts.length) * 70;
   }
 
-  if (backParts.length > frontParts.length) {
+  if (backParts.length > frontParts.length && frontParts.length >= 2) {
     const offset = backParts.length - frontParts.length;
     let matchCount = 0;
+    let literalMatches = 0;
     for (let i = 0; i < frontParts.length; i++) {
       const fp = normalizeSegment(frontParts[i]);
       const bp = normalizeSegment(backParts[i + offset]);
       if (fp === bp) {
         matchCount++;
+        literalMatches++;
       } else if (isParamSegment(bp) || isParamSegment(fp)) {
         matchCount += 0.8;
       } else {
         return 0;
       }
     }
+    if (literalMatches === 0) return 0;
     return (matchCount / frontParts.length) * 65;
   }
 
@@ -4811,6 +4920,39 @@ export function analyzeFrontend(
     }
   }
 
+  let serviceBridgeCount = 0;
+  let externalServiceCount = 0;
+  for (const interaction of interactions) {
+    if (interaction.url && isExternalUrl(interaction.url)) {
+      interaction.interactionCategory = "EXTERNAL_SERVICE";
+      interaction.externalDomain = extractExternalDomain(interaction.url);
+      interaction.mappedBackendNode = null;
+      if (interaction.resolutionPath) {
+        interaction.resolutionPath = interaction.resolutionPath.filter(s => s.tier !== "controller");
+        interaction.resolutionPath.push({
+          tier: "external_service",
+          file: interaction.externalDomain || "unknown",
+          function: null,
+          detail: `external API call to ${interaction.externalDomain}`
+        });
+      }
+      externalServiceCount++;
+    }
+
+    if (isServerSideFile(interaction.sourceFile)) {
+      if (interaction.interactionCategory !== "EXTERNAL_SERVICE") {
+        interaction.interactionCategory = "SERVICE_BRIDGE";
+      }
+      serviceBridgeCount++;
+    }
+  }
+  if (serviceBridgeCount > 0) {
+    console.log(`[frontend-analyzer] Service bridges: ${serviceBridgeCount} interactions from server-side files`);
+  }
+  if (externalServiceCount > 0) {
+    console.log(`[frontend-analyzer] External services: ${externalServiceCount} interactions calling external APIs`);
+  }
+
   if (routeMap.size > 0) {
     let routeEnriched = 0;
     for (const interaction of interactions) {
@@ -4845,7 +4987,9 @@ export function analyzeFrontend(
   const withUrls = interactions.filter(i => i.url);
   const withoutUrls = interactions.filter(i => !i.url);
   const matched = interactions.filter(i => i.mappedBackendNode);
-  console.log(`[frontend-analyzer] Results: ${interactions.length} interactions, ${withUrls.length} with URLs (${withoutUrls.length} without), ${matched.length} matched to backend`);
+  const bridges = interactions.filter(i => i.interactionCategory === "SERVICE_BRIDGE");
+  const externals = interactions.filter(i => i.interactionCategory === "EXTERNAL_SERVICE");
+  console.log(`[frontend-analyzer] Results: ${interactions.length} interactions, ${withUrls.length} with URLs (${withoutUrls.length} without), ${matched.length} matched to backend, ${bridges.length} service bridges, ${externals.length} external services`);
 
   return interactions;
 }

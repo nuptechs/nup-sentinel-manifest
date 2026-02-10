@@ -28,13 +28,17 @@ export function detectArchitecture(
     return { type: "EXTERNAL_API_GATEWAY", confidence: 0.9, evidence };
   }
 
-  const mvcScore = checkMvcActionBased(controllers, fileData, evidence);
-  if (mvcScore >= 0.7) {
-    return { type: "MVC_ACTION_BASED", confidence: mvcScore, evidence };
-  }
-
   const wsScore = checkWsOperationBased(controllers, evidence);
   const restScore = checkRestController(controllers, evidence);
+  const mvcScore = checkMvcActionBased(controllers, fileData, evidence);
+
+  if (wsScore >= 0.5 && wsScore >= mvcScore) {
+    return { type: "WS_OPERATION_BASED", confidence: wsScore, evidence };
+  }
+
+  if (mvcScore >= 0.7 && mvcScore > wsScore) {
+    return { type: "MVC_ACTION_BASED", confidence: mvcScore, evidence };
+  }
 
   if (wsScore > restScore && wsScore >= 0.5) {
     return { type: "WS_OPERATION_BASED", confidence: wsScore, evidence };
