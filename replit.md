@@ -23,6 +23,8 @@ A Gateway/Command Bus Resolution system extracts operation identifiers from HTTP
 
 The system constructs an in-memory Application Graph model, facilitating detailed traversal and impact analysis. Source file analysis, graph reconstruction, and catalog conversion lead to deterministic classification of `technicalOperation`, `criticalityScore`, and `suggestedMeaning`, with optional LLM enrichment.
 
+A **System Explorer** page (`/insights`) provides a visual map of the analyzed system, separate from the Action Catalog. It groups catalog entries by screen (component/route), displaying each screen as a card with categorized interaction blocks (forms, actions, data loading, navigation, links, API calls). Each interaction block is clickable, opening a slide-out Trace Panel that shows the full resolution path step-by-step: Frontend Interaction → HTTP Call → Controller → Service Layer → Repository/Persistence → Entities Touched, with metadata at each step (security annotations, required roles, sensitive fields, entity field details, route guards, criticality score). Filters by operation type, backend/frontend scope, and search across screens/interactions/endpoints are supported. Summary statistics show total screens, interactions, endpoints, backend coverage, and average criticality.
+
 ## External Dependencies
 - PostgreSQL
 - OpenAI LLM (via Replit AI Integrations)

@@ -1,4 +1,4 @@
-import { LayoutDashboard, FolderUp, FileSearch, Settings } from "lucide-react";
+import { LayoutDashboard, FolderUp, FileSearch, Map } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import {
   Sidebar,
@@ -17,6 +17,7 @@ const navItems = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Upload Project", url: "/upload", icon: FolderUp },
   { title: "Catalog", url: "/catalog", icon: FileSearch },
+  { title: "System Explorer", url: "/insights", icon: Map },
 ];
 
 export function AppSidebar() {
