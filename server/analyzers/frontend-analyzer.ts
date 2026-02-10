@@ -3,6 +3,18 @@ import * as vueSfc from "@vue/compiler-sfc";
 import * as ngCompiler from "@angular/compiler";
 import type { ApplicationGraph, GraphNode } from "./application-graph";
 
+export interface ResolutionStep {
+  tier: string;
+  file: string;
+  function: string | null;
+  detail: string | null;
+}
+
+export interface ResolutionMetadata {
+  tier: string;
+  resolutionPath: ResolutionStep[];
+}
+
 export interface FrontendInteraction {
   component: string;
   elementType: string;
@@ -12,6 +24,11 @@ export interface FrontendInteraction {
   mappedBackendNode: GraphNode | null;
   sourceFile: string;
   lineNumber: number;
+  resolutionTier: string | null;
+  resolutionStrategy: string | null;
+  resolutionPath: ResolutionStep[] | null;
+  interactionCategory: "HTTP" | "UI_ONLY" | "STATE_ONLY";
+  confidence: number;
 }
 
 interface HttpCall {
@@ -3551,6 +3568,8 @@ function resolveBindingsViaNodes(
       stateFlowGraph, archLayerGraph
     );
 
+    const resolution: ResolutionMetadata | null = (resolvedCalls as any).__resolution || null;
+
     if (resolvedCalls.length > 0) {
       for (const call of resolvedCalls) {
         const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
@@ -3563,6 +3582,11 @@ function resolveBindingsViaNodes(
           mappedBackendNode: backendNode,
           sourceFile: filePath,
           lineNumber: binding.lineNumber,
+          resolutionTier: resolution?.tier || null,
+          resolutionStrategy: resolution?.tier || null,
+          resolutionPath: resolution?.resolutionPath || null,
+          interactionCategory: "HTTP",
+          confidence: tierToConfidence(resolution?.tier || null),
         });
       }
     } else {
@@ -3575,11 +3599,30 @@ function resolveBindingsViaNodes(
         mappedBackendNode: null,
         sourceFile: filePath,
         lineNumber: binding.lineNumber,
+        resolutionTier: null,
+        resolutionStrategy: null,
+        resolutionPath: null,
+        interactionCategory: "UI_ONLY",
+        confidence: 1.0,
       });
     }
   }
 
   return interactions;
+}
+
+function tierToConfidence(tier: string | null): number {
+  switch (tier) {
+    case "local": return 1.0;
+    case "serviceMap": return 0.95;
+    case "globalCallGraph": return 0.85;
+    case "eventGraph": return 0.80;
+    case "eventGraph+serviceMap": return 0.75;
+    case "eventGraph+globalCallGraph": return 0.70;
+    case "stateFlowGraph": return 0.65;
+    case "architecturalLayerGraph": return 0.55;
+    default: return 0.5;
+  }
 }
 
 function resolveHandlerHttpCalls(
@@ -3597,24 +3640,40 @@ function resolveHandlerHttpCalls(
   stateFlowGraph?: StateFlowGraph,
   archLayerGraph?: ArchitecturalLayerGraph
 ): HttpCall[] {
+  function tagResolution(calls: HttpCall[], tier: string, path: ResolutionStep[]): HttpCall[] {
+    (calls as any).__resolution = { tier, resolutionPath: path } as ResolutionMetadata;
+    return calls;
+  }
+
   const handlerNode = symbolTable.resolveHandlerNode(handlerName);
 
   if (handlerNode) {
     const httpCalls = symbolTable.traceHttpCalls(handlerNode);
-    if (httpCalls.length > 0) return httpCalls;
+    if (httpCalls.length > 0) return tagResolution(httpCalls, "local", [
+      { tier: "local", file: filePath, function: handlerName, detail: "direct HTTP call in handler" }
+    ]);
   }
 
   if (externalCalls && crossFileContext) {
     const resolved = resolveExternalCallsToHttpCalls(
       externalCalls, crossFileContext.importBindings, crossFileContext.serviceMap, handlerName, symbolTable
     );
-    if (resolved.length > 0) return resolved;
+    if (resolved.length > 0) {
+      const callerFn = resolved[0].callerFunction;
+      return tagResolution(resolved, "serviceMap", [
+        { tier: "local", file: filePath, function: handlerName, detail: "handler entry point" },
+        { tier: "serviceMap", file: filePath, function: callerFn, detail: "resolved via importBindings + HttpServiceMap" }
+      ]);
+    }
   }
 
   if (globalCallGraph) {
     const importBindings = crossFileContext?.importBindings;
     const graphCalls = lookupGlobalCallGraph(globalCallGraph, filePath, handlerName, importBindings);
-    if (graphCalls.length > 0) return graphCalls;
+    if (graphCalls.length > 0) return tagResolution(graphCalls, "globalCallGraph", [
+      { tier: "local", file: filePath, function: handlerName, detail: "handler entry point" },
+      { tier: "globalCallGraph", file: filePath, function: handlerName, detail: "cross-file function call propagation" }
+    ]);
   }
 
   if (eventGraph && allFiles && allFilePaths) {
@@ -3638,7 +3697,11 @@ function resolveHandlerHttpCalls(
         const parentHandlerNode = parentSymbolTable.resolveHandlerNode(mapping.parentHandler);
         if (parentHandlerNode) {
           const httpCalls = parentSymbolTable.traceHttpCalls(parentHandlerNode);
-          if (httpCalls.length > 0) return httpCalls;
+          if (httpCalls.length > 0) return tagResolution(httpCalls, "eventGraph", [
+            { tier: "local", file: filePath, function: handlerName, detail: "child component handler" },
+            { tier: "eventGraph", file: mapping.parentFilePath, function: mapping.parentHandler, detail: "event propagation from child component" },
+            { tier: "local", file: mapping.parentFilePath, function: mapping.parentHandler, detail: "direct HTTP call in parent handler" }
+          ]);
         }
 
         if (serviceMap) {
@@ -3658,13 +3721,21 @@ function resolveHandlerHttpCalls(
           const resolved = resolveExternalCallsToHttpCalls(
             parentExternalCalls, parentImportBindings, serviceMap, mapping.parentHandler, parentSymbolTable
           );
-          if (resolved.length > 0) return resolved;
+          if (resolved.length > 0) return tagResolution(resolved, "eventGraph+serviceMap", [
+            { tier: "local", file: filePath, function: handlerName, detail: "child component handler" },
+            { tier: "eventGraph", file: mapping.parentFilePath, function: mapping.parentHandler, detail: "event propagation from child component" },
+            { tier: "serviceMap", file: mapping.parentFilePath, function: resolved[0].callerFunction, detail: "resolved via parent importBindings + HttpServiceMap" }
+          ]);
         }
 
         if (globalCallGraph) {
           const parentImportBindings = parseImportBindings(parentSource, mapping.parentFilePath, allFilePaths);
           const graphCalls = lookupGlobalCallGraph(globalCallGraph, mapping.parentFilePath, mapping.parentHandler, parentImportBindings);
-          if (graphCalls.length > 0) return graphCalls;
+          if (graphCalls.length > 0) return tagResolution(graphCalls, "eventGraph+globalCallGraph", [
+            { tier: "local", file: filePath, function: handlerName, detail: "child component handler" },
+            { tier: "eventGraph", file: mapping.parentFilePath, function: mapping.parentHandler, detail: "event propagation from child component" },
+            { tier: "globalCallGraph", file: mapping.parentFilePath, function: mapping.parentHandler, detail: "cross-file call propagation from parent" }
+          ]);
         }
       } catch (err) {
         console.warn(`[event-graph] Failed to resolve parent handler ${mapping.parentHandler} in ${mapping.parentFilePath}: ${err instanceof Error ? err.message : String(err)}`);
@@ -3675,13 +3746,19 @@ function resolveHandlerHttpCalls(
   if (stateFlowGraph) {
     const importBindings = crossFileContext?.importBindings;
     const stateCalls = lookupStateFlowGraph(stateFlowGraph, handlerName, filePath, symbolTable, globalCallGraph, importBindings);
-    if (stateCalls.length > 0) return stateCalls;
+    if (stateCalls.length > 0) return tagResolution(stateCalls, "stateFlowGraph", [
+      { tier: "local", file: filePath, function: handlerName, detail: "handler entry point" },
+      { tier: "stateFlowGraph", file: filePath, function: handlerName, detail: "state write→read chain to HTTP-calling function" }
+    ]);
   }
 
   if (archLayerGraph) {
     const importBindings = crossFileContext?.importBindings;
     const archCalls = lookupArchitecturalLayerGraph(archLayerGraph, filePath, handlerName, symbolTable, externalCalls, importBindings);
-    if (archCalls.length > 0) return archCalls;
+    if (archCalls.length > 0) return tagResolution(archCalls, "architecturalLayerGraph", [
+      { tier: "local", file: filePath, function: handlerName, detail: "handler entry point" },
+      { tier: "architecturalLayerGraph", file: filePath, function: handlerName, detail: "symbol-first architectural traversal to repository HTTP calls" }
+    ]);
   }
 
   return [];
@@ -3728,6 +3805,11 @@ function analyzeVueFile(
         mappedBackendNode: null as GraphNode | null,
         sourceFile: filePath,
         lineNumber: b.lineNumber,
+        resolutionTier: null as string | null,
+        resolutionStrategy: null as string | null,
+        resolutionPath: null as ResolutionStep[] | null,
+        interactionCategory: "UI_ONLY" as const,
+        confidence: 1.0,
       }));
 
   addUnmappedHttpCalls(interactions, allHttpCalls, component, filePath, graph);
@@ -3796,6 +3878,11 @@ function analyzeAngularFile(
         mappedBackendNode: null,
         sourceFile: filePath,
         lineNumber: binding.lineNumber,
+        resolutionTier: null,
+        resolutionStrategy: null,
+        resolutionPath: null,
+        interactionCategory: "UI_ONLY",
+        confidence: 1.0,
       });
     }
     return interactions;
@@ -3912,6 +3999,11 @@ function addUnmappedHttpCalls(
         mappedBackendNode: backendNode,
         sourceFile: filePath,
         lineNumber: call.lineNumber,
+        resolutionTier: "local",
+        resolutionStrategy: "local",
+        resolutionPath: [{ tier: "local", file: filePath, function: call.callerFunction, detail: "unmapped direct HTTP call" }],
+        interactionCategory: "HTTP",
+        confidence: 1.0,
       });
       mappedUrls.add(key);
     }
@@ -3991,6 +4083,11 @@ export function analyzeFrontend(
               mappedBackendNode: null,
               sourceFile: file.filePath,
               lineNumber: binding.lineNumber,
+              resolutionTier: null,
+              resolutionStrategy: null,
+              resolutionPath: null,
+              interactionCategory: "UI_ONLY",
+              confidence: 1.0,
             });
           }
           break;

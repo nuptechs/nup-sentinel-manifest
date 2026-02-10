@@ -664,6 +664,11 @@ export function endpointImpactsToCatalogEntries(
       humanClassification: null,
       sourceFile: impact.sourceFile,
       lineNumber: impact.lineNumber,
+      resolutionPath: [{ tier: "backend_only", file: impact.sourceFile || impact.controllerClass, function: impact.controllerMethod, detail: "backend endpoint analysis" }],
+      resolutionStrategy: "backend_only",
+      architectureType: "REST_CONTROLLER",
+      interactionCategory: "HTTP",
+      confidence: 1.0,
     };
   });
 }
@@ -759,6 +764,11 @@ export function interactionsToCatalogEntries(
       humanClassification: null,
       sourceFile: interaction.sourceFile,
       lineNumber: interaction.lineNumber,
+      resolutionPath: interaction.resolutionPath || null,
+      resolutionStrategy: interaction.resolutionStrategy || null,
+      architectureType: architectureType,
+      interactionCategory: interaction.interactionCategory || null,
+      confidence: interaction.confidence ?? null,
     };
   });
 

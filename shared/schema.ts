@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, serial, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, serial, integer, timestamp, jsonb, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -101,6 +101,11 @@ export const catalogEntries = pgTable("catalog_entries", {
   humanClassification: text("human_classification"),
   sourceFile: text("source_file"),
   lineNumber: integer("line_number"),
+  resolutionPath: jsonb("resolution_path").$type<{ tier: string; file: string; function: string | null; detail: string | null }[]>(),
+  resolutionStrategy: text("resolution_strategy"),
+  architectureType: text("architecture_type"),
+  interactionCategory: text("interaction_category"),
+  confidence: real("confidence"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

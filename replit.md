@@ -28,6 +28,16 @@ The Java Backend Analyzer uses JavaParser with JavaSymbolSolver for semantic AST
 - **Role classification** (`classifyFileRole`): .vue→component, HTTP calls in serviceMap→repository, @Component/defineComponent/JSX→component, @Injectable/@Service→facade, class declarations→usecase, else→unknown
 - **Validated on easynup**: 2444 total entries, 1017 with endpoints, 685 with controllers, 317 {base} URLs (near-zero false positives, +3 genuine new resolutions vs baseline)
 
+### Enriched Catalog Model
+Each catalog entry now carries full resolution metadata directly from the analyzer (no inference/heuristics):
+- **resolutionPath** (jsonb): Ordered array of `{ tier, file, function, detail }` steps showing exactly how the endpoint was discovered
+- **resolutionStrategy** (text): Which tier(s) resolved the call (e.g., "local", "serviceMap", "eventGraph+serviceMap", "architecturalLayerGraph")
+- **architectureType** (text): "REST_CONTROLLER" or "WS_OPERATION_BASED"
+- **interactionCategory** (text): "HTTP", "UI_ONLY", or "STATE_ONLY" — entries with null endpoint are UI_ONLY, not errors
+- **confidence** (real, 0–1): Based on resolution tier depth (local=1.0, serviceMap=0.95, globalCallGraph=0.85, eventGraph=0.80, stateFlowGraph=0.65, architecturalLayerGraph=0.55)
+
+Resolution metadata is attached via `__resolution` property on `HttpCall[]` arrays inside `resolveHandlerHttpCalls`, read in `resolveBindingsViaNodes`, stored in `FrontendInteraction`, and persisted to the catalog by graph-connector. The analyzer functions themselves are unchanged — only the data propagation was added.
+
 The system constructs an in-memory Application Graph model, representing backend components and their interactions, enabling detailed traversal and impact analysis. Data flow involves source file analysis by both Java and Node.js engines, graph reconstruction, and conversion into catalog entries. A deterministic classifier assigns `technicalOperation`, `criticalityScore`, and `suggestedMeaning`, with optional LLM enrichment. A robust repository scanner handles large ZIP files efficiently. Database inserts for catalog entries are batched to prevent performance issues with large result sets.
 
 ## External Dependencies
