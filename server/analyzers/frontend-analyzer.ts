@@ -1025,7 +1025,7 @@ function buildHttpServiceMap(files: { filePath: string; content: string }[]): Ht
     }
 
     const existingMethodNames = new Set<string>();
-    for (const k of childEntry.methods.keys()) {
+    for (const k of Array.from(childEntry.methods.keys())) {
       const dot = k.lastIndexOf(".");
       if (dot >= 0) existingMethodNames.add(k.substring(dot + 1));
     }
@@ -1033,12 +1033,12 @@ function buildHttpServiceMap(files: { filePath: string; content: string }[]): Ht
     const instanceMap = fileClassInstances.get(chain.filePath);
     const exportNames: string[] = [];
     if (instanceMap) {
-      for (const [varName, className] of instanceMap.entries()) {
+      for (const [varName, className] of Array.from(instanceMap.entries())) {
         if (className === chain.className) exportNames.push(varName);
       }
     }
 
-    for (const [key, value] of parentEntry.methods.entries()) {
+    for (const [key, value] of Array.from(parentEntry.methods.entries())) {
       const dot = key.lastIndexOf(".");
       if (dot < 0) continue;
       const methodName = key.substring(dot + 1);
@@ -1051,7 +1051,7 @@ function buildHttpServiceMap(files: { filePath: string; content: string }[]): Ht
       }
     }
 
-    for (const [key, value] of parentEntry.directFunctions.entries()) {
+    for (const [key, value] of Array.from(parentEntry.directFunctions.entries())) {
       if (!childEntry.directFunctions.has(key)) {
         childEntry.directFunctions.set(key, value);
       }
@@ -3410,7 +3410,7 @@ function extractUrlFromNode(node: ts.Node): string | null {
 const OPERATION_HINT_FIELDS = new Set([
   "service", "action", "command", "operation",
   "operationName", "serviceName", "actionName", "commandName", "queryName",
-  "rpc", "handler", "procedure", "topic", "operationType", "serviceAction",
+  "rpc", "procedure", "topic", "operationType", "serviceAction",
 ]);
 
 function extractOperationHint(

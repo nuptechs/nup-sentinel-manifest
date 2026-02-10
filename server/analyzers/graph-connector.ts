@@ -453,13 +453,11 @@ function resolveGatewayOperations(entries: InsertCatalogEntry[], graph: Applicat
 
     let matchedNode: GraphNode | null = null;
     let bestMatchLen = 0;
-    let exactMatch = false;
 
     for (const [key, node] of Array.from(controllerIndex.entries())) {
       const normalizedKey = key.replace(/[-_]/g, "").toLowerCase();
       if (normalizedHint === normalizedKey) {
         matchedNode = node;
-        exactMatch = true;
         break;
       }
       if (normalizedHint.includes(normalizedKey) && normalizedKey.length >= MIN_SUBSTRING_MATCH_LEN && normalizedKey.length > bestMatchLen) {
