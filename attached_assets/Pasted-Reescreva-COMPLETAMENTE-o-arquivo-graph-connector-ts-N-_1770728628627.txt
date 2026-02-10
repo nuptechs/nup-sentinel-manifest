@@ -1,0 +1,114 @@
+Reescreva COMPLETAMENTE o arquivo graph-connector.ts.
+
+NÃO faça ajustes pontuais. NÃO preserve funções antigas. NÃO tente adaptar o código atual.
+
+O arquivo atual usa heurísticas textuais para descobrir controllers a partir da URL (matchByOperationName, matchBySuffix, matchByKeywordIntersection, etc). Isso está ARQUITETURALMENTE ERRADO e deve ser REMOVIDO.
+
+A nova regra é:
+
+O analyzer já descobriu o caminho real e isso está em interaction.resolutionPath.
+
+O graph-connector NÃO PODE tentar descobrir nada por regex, string, prefixo, tokens ou sufixos.
+
+Ele deve apenas:
+
+NOVA LÓGICA
+
+Para cada FrontendInteraction:
+
+Ler interaction.resolutionPath
+
+Encontrar no resolutionPath o step cujo tier === "controller"
+
+A partir desse step, localizar o GraphNode real no ApplicationGraph
+
+Executar walkCallChain a partir desse node
+
+Popular controllerClass, controllerMethod, serviceMethods, repositoryMethods, entitiesTouched, fullCallChain, persistenceOperations
+
+PROIBIDO no novo arquivo
+
+Remover completamente:
+
+IGNORED_URL_PREFIXES
+
+extractOperationName
+
+tokenize
+
+extractKeywords
+
+stripKnownPrefixes
+
+matchByOperationName
+
+matchByMethodName
+
+matchBySuffix
+
+matchByKeywordIntersection
+
+matchWsOperationBased
+
+matchUrlToController
+
+Essas funções não devem mais existir.
+
+Regras do novo design
+
+O graph-connector NÃO FAZ MATCH.
+
+O graph-connector NÃO USA URL PARA DESCOBRIR CONTROLLER.
+
+O graph-connector CONFIA 100% no resolutionPath.
+
+Se não houver step tier === "controller", então controllerClass e controllerMethod ficam null.
+
+endpointImpactsToCatalogEntries
+
+Mantém como está.
+
+computeStructuralConfidence
+
+Mantém como está.
+
+O arquivo final deve conter apenas:
+
+walkCallChain
+
+computeStructuralConfidence
+
+endpointImpactsToCatalogEntries
+
+interactionsToCatalogEntries (reescrito usando resolutionPath)
+
+inferOperationType
+
+Nada mais.
+
+interactionsToCatalogEntries nova lógica
+
+Para cada interaction:
+
+const controllerStep = interaction.resolutionPath?.find(s => s.tier === "controller");
+
+
+Se existir:
+
+const node = graph.findNodeByClassAndMethod(controllerStep.file, controllerStep.function);
+const chain = walkCallChain(graph, node.id);
+
+
+Se não existir:
+
+controllerClass = null
+
+Importante
+
+NÃO adicionar heurísticas novas.
+NÃO usar URL.
+NÃO usar string matching.
+
+O arquivo deve ficar pequeno, direto e puramente estrutural.
+
+Quando terminar, mostre o arquivo completo.
