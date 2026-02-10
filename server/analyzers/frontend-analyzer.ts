@@ -3568,10 +3568,9 @@ function resolveBindingsViaNodes(
       stateFlowGraph, archLayerGraph
     );
 
-    const resolution: ResolutionMetadata | null = (resolvedCalls as any).__resolution || null;
-
     if (resolvedCalls.length > 0) {
       for (const call of resolvedCalls) {
+        const resolution: ResolutionMetadata | null = (call as any).__resolution || null;
         const backendNode = matchUrlToEndpoint(call.method, call.url, graph);
         interactions.push({
           component,
@@ -3641,7 +3640,9 @@ function resolveHandlerHttpCalls(
   archLayerGraph?: ArchitecturalLayerGraph
 ): HttpCall[] {
   function tagResolution(calls: HttpCall[], tier: string, path: ResolutionStep[]): HttpCall[] {
-    (calls as any).__resolution = { tier, resolutionPath: path } as ResolutionMetadata;
+    for (const call of calls) {
+      (call as any).__resolution = { tier, resolutionPath: path } as ResolutionMetadata;
+    }
     return calls;
   }
 
