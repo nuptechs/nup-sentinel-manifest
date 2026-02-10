@@ -324,6 +324,7 @@ public class JavaASTAnalyzer {
         JavaSymbolSolver symbolSolver = new JavaSymbolSolver(combinedSolver);
 
         ParserConfiguration config = new ParserConfiguration();
+        config.setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE);
         config.setSymbolResolver(symbolSolver);
 
         return new JavaParser(config);
