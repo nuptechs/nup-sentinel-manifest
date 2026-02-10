@@ -7,6 +7,7 @@ com/permacat/model/GraphEdgeDTO.class
 com/permacat/analyzer/JavaASTAnalyzer$2.class
 com/permacat/analyzer/JavaASTAnalyzer$SymbolMap.class
 com/permacat/analyzer/JavaASTAnalyzer.class
+com/permacat/analyzer/JavaASTAnalyzer$SecurityAnnotation.class
 com/permacat/analyzer/JavaASTAnalyzer$ClassInfo.class
 com/permacat/analyzer/JavaASTAnalyzer$EntityField.class
 com/permacat/analyzer/JavaASTAnalyzer$MethodInfo.class

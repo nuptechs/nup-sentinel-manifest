@@ -221,6 +221,78 @@ function EntryDetailDialog({
               </div>
             </div>
           </div>
+          {((entry.requiredRoles as string[] || []).length > 0 || (entry.securityAnnotations as { type: string; expression: string; roles: string[] }[] || []).length > 0) && (
+            <>
+              <Separator />
+              <div>
+                <Label className="text-xs text-muted-foreground">Security & Access Control</Label>
+                {(entry.requiredRoles as string[] || []).length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1" data-testid="text-detail-required-roles">
+                    <span className="text-xs text-muted-foreground mr-1">Required Roles:</span>
+                    {(entry.requiredRoles as string[]).map((role, i) => (
+                      <Badge key={i} variant="destructive" className="text-xs font-mono">
+                        {role}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+                {(entry.securityAnnotations as { type: string; expression: string; roles: string[] }[] || []).length > 0 && (
+                  <div className="mt-2 space-y-1" data-testid="text-detail-security-annotations">
+                    <span className="text-xs text-muted-foreground">Annotations:</span>
+                    {(entry.securityAnnotations as { type: string; expression: string; roles: string[] }[]).map((ann, i) => (
+                      <div key={i} className="text-xs font-mono flex items-center gap-1.5">
+                        <Shield className="w-3 h-3 text-amber-500" />
+                        <span>@{ann.type}</span>
+                        {ann.expression && <span className="text-muted-foreground">({ann.expression})</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+          {(entry.sensitiveFieldsAccessed as string[] || []).length > 0 && (
+            <>
+              <Separator />
+              <div>
+                <Label className="text-xs text-muted-foreground">Sensitive Fields Accessed</Label>
+                <div className="flex flex-wrap gap-1 mt-1" data-testid="text-detail-sensitive-fields">
+                  {(entry.sensitiveFieldsAccessed as string[]).map((field, i) => (
+                    <Badge key={i} variant="destructive" className="text-xs font-mono">
+                      <ShieldAlert className="w-3 h-3 mr-1" />
+                      {field}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+          {(entry.frontendRoute || (entry.routeGuards as string[] || []).length > 0) && (
+            <>
+              <Separator />
+              <div className="grid grid-cols-2 gap-4">
+                {entry.frontendRoute && (
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Frontend Route</Label>
+                    <p className="text-sm font-mono mt-0.5" data-testid="text-detail-frontend-route">{entry.frontendRoute}</p>
+                  </div>
+                )}
+                {(entry.routeGuards as string[] || []).length > 0 && (
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Route Guards</Label>
+                    <div className="flex flex-wrap gap-1 mt-1" data-testid="text-detail-route-guards">
+                      {(entry.routeGuards as string[]).map((guard, i) => (
+                        <Badge key={i} variant="secondary" className="text-xs font-mono">
+                          <ShieldCheck className="w-3 h-3 mr-1" />
+                          {guard}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
           <Separator />
           <div>
             <Label className="text-xs text-muted-foreground">Suggested Meaning (AI)</Label>

@@ -217,7 +217,7 @@ export async function registerRoutes(
 
         if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
           catalogEntryData = endpointImpactsToCatalogEntries(
-            endpointImpacts, analysisRun.id, projectId
+            endpointImpacts, appGraph, analysisRun.id, projectId
           );
         }
 
@@ -547,7 +547,7 @@ export async function registerRoutes(
 
         if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
           catalogEntryData = endpointImpactsToCatalogEntries(
-            endpointImpacts, analysisRun.id, project.id
+            endpointImpacts, appGraph, analysisRun.id, project.id
           );
         }
 
@@ -824,7 +824,7 @@ export async function registerRoutes(
 
         if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
           catalogEntryData = endpointImpactsToCatalogEntries(
-            endpointImpacts, analysisRun.id, project.id
+            endpointImpacts, appGraph, analysisRun.id, project.id
           );
         }
 

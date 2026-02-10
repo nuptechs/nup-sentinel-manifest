@@ -105,6 +105,12 @@ export const catalogEntries = pgTable("catalog_entries", {
   architectureType: text("architecture_type"),
   interactionCategory: text("interaction_category"),
   confidence: real("confidence"),
+  requiredRoles: jsonb("required_roles").$type<string[]>().default([]),
+  securityAnnotations: jsonb("security_annotations").$type<{ type: string; expression: string; roles: string[] }[]>().default([]),
+  entityFieldsMetadata: jsonb("entity_fields_metadata").$type<{ entity: string; fields: { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[] }[]>().default([]),
+  sensitiveFieldsAccessed: jsonb("sensitive_fields_accessed").$type<string[]>().default([]),
+  frontendRoute: text("frontend_route"),
+  routeGuards: jsonb("route_guards").$type<string[]>().default([]),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

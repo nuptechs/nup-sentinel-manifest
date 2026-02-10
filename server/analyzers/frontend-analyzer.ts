@@ -29,6 +29,8 @@ export interface FrontendInteraction {
   resolutionPath: ResolutionStep[] | null;
   interactionCategory: "HTTP" | "UI_ONLY" | "STATE_ONLY";
   confidence: number;
+  frontendRoute?: string | null;
+  routeGuards?: string[];
 }
 
 interface HttpCall {
@@ -4203,6 +4205,314 @@ function isAngularComponent(content: string): boolean {
   return content.includes("@Component") || content.includes("@NgModule") || content.includes("@Injectable");
 }
 
+interface RouteDefinition {
+  path: string;
+  component: string;
+  guards: string[];
+  meta?: Record<string, unknown>;
+  children?: RouteDefinition[];
+}
+
+type RouteMap = Map<string, { route: string; guards: string[] }>;
+
+function buildRouteMap(files: { filePath: string; content: string }[]): RouteMap {
+  const routeMap: RouteMap = new Map();
+  const allRoutes: RouteDefinition[] = [];
+
+  for (const file of files) {
+    const ext = file.filePath.substring(file.filePath.lastIndexOf("."));
+    if (![".ts", ".js", ".tsx", ".jsx", ".vue"].includes(ext)) continue;
+    if (file.filePath.includes("node_modules") || file.filePath.includes("dist/") || file.filePath.includes("build/")) continue;
+
+    const isRouterFile = file.filePath.toLowerCase().includes("router") ||
+      file.filePath.toLowerCase().includes("routes") ||
+      file.filePath.toLowerCase().includes("routing");
+    const hasRouterImport = file.content.includes("createRouter") ||
+      file.content.includes("vue-router") ||
+      file.content.includes("react-router") ||
+      file.content.includes("@angular/router") ||
+      file.content.includes("createBrowserRouter") ||
+      file.content.includes("RouterModule");
+
+    if (!isRouterFile && !hasRouterImport) continue;
+
+    try {
+      let content = file.content;
+      if (ext === ".vue") {
+        const parsed = vueSfc.parse(content);
+        if (parsed.descriptor.scriptSetup) {
+          content = parsed.descriptor.scriptSetup.content;
+        } else if (parsed.descriptor.script) {
+          content = parsed.descriptor.script.content;
+        } else {
+          continue;
+        }
+      }
+      const sourceFile = parseTypeScript(content, file.filePath);
+      const routes = extractRoutesFromAST(sourceFile, file.filePath);
+      allRoutes.push(...routes);
+    } catch (err) {
+      // skip unparseable files
+    }
+  }
+
+  const flatten = (routes: RouteDefinition[], parentPath: string = "", parentGuards: string[] = []) => {
+    for (const route of routes) {
+      const fullPath = route.path.startsWith("/")
+        ? route.path
+        : parentPath.endsWith("/")
+          ? parentPath + route.path
+          : parentPath + "/" + route.path;
+      const mergedGuards = [...parentGuards, ...route.guards];
+      const componentName = route.component;
+
+      if (componentName) {
+        const normalizedName = componentName.replace(/\.(vue|tsx|jsx|ts|js)$/, "");
+        const baseName = normalizedName.split("/").pop() || normalizedName;
+        routeMap.set(baseName.toLowerCase(), { route: fullPath, guards: mergedGuards });
+        routeMap.set(normalizedName.toLowerCase(), { route: fullPath, guards: mergedGuards });
+      }
+
+      if (route.children && route.children.length > 0) {
+        flatten(route.children, fullPath, mergedGuards);
+      }
+    }
+  };
+
+  flatten(allRoutes);
+
+  if (allRoutes.length > 0) {
+    console.log(`[frontend-analyzer] Router extraction: ${allRoutes.length} routes found, ${routeMap.size} component mappings`);
+  }
+
+  return routeMap;
+}
+
+function extractRoutesFromAST(sourceFile: ts.SourceFile, filePath: string): RouteDefinition[] {
+  const routes: RouteDefinition[] = [];
+
+  const visit = (node: ts.Node) => {
+    if (ts.isArrayLiteralExpression(node)) {
+      const parent = node.parent;
+      if (parent) {
+        let isRoutesArray = false;
+
+        if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+          const name = parent.name.text.toLowerCase();
+          if (name.includes("route")) isRoutesArray = true;
+        }
+
+        if (ts.isPropertyAssignment(parent) && ts.isIdentifier(parent.name)) {
+          const name = parent.name.text;
+          if (name === "routes" || name === "children") isRoutesArray = true;
+        }
+
+        if (ts.isCallExpression(parent)) {
+          const callText = parent.expression.getText(sourceFile);
+          if (callText.includes("createRouter") || callText.includes("createBrowserRouter") ||
+              callText.includes("RouterModule.forRoot") || callText.includes("RouterModule.forChild")) {
+            isRoutesArray = true;
+          }
+        }
+
+        if (isRoutesArray) {
+          for (const element of node.elements) {
+            if (ts.isObjectLiteralExpression(element)) {
+              const route = parseRouteObject(element, sourceFile);
+              if (route) routes.push(route);
+            }
+          }
+        }
+      }
+    }
+
+    if (ts.isCallExpression(node)) {
+      const callText = node.expression.getText(sourceFile);
+      if (callText.includes("createBrowserRouter") || callText.includes("createHashRouter") || callText.includes("createMemoryRouter")) {
+        for (const arg of node.arguments) {
+          if (ts.isArrayLiteralExpression(arg)) {
+            for (const element of arg.elements) {
+              if (ts.isObjectLiteralExpression(element)) {
+                const route = parseRouteObject(element, sourceFile);
+                if (route) routes.push(route);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const tagName = ts.isJsxElement(node) ? node.openingElement.tagName.getText(sourceFile) : node.tagName.getText(sourceFile);
+      if (tagName === "Route") {
+        const attrs = ts.isJsxElement(node) ? node.openingElement.attributes : node.attributes;
+        let path = "";
+        let component = "";
+
+        for (const attr of attrs.properties) {
+          if (ts.isJsxAttribute(attr) && attr.name) {
+            const attrName = attr.name.getText(sourceFile);
+            if (attrName === "path" && attr.initializer) {
+              if (ts.isStringLiteral(attr.initializer)) {
+                path = attr.initializer.text;
+              } else if (ts.isJsxExpression(attr.initializer) && attr.initializer.expression && ts.isStringLiteral(attr.initializer.expression)) {
+                path = attr.initializer.expression.text;
+              }
+            }
+            if ((attrName === "element" || attrName === "component") && attr.initializer) {
+              if (ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
+                component = attr.initializer.expression.getText(sourceFile).replace(/<|\/>/g, "").trim();
+              }
+            }
+          }
+        }
+
+        if (path) {
+          routes.push({ path, component, guards: [], children: [] });
+        }
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return routes;
+}
+
+function parseRouteObject(node: ts.ObjectLiteralExpression, sourceFile: ts.SourceFile): RouteDefinition | null {
+  let path = "";
+  let component = "";
+  const guards: string[] = [];
+  const children: RouteDefinition[] = [];
+
+  for (const prop of node.properties) {
+    if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name)) continue;
+    const name = prop.name.text;
+
+    if (name === "path") {
+      if (ts.isStringLiteral(prop.initializer) || ts.isNoSubstitutionTemplateLiteral(prop.initializer)) {
+        path = prop.initializer.text;
+      }
+    }
+
+    if (name === "component" || name === "element") {
+      component = extractComponentName(prop.initializer, sourceFile);
+    }
+
+    if (name === "name") {
+      if (ts.isStringLiteral(prop.initializer)) {
+        if (!component) component = prop.initializer.text;
+      }
+    }
+
+    if (name === "beforeEnter" || name === "canActivate" || name === "canActivateChild" || name === "canDeactivate" || name === "canLoad") {
+      guards.push(...extractGuardNames(prop.initializer, sourceFile));
+    }
+
+    if (name === "meta" && ts.isObjectLiteralExpression(prop.initializer)) {
+      for (const metaProp of prop.initializer.properties) {
+        if (ts.isPropertyAssignment(metaProp) && ts.isIdentifier(metaProp.name)) {
+          const metaName = metaProp.name.text.toLowerCase();
+          if (metaName === "requiresauth" || metaName === "requireauth" || metaName === "auth" || metaName === "authenticated") {
+            if (metaProp.initializer.kind === ts.SyntaxKind.TrueKeyword) {
+              guards.push("requiresAuth");
+            }
+          }
+          if (metaName === "roles" || metaName === "requiredroles" || metaName === "permissions") {
+            if (ts.isArrayLiteralExpression(metaProp.initializer)) {
+              for (const el of metaProp.initializer.elements) {
+                if (ts.isStringLiteral(el)) {
+                  guards.push(`role:${el.text}`);
+                }
+              }
+            }
+          }
+          if (metaName === "guard" || metaName === "guards") {
+            guards.push(...extractGuardNames(metaProp.initializer, sourceFile));
+          }
+        }
+      }
+    }
+
+    if (name === "children" && ts.isArrayLiteralExpression(prop.initializer)) {
+      for (const child of prop.initializer.elements) {
+        if (ts.isObjectLiteralExpression(child)) {
+          const childRoute = parseRouteObject(child, sourceFile);
+          if (childRoute) children.push(childRoute);
+        }
+      }
+    }
+  }
+
+  if (!path && !component) return null;
+  return { path, component, guards, children };
+}
+
+function extractComponentName(node: ts.Node, sourceFile: ts.SourceFile): string {
+  if (ts.isIdentifier(node)) return node.text;
+  if (ts.isStringLiteral(node)) return node.text;
+
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+    const body = node.body;
+    if (ts.isCallExpression(body)) {
+      const callText = body.expression.getText(sourceFile);
+      if (callText === "import") {
+        const firstArg = body.arguments[0];
+        if (firstArg && ts.isStringLiteral(firstArg)) {
+          const importPath = firstArg.text;
+          return importPath.split("/").pop()?.replace(/\.(vue|tsx|jsx|ts|js)$/, "") || importPath;
+        }
+      }
+    }
+    if (ts.isBlock(body)) {
+      const text = body.getText(sourceFile);
+      const importMatch = text.match(/import\(\s*['"]([^'"]+)['"]\s*\)/);
+      if (importMatch) {
+        return importMatch[1].split("/").pop()?.replace(/\.(vue|tsx|jsx|ts|js)$/, "") || importMatch[1];
+      }
+    }
+  }
+
+  if (ts.isCallExpression(node)) {
+    const callText = node.expression.getText(sourceFile);
+    if (callText === "lazy" || callText === "React.lazy" || callText === "defineAsyncComponent") {
+      const firstArg = node.arguments[0];
+      if (firstArg) return extractComponentName(firstArg, sourceFile);
+    }
+    if (callText === "import") {
+      const firstArg = node.arguments[0];
+      if (firstArg && ts.isStringLiteral(firstArg)) {
+        return firstArg.text.split("/").pop()?.replace(/\.(vue|tsx|jsx|ts|js)$/, "") || firstArg.text;
+      }
+    }
+  }
+
+  return node.getText(sourceFile).replace(/[()]/g, "").trim();
+}
+
+function extractGuardNames(node: ts.Node, sourceFile: ts.SourceFile): string[] {
+  const guards: string[] = [];
+
+  if (ts.isIdentifier(node)) {
+    guards.push(node.text);
+  } else if (ts.isArrayLiteralExpression(node)) {
+    for (const el of node.elements) {
+      if (ts.isIdentifier(el)) {
+        guards.push(el.text);
+      } else if (ts.isNewExpression(el) && ts.isIdentifier(el.expression)) {
+        guards.push(el.expression.text);
+      } else if (ts.isCallExpression(el)) {
+        guards.push(el.expression.getText(sourceFile));
+      }
+    }
+  } else if (ts.isCallExpression(node)) {
+    guards.push(node.expression.getText(sourceFile));
+  }
+
+  return guards;
+}
+
 export function analyzeFrontend(
   files: { filePath: string; content: string }[],
   graph: ApplicationGraph
@@ -4217,6 +4527,7 @@ export function analyzeFrontend(
   const eventGraph = buildComponentEventGraph(files, allFilePaths);
   const stateFlowGraph = buildStateFlowGraph(files, serviceMap, globalCallGraph);
   const archLayerGraph = buildArchitecturalLayerGraph(files, serviceMap, allFilePaths);
+  const routeMap = buildRouteMap(files);
 
   for (const file of files) {
     if (file.filePath.endsWith(".html")) {
@@ -4307,6 +4618,35 @@ export function analyzeFrontend(
     }
     if (baseResolved > 0) {
       console.log(`[frontend-analyzer] BaseURL resolution: ${baseResolved} URLs resolved, ${newMatches} new controller matches`);
+    }
+  }
+
+  if (routeMap.size > 0) {
+    let routeEnriched = 0;
+    for (const interaction of interactions) {
+      const componentName = interaction.component.toLowerCase();
+      const routeInfo = routeMap.get(componentName);
+      if (routeInfo) {
+        interaction.frontendRoute = routeInfo.route;
+        interaction.routeGuards = routeInfo.guards;
+        routeEnriched++;
+      } else {
+        const fileName = interaction.sourceFile
+          .split("/").pop()
+          ?.replace(/\.(vue|tsx|jsx|ts|js)$/, "")
+          ?.toLowerCase();
+        if (fileName) {
+          const routeInfoByFile = routeMap.get(fileName);
+          if (routeInfoByFile) {
+            interaction.frontendRoute = routeInfoByFile.route;
+            interaction.routeGuards = routeInfoByFile.guards;
+            routeEnriched++;
+          }
+        }
+      }
+    }
+    if (routeEnriched > 0) {
+      console.log(`[frontend-analyzer] Route enrichment: ${routeEnriched}/${interactions.length} interactions mapped to routes`);
     }
   }
 

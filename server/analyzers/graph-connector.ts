@@ -3,22 +3,43 @@ import type { ApplicationGraph, EndpointImpact, GraphNode } from "./application-
 import type { InsertCatalogEntry } from "@shared/schema";
 import type { ArchitectureType } from "./architecture-detector";
 
-function walkCallChain(
-  graph: ApplicationGraph,
-  startNodeId: string
-): {
+interface EntityFieldMeta {
+  entity: string;
+  fields: { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[];
+}
+
+interface SecurityAnnotationMeta {
+  type: string;
+  expression: string;
+  roles: string[];
+}
+
+interface CallChainResult {
   serviceMethods: string[];
   repositoryMethods: string[];
   entitiesTouched: string[];
   fullCallChain: string[];
   persistenceOperations: string[];
-} {
+  requiredRoles: string[];
+  securityAnnotations: SecurityAnnotationMeta[];
+  entityFieldsMetadata: EntityFieldMeta[];
+  sensitiveFieldsAccessed: string[];
+}
+
+function walkCallChain(
+  graph: ApplicationGraph,
+  startNodeId: string
+): CallChainResult {
   const visited = new Set<string>();
   const entityNames = new Set<string>();
   const persistenceOps = new Set<string>();
   const serviceMethodNames: string[] = [];
   const repoMethodNames: string[] = [];
   const callChain: string[] = [];
+  const roles = new Set<string>();
+  const secAnnotations: SecurityAnnotationMeta[] = [];
+  const entityFieldsMeta: EntityFieldMeta[] = [];
+  const sensitiveFields = new Set<string>();
 
   const walk = (nodeId: string, depth: number) => {
     if (depth > 15 || visited.has(nodeId)) return;
@@ -31,6 +52,16 @@ function walkCallChain(
       callChain.push(`${n.className}.${n.methodName}`);
     }
 
+    const meta = n.metadata as Record<string, unknown>;
+    if (meta.requiredRoles && Array.isArray(meta.requiredRoles)) {
+      for (const r of meta.requiredRoles as string[]) roles.add(r);
+    }
+    if (meta.securityAnnotations && Array.isArray(meta.securityAnnotations)) {
+      for (const sa of meta.securityAnnotations as SecurityAnnotationMeta[]) {
+        secAnnotations.push(sa);
+      }
+    }
+
     if (n.type === "SERVICE" && n.methodName) {
       serviceMethodNames.push(`${n.className}.${n.methodName}`);
     }
@@ -39,6 +70,18 @@ function walkCallChain(
     }
     if (n.type === "ENTITY") {
       entityNames.add(n.className);
+      if (meta.enrichedFields && Array.isArray(meta.enrichedFields)) {
+        const fields = meta.enrichedFields as { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[];
+        entityFieldsMeta.push({ entity: n.className, fields });
+        for (const f of fields) {
+          if (f.isSensitive) sensitiveFields.add(`${n.className}.${f.name}`);
+        }
+      }
+      if (meta.sensitiveFields && Array.isArray(meta.sensitiveFields)) {
+        for (const sf of meta.sensitiveFields as string[]) {
+          sensitiveFields.add(`${n.className}.${sf}`);
+        }
+      }
       return;
     }
 
@@ -50,6 +93,14 @@ function walkCallChain(
           const opType = edge.relationType === "WRITES_ENTITY" ? "write" : "read";
           const specificOp = (edge.metadata.operation as string) || opType;
           persistenceOps.add(specificOp);
+          const targetMeta = targetNode.metadata as Record<string, unknown>;
+          if (targetMeta.enrichedFields && Array.isArray(targetMeta.enrichedFields)) {
+            const fields = targetMeta.enrichedFields as { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[];
+            entityFieldsMeta.push({ entity: targetNode.className, fields });
+            for (const f of fields) {
+              if (f.isSensitive) sensitiveFields.add(`${targetNode.className}.${f.name}`);
+            }
+          }
         }
       } else if (edge.relationType === "CALLS") {
         walk(edge.toNode, depth + 1);
@@ -65,6 +116,10 @@ function walkCallChain(
     entitiesTouched: Array.from(entityNames),
     fullCallChain: callChain,
     persistenceOperations: Array.from(persistenceOps),
+    requiredRoles: Array.from(roles),
+    securityAnnotations: secAnnotations,
+    entityFieldsMetadata: entityFieldsMeta,
+    sensitiveFieldsAccessed: Array.from(sensitiveFields),
   };
 }
 
@@ -154,6 +209,7 @@ function findNodeByClassAndMethod(
 
 export function endpointImpactsToCatalogEntries(
   impacts: EndpointImpact[],
+  graph: ApplicationGraph,
   analysisRunId: number,
   projectId: number
 ): InsertCatalogEntry[] {
@@ -171,6 +227,20 @@ export function endpointImpactsToCatalogEntries(
       impact.httpMethod,
       impact.persistenceOperations
     );
+
+    const controllerNode = impact.involvedNodes.find(n => n.type === "CONTROLLER");
+    let requiredRoles: string[] = [];
+    let securityAnns: SecurityAnnotationMeta[] = [];
+    let entityFieldsMeta: EntityFieldMeta[] = [];
+    let sensitiveFieldsAccessed: string[] = [];
+
+    if (controllerNode) {
+      const chain = walkCallChain(graph, controllerNode.id);
+      requiredRoles = chain.requiredRoles;
+      securityAnns = chain.securityAnnotations;
+      entityFieldsMeta = chain.entityFieldsMetadata;
+      sensitiveFieldsAccessed = chain.sensitiveFieldsAccessed;
+    }
 
     return {
       analysisRunId,
@@ -197,6 +267,12 @@ export function endpointImpactsToCatalogEntries(
       architectureType: "REST_CONTROLLER",
       interactionCategory: "HTTP",
       confidence: 1.0,
+      requiredRoles,
+      securityAnnotations: securityAnns,
+      entityFieldsMetadata: entityFieldsMeta,
+      sensitiveFieldsAccessed,
+      frontendRoute: null,
+      routeGuards: [],
     };
   });
 }
@@ -223,6 +299,11 @@ export function interactionsToCatalogEntries(
 
     const controllerStep = interaction.resolutionPath?.find(s => s.tier === "controller");
 
+    let requiredRoles: string[] = [];
+    let securityAnns: SecurityAnnotationMeta[] = [];
+    let entityFieldsMeta: EntityFieldMeta[] = [];
+    let sensitiveFieldsAccessed: string[] = [];
+
     if (controllerStep) {
       const node = findNodeByClassAndMethod(graph, controllerStep.file, controllerStep.function);
 
@@ -236,6 +317,10 @@ export function interactionsToCatalogEntries(
         entitiesTouched = chain.entitiesTouched;
         fullCallChain = chain.fullCallChain;
         persistenceOperations = chain.persistenceOperations;
+        requiredRoles = chain.requiredRoles;
+        securityAnns = chain.securityAnnotations;
+        entityFieldsMeta = chain.entityFieldsMetadata;
+        sensitiveFieldsAccessed = chain.sensitiveFieldsAccessed;
 
         technicalOperation = inferOperationType(
           serviceMethods,
@@ -284,6 +369,12 @@ export function interactionsToCatalogEntries(
       architectureType: architectureType,
       interactionCategory: interaction.interactionCategory || null,
       confidence: computeStructuralConfidence(interaction.resolutionPath, controllerClass, repositoryMethods),
+      requiredRoles,
+      securityAnnotations: securityAnns,
+      entityFieldsMetadata: entityFieldsMeta,
+      sensitiveFieldsAccessed,
+      frontendRoute: interaction.frontendRoute || null,
+      routeGuards: interaction.routeGuards || [],
     };
   });
 

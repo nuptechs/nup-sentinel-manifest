@@ -45,6 +45,9 @@ public class JavaASTAnalyzer {
         "RequestMapping", "GetMapping", "PostMapping", "PutMapping",
         "DeleteMapping", "PatchMapping"
     );
+    private static final Set<String> SECURITY_ANNOTATIONS = Set.of(
+        "PreAuthorize", "Secured", "RolesAllowed", "DenyAll", "PermitAll"
+    );
     private static final Set<String> REPO_INTERFACES = Set.of(
         "JpaRepository", "CrudRepository", "PagingAndSortingRepository",
         "MongoRepository", "ReactiveCrudRepository", "Repository"
@@ -396,6 +399,12 @@ public class JavaASTAnalyzer {
 
             extractMethods(cls, info);
 
+            for (AnnotationExpr ann : cls.getAnnotations()) {
+                if (SECURITY_ANNOTATIONS.contains(ann.getNameAsString())) {
+                    info.securityAnnotations.add(extractSecurityAnnotation(ann));
+                }
+            }
+
             boolean hasClassAnnotation = annotations.stream().anyMatch(CONTROLLER_ANNOTATIONS::contains);
             boolean hasHttpMethods = info.methods.stream().anyMatch(m -> m.httpMethod != null);
             info.isController = hasClassAnnotation || hasHttpMethods;
@@ -440,6 +449,17 @@ public class JavaASTAnalyzer {
         return null;
     }
 
+    private static final Set<String> SENSITIVE_FIELD_NAMES = Set.of(
+        "password", "passwd", "secret", "token", "apiKey", "apiSecret",
+        "creditCard", "cardNumber", "cvv", "ssn", "socialSecurity",
+        "cpf", "rg", "salary", "income", "bankAccount"
+    );
+    private static final Set<String> VALIDATION_ANNOTATIONS = Set.of(
+        "NotNull", "NotBlank", "NotEmpty", "Size", "Min", "Max",
+        "Pattern", "Email", "Past", "Future", "Positive", "Negative",
+        "DecimalMin", "DecimalMax", "Digits", "Valid", "UniqueElements"
+    );
+
     private void extractEntityFields(ClassOrInterfaceDeclaration cls, ClassInfo info) {
         for (FieldDeclaration field : cls.getFields()) {
             for (VariableDeclarator var : field.getVariables()) {
@@ -448,9 +468,92 @@ public class JavaASTAnalyzer {
                 ef.type = var.getTypeAsString();
                 ef.isId = field.getAnnotations().stream()
                     .anyMatch(a -> a.getNameAsString().equals("Id") || a.getNameAsString().equals("EmbeddedId"));
+
+                for (AnnotationExpr ann : field.getAnnotations()) {
+                    if (VALIDATION_ANNOTATIONS.contains(ann.getNameAsString())) {
+                        ef.validationAnnotations.add(ann.toString());
+                    }
+                }
+
+                String lowerName = ef.name.toLowerCase();
+                ef.isSensitive = SENSITIVE_FIELD_NAMES.stream()
+                    .anyMatch(s -> lowerName.contains(s.toLowerCase()))
+                    || field.getAnnotations().stream()
+                        .anyMatch(a -> a.getNameAsString().equals("JsonIgnore")
+                            || a.getNameAsString().equals("JsonProperty") && a.toString().contains("access = Access.WRITE_ONLY"));
+
                 info.entityFields.add(ef);
             }
         }
+    }
+
+    private SecurityAnnotation extractSecurityAnnotation(AnnotationExpr ann) {
+        String type = ann.getNameAsString();
+        String expression = "";
+        List<String> roles = new ArrayList<>();
+
+        if (type.equals("DenyAll")) {
+            return new SecurityAnnotation(type, "denyAll", List.of("NONE"));
+        }
+        if (type.equals("PermitAll")) {
+            return new SecurityAnnotation(type, "permitAll", List.of("*"));
+        }
+
+        if (ann instanceof SingleMemberAnnotationExpr) {
+            expression = ((SingleMemberAnnotationExpr) ann).getMemberValue().toString()
+                .replace("\"", "");
+            roles = extractRolesFromExpression(type, expression);
+        } else if (ann instanceof NormalAnnotationExpr) {
+            for (MemberValuePair pair : ((NormalAnnotationExpr) ann).getPairs()) {
+                if (pair.getNameAsString().equals("value")) {
+                    expression = pair.getValue().toString().replace("\"", "");
+                    roles = extractRolesFromExpression(type, expression);
+                    break;
+                }
+            }
+        }
+
+        return new SecurityAnnotation(type, expression, roles);
+    }
+
+    private List<String> extractRolesFromExpression(String annotationType, String expression) {
+        List<String> roles = new ArrayList<>();
+
+        if (annotationType.equals("Secured") || annotationType.equals("RolesAllowed")) {
+            String cleaned = expression.replace("{", "").replace("}", "").replace("\"", "").trim();
+            for (String role : cleaned.split(",")) {
+                String r = role.trim();
+                if (!r.isEmpty()) roles.add(r);
+            }
+            return roles;
+        }
+
+        if (annotationType.equals("PreAuthorize")) {
+            java.util.regex.Matcher m;
+            m = java.util.regex.Pattern.compile("hasRole\\(['\"]?(ROLE_)?([^'\"\\)]+)['\"]?\\)").matcher(expression);
+            while (m.find()) roles.add("ROLE_" + m.group(2));
+
+            m = java.util.regex.Pattern.compile("hasAuthority\\(['\"]?([^'\"\\)]+)['\"]?\\)").matcher(expression);
+            while (m.find()) roles.add(m.group(1));
+
+            m = java.util.regex.Pattern.compile("hasAnyRole\\(['\"]?([^\\)]+)['\"]?\\)").matcher(expression);
+            if (m.find()) {
+                for (String role : m.group(1).split("[,'\"]")) {
+                    String r = role.trim();
+                    if (!r.isEmpty()) roles.add(r.startsWith("ROLE_") ? r : "ROLE_" + r);
+                }
+            }
+
+            m = java.util.regex.Pattern.compile("hasAnyAuthority\\(['\"]?([^\\)]+)['\"]?\\)").matcher(expression);
+            if (m.find()) {
+                for (String role : m.group(1).split("[,'\"]")) {
+                    String r = role.trim();
+                    if (!r.isEmpty()) roles.add(r);
+                }
+            }
+        }
+
+        return roles;
     }
 
     private void extractMethods(ClassOrInterfaceDeclaration cls, ClassInfo info) {
@@ -468,7 +571,9 @@ public class JavaASTAnalyzer {
                     mi.httpMethod = resolveHttpMethod(annName, ann);
                     String methodPath = extractMappingPath(ann);
                     mi.httpPath = combinePaths(info.basePath, methodPath);
-                    break;
+                }
+                if (SECURITY_ANNOTATIONS.contains(annName)) {
+                    mi.securityAnnotations.add(extractSecurityAnnotation(ann));
                 }
             }
 
@@ -628,6 +733,24 @@ public class JavaASTAnalyzer {
                 entityNode.metadata.put("fields", cls.entityFields.stream()
                     .map(f -> f.name + ":" + f.type)
                     .collect(Collectors.toList()));
+                List<Map<String, Object>> enrichedFields = new ArrayList<>();
+                List<String> sensitiveFields = new ArrayList<>();
+                for (EntityField ef : cls.entityFields) {
+                    Map<String, Object> fm = new HashMap<>();
+                    fm.put("name", ef.name);
+                    fm.put("type", ef.type);
+                    fm.put("isId", ef.isId);
+                    fm.put("isSensitive", ef.isSensitive);
+                    if (!ef.validationAnnotations.isEmpty()) {
+                        fm.put("validations", ef.validationAnnotations);
+                    }
+                    enrichedFields.add(fm);
+                    if (ef.isSensitive) sensitiveFields.add(ef.name);
+                }
+                entityNode.metadata.put("enrichedFields", enrichedFields);
+                if (!sensitiveFields.isEmpty()) {
+                    entityNode.metadata.put("sensitiveFields", sensitiveFields);
+                }
                 if (nodeIds.add(entityNode.id)) {
                     nodes.add(entityNode);
                 }
@@ -675,6 +798,23 @@ public class JavaASTAnalyzer {
                 }
                 meta.put("returnType", method.returnType);
                 meta.put("parameters", method.parameters);
+
+                List<SecurityAnnotation> allSecAnn = new ArrayList<>(cls.securityAnnotations);
+                allSecAnn.addAll(method.securityAnnotations);
+                if (!allSecAnn.isEmpty()) {
+                    List<Map<String, Object>> secList = new ArrayList<>();
+                    Set<String> allRoles = new LinkedHashSet<>();
+                    for (SecurityAnnotation sa : allSecAnn) {
+                        Map<String, Object> secMap = new HashMap<>();
+                        secMap.put("type", sa.type);
+                        secMap.put("expression", sa.expression);
+                        secMap.put("roles", sa.roles);
+                        secList.add(secMap);
+                        allRoles.addAll(sa.roles);
+                    }
+                    meta.put("securityAnnotations", secList);
+                    meta.put("requiredRoles", new ArrayList<>(allRoles));
+                }
 
                 GraphNodeDTO node = new GraphNodeDTO(
                     nodeType, cls.className, method.name,
@@ -849,6 +989,7 @@ public class JavaASTAnalyzer {
         String resolvedEntityClassName;
         List<MethodInfo> methods = new ArrayList<>();
         List<EntityField> entityFields = new ArrayList<>();
+        List<SecurityAnnotation> securityAnnotations = new ArrayList<>();
     }
 
     static class MethodInfo {
@@ -860,6 +1001,7 @@ public class JavaASTAnalyzer {
         String resolvedQualifiedSignature;
         List<MethodCallInfo> methodCalls = new ArrayList<>();
         boolean hasEntityMutations;
+        List<SecurityAnnotation> securityAnnotations = new ArrayList<>();
     }
 
     static class MethodCallInfo {
@@ -875,5 +1017,19 @@ public class JavaASTAnalyzer {
         String name;
         String type;
         boolean isId;
+        List<String> validationAnnotations = new ArrayList<>();
+        boolean isSensitive;
+    }
+
+    static class SecurityAnnotation {
+        String type;
+        String expression;
+        List<String> roles = new ArrayList<>();
+
+        SecurityAnnotation(String type, String expression, List<String> roles) {
+            this.type = type;
+            this.expression = expression;
+            this.roles = roles != null ? roles : new ArrayList<>();
+        }
     }
 }
