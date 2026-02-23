@@ -267,6 +267,20 @@ export async function registerRoutes(
 </body></html>`);
   });
 
+  app.get("/api/projects/:projectId/security-findings", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+
+      const runId = req.query.runId ? parseInt(req.query.runId as string) : undefined;
+      const findings = await storage.getSecurityFindings(projectId, runId);
+      res.json(findings);
+    } catch (error) {
+      console.error("Error fetching security findings:", error);
+      res.status(500).json({ message: "Failed to fetch security findings" });
+    }
+  });
+
   app.get("/api/stats", async (_req, res) => {
     try {
       const stats = await storage.getStats();

@@ -15,6 +15,7 @@ import InsightsPage from "@/pages/insights";
 import DiffViewerPage from "@/pages/diff-viewer";
 import GitIntegrationPage from "@/pages/git-integration";
 import SettingsPage from "@/pages/settings";
+import SecurityAuditPage from "@/pages/security-audit";
 
 function Router() {
   return (
@@ -25,6 +26,7 @@ function Router() {
       <Route path="/insights" component={InsightsPage} />
       <Route path="/diff" component={DiffViewerPage} />
       <Route path="/git" component={GitIntegrationPage} />
+      <Route path="/security" component={SecurityAuditPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route component={NotFound} />
     </Switch>

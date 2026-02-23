@@ -181,6 +181,29 @@ export const insertApiKeySchema = createInsertSchema(apiKeys).omit({
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type InsertApiKey = z.infer<typeof insertApiKeySchema>;
 
+export const securityFindings = pgTable("security_findings", {
+  id: serial("id").primaryKey(),
+  analysisRunId: integer("analysis_run_id").notNull().references(() => analysisRuns.id, { onDelete: "cascade" }),
+  projectId: integer("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  findingId: text("finding_id").notNull(),
+  findingType: text("finding_type").notNull(),
+  severity: text("severity").notNull(),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  evidence: jsonb("evidence"),
+  recommendation: text("recommendation").notNull(),
+  affectedEndpoints: jsonb("affected_endpoints"),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+
+export const insertSecurityFindingSchema = createInsertSchema(securityFindings).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type SecurityFindingRecord = typeof securityFindings.$inferSelect;
+export type InsertSecurityFinding = z.infer<typeof insertSecurityFindingSchema>;
+
 export const technicalOperations = [
   "READ",
   "WRITE",

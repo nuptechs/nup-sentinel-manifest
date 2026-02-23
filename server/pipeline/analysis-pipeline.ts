@@ -8,6 +8,7 @@ import { generateManifest } from "../generators/manifest-generator";
 import { computeFileHashes, detectChanges } from "./change-detector";
 import type { FileHash } from "./change-detector";
 import type { InsertCatalogEntry } from "@shared/schema";
+import { analyzeSecurityOmissions, type SecurityFinding, type SecurityCoverageMetrics } from "../security/omission-engine";
 
 export interface FileData {
   filePath: string;
@@ -50,6 +51,8 @@ export interface AnalysisResult {
   }[];
   resolutionErrors?: string[];
   cacheStatus?: string;
+  securityFindings?: SecurityFinding[];
+  securityMetrics?: SecurityCoverageMetrics;
 }
 
 interface GraphCache {
@@ -165,6 +168,27 @@ export class AnalysisPipeline {
       catalogEntryData = this.classify(catalogEntryData);
       const created = await this.persist(catalogEntryData);
 
+      this.progress("Security", "Running security omission analysis...");
+      const { findings: securityFindings, metrics: securityMetrics } = analyzeSecurityOmissions(created);
+      if (securityFindings.length > 0) {
+        const findingRecords = securityFindings.map(f => ({
+          analysisRunId: analysisRun.id,
+          projectId,
+          findingId: f.id,
+          findingType: f.type,
+          severity: f.severity,
+          title: f.title,
+          description: f.description,
+          evidence: f.evidence,
+          recommendation: f.recommendation,
+          affectedEndpoints: f.affectedEndpoints,
+        }));
+        await storage.createSecurityFindings(findingRecords);
+      }
+      const criticalCount = securityFindings.filter(f => f.severity === "critical").length;
+      const highCount = securityFindings.filter(f => f.severity === "high").length;
+      this.progress("Security", `Found ${securityFindings.length} findings (${criticalCount} critical, ${highCount} high). Coverage: ${securityMetrics.coveragePercent}%`);
+
       const graphSummary = appGraph.toJSON();
       await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph);
       await this.saveSnapshot(analysisRun.id, projectId, created);
@@ -180,7 +204,7 @@ export class AnalysisPipeline {
         analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length,
         appGraph, graphSummary, created.length, endpointImpacts, resolutionErrors
       );
-      return { ...result, cacheStatus };
+      return { ...result, cacheStatus, securityFindings, securityMetrics };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "Analysis failed";
       await storage.updateAnalysisRun(analysisRun.id, {

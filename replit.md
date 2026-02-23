@@ -23,6 +23,17 @@ A **Manifest Diff Engine** compares two analysis snapshots to produce structured
 
 A **Git Integration System** provides first-class support for GitHub and GitLab repositories through an abstraction layer, enabling connection, branch listing, pull request analysis, and triggering analysis on connected projects via webhooks. PR analysis involves dual-branch analysis and manifest diff generation for security reports.
 
+A **Security Omission Engine** (`server/security/omission-engine.ts`) detects security flaws by absence — what SHOULD be protected but ISN'T. It uses structural comparison and pattern reasoning over the catalog entries to produce actionable findings:
+- **Unprotected Outlier Detection**: Groups endpoints by HTTP method + entity domain. When ≥50% of a group has security annotations but some don't, flags the unprotected ones as outliers with peer comparison context.
+- **Privilege Escalation Detection**: Identifies write operations (POST/PUT/PATCH) to role/permission/admin entities or fields without security constraints or with insufficient role protection.
+- **Sensitive Data Exposure Detection**: Flags GET endpoints accessing highly sensitive fields (password, token, SSN) without protection or with non-admin roles.
+- **Inconsistent Protection Detection**: Per-controller analysis — flags mutating endpoints without annotations when the majority of the controller is protected.
+- **Missing Protection on Critical Endpoints**: Flags high-criticality (≥60) unprotected endpoints not caught by other detectors.
+- **Security Coverage Metrics**: Computes protection rates overall, by HTTP method, by controller, and role distribution.
+- Findings are persisted in the `security_findings` table per analysis run and returned in the analysis result.
+- API: `GET /api/projects/:projectId/security-findings` with optional `?runId=` filter.
+- A **Security Audit** page (`/security`) provides a visual dashboard: summary cards (total findings, critical/high count, coverage %), severity distribution bar, and expandable finding cards with full evidence (target entry, peer comparison tables, coverage metrics by HTTP method).
+
 A **Platform Integration System** enables external system access via API Key Authentication (with project-scoped access and last-used tracking), Headless Analysis Endpoints for single-call or ZIP uploads, comprehensive OpenAPI Documentation, and Webhook Integration for GitHub and GitLab to auto-trigger analysis on configured projects.
 
 A **System Explorer** page provides a visual map of the analyzed system, grouping catalog entries by screen, with clickable interaction blocks that display a detailed trace panel showing the full resolution path from Frontend Interaction to Entities Touched, including all relevant metadata.

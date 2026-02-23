@@ -7,6 +7,7 @@ import {
   catalogEntries,
   analysisSnapshots,
   apiKeys,
+  securityFindings,
   type Project,
   type InsertProject,
   type SourceFile,
@@ -19,6 +20,8 @@ import {
   type InsertAnalysisSnapshot,
   type ApiKey,
   type InsertApiKey,
+  type SecurityFindingRecord,
+  type InsertSecurityFinding,
   users,
   type User,
   type InsertUser,
@@ -59,6 +62,10 @@ export interface IStorage {
   getAnalysisSnapshot(analysisRunId: number): Promise<AnalysisSnapshot | undefined>;
   getAnalysisSnapshots(projectId: number): Promise<AnalysisSnapshot[]>;
   getLastTwoSnapshots(projectId: number): Promise<AnalysisSnapshot[]>;
+
+  createSecurityFindings(findings: InsertSecurityFinding[]): Promise<SecurityFindingRecord[]>;
+  getSecurityFindings(projectId: number, analysisRunId?: number): Promise<SecurityFindingRecord[]>;
+  deleteSecurityFindingsByRun(runId: number): Promise<void>;
 
   createApiKey(key: InsertApiKey): Promise<ApiKey>;
   getApiKeys(): Promise<ApiKey[]>;
@@ -258,6 +265,31 @@ export class DatabaseStorage implements IStorage {
 
   async updateApiKeyLastUsed(id: number): Promise<void> {
     await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, id));
+  }
+
+  async createSecurityFindings(findings: InsertSecurityFinding[]): Promise<SecurityFindingRecord[]> {
+    if (findings.length === 0) return [];
+    return db.insert(securityFindings).values(findings).returning();
+  }
+
+  async getSecurityFindings(projectId: number, analysisRunId?: number): Promise<SecurityFindingRecord[]> {
+    if (analysisRunId) {
+      return db.select().from(securityFindings)
+        .where(and(eq(securityFindings.projectId, projectId), eq(securityFindings.analysisRunId, analysisRunId)))
+        .orderBy(securityFindings.id);
+    }
+    const latestRun = await db.select().from(analysisRuns)
+      .where(and(eq(analysisRuns.projectId, projectId), eq(analysisRuns.status, "completed")))
+      .orderBy(desc(analysisRuns.id))
+      .limit(1);
+    if (latestRun.length === 0) return [];
+    return db.select().from(securityFindings)
+      .where(and(eq(securityFindings.projectId, projectId), eq(securityFindings.analysisRunId, latestRun[0].id)))
+      .orderBy(securityFindings.id);
+  }
+
+  async deleteSecurityFindingsByRun(runId: number): Promise<void> {
+    await db.delete(securityFindings).where(eq(securityFindings.analysisRunId, runId));
   }
 }
 

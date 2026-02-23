@@ -294,6 +294,18 @@ export function getOpenAPISpec() {
           responses: { 200: { description: "API key revoked" } },
         },
       },
+      "/api/projects/{projectId}/security-findings": {
+        get: {
+          tags: ["Security"],
+          summary: "Get security findings for a project",
+          description: "Returns security omission findings from the latest analysis run (or a specific run). Detects unprotected outliers, privilege escalation risks, inconsistent protection, and coverage gaps.",
+          parameters: [
+            { name: "projectId", in: "path", required: true, schema: { type: "integer" } },
+            { name: "runId", in: "query", schema: { type: "integer" }, description: "Specific analysis run ID. Defaults to latest completed run." },
+          ],
+          responses: { 200: { description: "Array of security findings with evidence and recommendations" } },
+        },
+      },
       "/api/projects/{id}/webhook/configure": {
         post: {
           tags: ["Webhooks"],
@@ -361,6 +373,7 @@ export function getOpenAPISpec() {
       { name: "Manifests", description: "Manifest generation in multiple formats" },
       { name: "Diff", description: "Manifest diff and snapshot comparison" },
       { name: "Git Integration", description: "GitHub and GitLab repository integration" },
+      { name: "Security", description: "Security omission detection and findings" },
       { name: "API Keys", description: "API key management" },
       { name: "Webhooks", description: "GitHub and GitLab webhook receivers for automated PR analysis" },
       { name: "System", description: "System-level endpoints" },
