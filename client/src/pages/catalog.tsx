@@ -34,6 +34,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Search,
   Filter,
   Download,
@@ -52,6 +60,11 @@ import {
   Zap,
   Copy,
   BarChart3,
+  FileJson,
+  FileText,
+  KeyRound,
+  ChevronDown,
+  Package,
 } from "lucide-react";
 import type { CatalogEntry, Project } from "@shared/schema";
 
@@ -436,22 +449,42 @@ export default function CatalogPage() {
     },
   });
 
-  const exportMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("GET", `/api/catalog-entries/${selectedProjectId}/export`);
-      return res.json();
+  const [exportingFormat, setExportingFormat] = useState<string | null>(null);
+
+  const manifestMutation = useMutation({
+    mutationFn: async (format: string) => {
+      setExportingFormat(format);
+      const res = await apiRequest("GET", `/api/manifest/${selectedProjectId}?format=${format}`);
+      if (format === "agents-md") {
+        return { text: await res.text(), format };
+      }
+      return { data: await res.json(), format };
     },
-    onSuccess: (data) => {
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    onSuccess: (result) => {
+      const { format } = result;
+      const fileMap: Record<string, { name: string; type: string }> = {
+        manifest: { name: "MANIFEST.json", type: "application/json" },
+        "agents-md": { name: "AGENTS.md", type: "text/markdown" },
+        openapi: { name: "openapi-spec.json", type: "application/json" },
+        "policy-matrix": { name: "policy-matrix.json", type: "application/json" },
+      };
+      const fileInfo = fileMap[format] || { name: `export-${format}.json`, type: "application/json" };
+      const content = format === "agents-md"
+        ? (result as any).text
+        : JSON.stringify((result as any).data, null, 2);
+      const blob = new Blob([content], { type: fileInfo.type });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `catalog-project-${selectedProjectId}.json`;
+      a.download = fileInfo.name;
       a.click();
       URL.revokeObjectURL(url);
+      toast({ title: "Export successful", description: `${fileInfo.name} downloaded.` });
+      setExportingFormat(null);
     },
     onError: (error: Error) => {
       toast({ title: "Export failed", description: error.message, variant: "destructive" });
+      setExportingFormat(null);
     },
   });
 
@@ -548,15 +581,72 @@ export default function CatalogPage() {
               </>
             )}
           </Button>
-          <Button
-            variant="outline"
-            onClick={() => exportMutation.mutate()}
-            disabled={!selectedProjectId || !entries?.length}
-            data-testid="button-export"
-          >
-            <Download className="h-3.5 w-3.5 mr-1.5" />
-            Export JSON
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                disabled={!selectedProjectId || !entries?.length || manifestMutation.isPending}
+                data-testid="button-export"
+              >
+                {manifestMutation.isPending ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                    Exporting...
+                  </>
+                ) : (
+                  <>
+                    <Download className="h-3.5 w-3.5 mr-1.5" />
+                    Export
+                    <ChevronDown className="h-3 w-3 ml-1" />
+                  </>
+                )}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuLabel>Manifest Outputs</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => manifestMutation.mutate("manifest")}
+                data-testid="export-manifest"
+              >
+                <Package className="h-4 w-4 mr-2" />
+                <div>
+                  <div className="font-medium">MANIFEST.json</div>
+                  <div className="text-xs text-muted-foreground">Structured & versionable catalog</div>
+                </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => manifestMutation.mutate("agents-md")}
+                data-testid="export-agents-md"
+              >
+                <FileText className="h-4 w-4 mr-2" />
+                <div>
+                  <div className="font-medium">AGENTS.md</div>
+                  <div className="text-xs text-muted-foreground">AI agent instructions format</div>
+                </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => manifestMutation.mutate("openapi")}
+                data-testid="export-openapi"
+              >
+                <FileJson className="h-4 w-4 mr-2" />
+                <div>
+                  <div className="font-medium">OpenAPI Spec</div>
+                  <div className="text-xs text-muted-foreground">API specification from analysis</div>
+                </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => manifestMutation.mutate("policy-matrix")}
+                data-testid="export-policy-matrix"
+              >
+                <KeyRound className="h-4 w-4 mr-2" />
+                <div>
+                  <div className="font-medium">Policy Matrix</div>
+                  <div className="text-xs text-muted-foreground">Keycloak / Okta / AWS IAM policies</div>
+                </div>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 

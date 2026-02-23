@@ -13,6 +13,10 @@ import { classifyEntries } from "./analyzers/semantic-engine";
 import { classifyEntriesDeterministic } from "./analyzers/deterministic-classifier";
 import { detectArchitecture } from "./analyzers/architecture-detector";
 import { extractAndScanZip, getFileType } from "./analyzers/repository-scanner";
+import { generateManifest } from "./generators/manifest-generator";
+import { generateAgentsMd } from "./generators/agents-md-generator";
+import { generateOpenAPISpec } from "./generators/openapi-generator";
+import { generatePolicyMatrix } from "./generators/policy-matrix-generator";
 import { z } from "zod";
 
 const upload = multer({
@@ -1016,6 +1020,64 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error exporting catalog:", error);
       res.status(500).json({ message: "Failed to export catalog" });
+    }
+  });
+
+  app.get("/api/manifest/:projectId", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const entries = await storage.getCatalogEntries(projectId);
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      if (entries.length === 0) return res.status(404).json({ message: "No catalog entries found. Run analysis first." });
+
+      const format = (req.query.format as string) || "manifest";
+
+      const manifest = generateManifest(project, entries);
+
+      switch (format) {
+        case "manifest":
+          res.setHeader("Content-Type", "application/json");
+          res.setHeader("Content-Disposition", `attachment; filename="MANIFEST.json"`);
+          return res.json(manifest);
+
+        case "agents-md":
+          const agentsMd = generateAgentsMd(manifest);
+          res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+          res.setHeader("Content-Disposition", `attachment; filename="AGENTS.md"`);
+          return res.send(agentsMd);
+
+        case "openapi":
+          const openapi = generateOpenAPISpec(manifest);
+          res.setHeader("Content-Type", "application/json");
+          res.setHeader("Content-Disposition", `attachment; filename="openapi-spec.json"`);
+          return res.json(openapi);
+
+        case "policy-matrix":
+          const policyMatrix = generatePolicyMatrix(manifest);
+          res.setHeader("Content-Type", "application/json");
+          res.setHeader("Content-Disposition", `attachment; filename="policy-matrix.json"`);
+          return res.json(policyMatrix);
+
+        case "all": {
+          const allAgentsMd = generateAgentsMd(manifest);
+          const allOpenapi = generateOpenAPISpec(manifest);
+          const allPolicyMatrix = generatePolicyMatrix(manifest);
+          return res.json({
+            manifest,
+            agentsMd: allAgentsMd,
+            openapi: allOpenapi,
+            policyMatrix: allPolicyMatrix,
+          });
+        }
+
+        default:
+          return res.status(400).json({ message: `Unknown format: ${format}. Use: manifest, agents-md, openapi, policy-matrix, all` });
+      }
+    } catch (error) {
+      console.error("Error generating manifest:", error);
+      res.status(500).json({ message: "Failed to generate manifest" });
     }
   });
 
