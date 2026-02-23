@@ -1,4 +1,4 @@
-import { LayoutDashboard, FolderUp, FileSearch, Map, GitCompare } from "lucide-react";
+import { LayoutDashboard, FolderUp, FileSearch, Map, GitCompare, GitBranch } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import {
   Sidebar,
@@ -19,6 +19,7 @@ const navItems = [
   { title: "Catalog", url: "/catalog", icon: FileSearch },
   { title: "System Explorer", url: "/insights", icon: Map },
   { title: "Diff Viewer", url: "/diff", icon: GitCompare },
+  { title: "Git Integration", url: "/git", icon: GitBranch },
 ];
 
 export function AppSidebar() {
