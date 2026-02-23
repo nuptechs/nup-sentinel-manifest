@@ -6,17 +6,13 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { storage } from "./storage";
-import { analyzeFrontend } from "./analyzers/frontend-analyzer";
-import { buildApplicationGraph, analyzeGraphEndpoints } from "./analyzers/backend-java-client";
-import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries } from "./analyzers/graph-connector";
 import { classifyEntries } from "./analyzers/semantic-engine";
-import { classifyEntriesDeterministic } from "./analyzers/deterministic-classifier";
-import { detectArchitecture } from "./analyzers/architecture-detector";
 import { extractAndScanZip, getFileType } from "./analyzers/repository-scanner";
 import { generateManifest } from "./generators/manifest-generator";
 import { generateAgentsMd } from "./generators/agents-md-generator";
 import { generateOpenAPISpec } from "./generators/openapi-generator";
 import { generatePolicyMatrix } from "./generators/policy-matrix-generator";
+import { AnalysisPipeline } from "./pipeline/analysis-pipeline";
 import { z } from "zod";
 
 const upload = multer({
@@ -181,107 +177,9 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Project not found" });
       }
 
-      const analysisRun = await storage.createAnalysisRun({ projectId });
-
-      try {
-        await storage.updateProjectStatus(projectId, "analyzing");
-        await storage.updateAnalysisRun(analysisRun.id, { status: "analyzing" });
-        await storage.deleteCatalogEntriesByProject(projectId);
-
-        const sourceFiles = await storage.getSourceFiles(projectId);
-        const fileData = sourceFiles.map((f) => ({
-          filePath: f.filePath,
-          content: f.content,
-        }));
-
-        const javaCount2 = fileData.filter(f => f.filePath.endsWith(".java")).length;
-        const frontendCount2 = fileData.length - javaCount2;
-        console.log(`[analysis] Step 1/4: Building application graph (${javaCount2} Java files, ${frontendCount2} frontend files)...`);
-        const graphStart2 = Date.now();
-        const buildResult = await buildApplicationGraph(fileData);
-        const appGraph = buildResult.graph;
-        const resolutionErrors = buildResult.resolutionErrors;
-        console.log(`[analysis] Step 1/4 done in ${((Date.now() - graphStart2) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
-
-        const archResult = detectArchitecture(appGraph, fileData);
-        console.log(`[analysis] Architecture detected: ${archResult.type} (confidence: ${archResult.confidence.toFixed(2)})`);
-        archResult.evidence.forEach((e) => console.log(`[analysis]   → ${e}`));
-
-        console.log(`[analysis] Step 2/4: Analyzing graph endpoints...`);
-        const endpointImpacts = analyzeGraphEndpoints(appGraph);
-        console.log(`[analysis] Step 2/4 done — ${endpointImpacts.length} endpoints found`);
-
-        console.log(`[analysis] Step 3/4: Analyzing frontend interactions...`);
-        const frontendInteractions = analyzeFrontend(fileData, appGraph);
-        console.log(`[analysis] Step 3/4 done — ${frontendInteractions.length} frontend interactions found`);
-
-        let catalogEntryData = interactionsToCatalogEntries(
-          frontendInteractions, appGraph, analysisRun.id, projectId, archResult.type
-        );
-
-        if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
-          catalogEntryData = endpointImpactsToCatalogEntries(
-            endpointImpacts, appGraph, analysisRun.id, projectId
-          );
-        }
-
-        console.log(`[analysis] Step 4/4: Deterministic classification of ${catalogEntryData.length} entries...`);
-        catalogEntryData = classifyEntriesDeterministic(catalogEntryData);
-        console.log(`[analysis] Step 4/4 done — deterministic classification complete`);
-
-        const created = await storage.createCatalogEntries(catalogEntryData);
-
-        const graphSummary = appGraph.toJSON();
-
-        await storage.updateAnalysisRun(analysisRun.id, {
-          status: "completed",
-          completedAt: new Date(),
-          totalInteractions: frontendInteractions.length,
-          totalEndpoints: endpointImpacts.length,
-          totalEntities: appGraph.getNodesByType("ENTITY").length,
-        });
-
-        await storage.updateProjectStatus(projectId, "completed");
-
-        res.json({
-          analysisRunId: analysisRun.id,
-          totalInteractions: frontendInteractions.length,
-          totalEndpoints: endpointImpacts.length,
-          totalEntities: appGraph.getNodesByType("ENTITY").length,
-          catalogEntries: created.length,
-          graph: {
-            totalNodes: graphSummary.nodes.length,
-            totalEdges: graphSummary.edges.length,
-            nodesByType: {
-              controllers: appGraph.getNodesByType("CONTROLLER").length,
-              services: appGraph.getNodesByType("SERVICE").length,
-              repositories: appGraph.getNodesByType("REPOSITORY").length,
-              entities: appGraph.getNodesByType("ENTITY").length,
-            },
-          },
-          endpointImpacts: endpointImpacts.map((ei) => ({
-            endpoint: ei.endpoint,
-            httpMethod: ei.httpMethod,
-            controllerClass: ei.controllerClass,
-            controllerMethod: ei.controllerMethod,
-            callDepth: ei.callDepth,
-            entitiesTouched: ei.entitiesTouched,
-            involvedNodeCount: ei.involvedNodes.length,
-            fullCallChain: ei.fullCallChain,
-            persistenceOperations: ei.persistenceOperations,
-          })),
-          resolutionErrors: resolutionErrors.length > 0 ? resolutionErrors : undefined,
-        });
-      } catch (analysisError) {
-        const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";
-        await storage.updateAnalysisRun(analysisRun.id, {
-          status: "failed",
-          completedAt: new Date(),
-          errorMessage: errorMsg,
-        });
-        await storage.updateProjectStatus(projectId, "failed");
-        throw analysisError;
-      }
+      const pipeline = new AnalysisPipeline();
+      const result = await pipeline.runFromProject(projectId);
+      res.json(result);
     } catch (error) {
       console.error("Error analyzing project:", error);
       const msg = error instanceof Error ? error.message : "Analysis failed";
@@ -509,124 +407,37 @@ export async function registerRoutes(
 
       await storage.updateProjectStatus(project.id, "uploaded", scannedFiles.length);
 
-      const analysisRun = await storage.createAnalysisRun({ projectId: project.id });
+      const fileData = scannedFiles.map((f) => ({
+        filePath: f.filePath,
+        content: f.content,
+      }));
 
-      try {
-        await storage.updateProjectStatus(project.id, "analyzing");
-        await storage.updateAnalysisRun(analysisRun.id, { status: "analyzing" });
+      const pipeline = new AnalysisPipeline((p) => {
+        sendProgress(p.step, p.detail);
+      });
 
-        const fileData = scannedFiles.map((f) => ({
-          filePath: f.filePath,
-          content: f.content,
-        }));
+      logMemory("chunked-before-analysis");
+      const result = await pipeline.runFullAnalysis(project.id, fileData);
+      logMemory("chunked-after-analysis");
 
-        const javaCount = fileData.filter(f => f.filePath.endsWith(".java")).length;
-        const frontendCount = fileData.length - javaCount;
-        const javaContentKB = fileData.filter(f => f.filePath.endsWith(".java")).reduce((sum, f) => sum + f.content.length, 0) / 1024;
-        sendProgress("Step 1/4", `Building application graph (${javaCount} Java files — ${javaContentKB.toFixed(0)} KB, ${frontendCount} frontend files)...`);
-        const graphStart = Date.now();
-        logMemory("chunked-before-java-engine");
-        const buildResult = await buildApplicationGraph(fileData);
-        const appGraph = buildResult.graph;
-        const resolutionErrors = buildResult.resolutionErrors;
-        logMemory("chunked-after-java-engine");
-        sendProgress("Step 1/4", `Done in ${((Date.now() - graphStart) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
+      const totalElapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+      console.log(`[chunked-upload] COMPLETE — Project "${session.projectName}" — ${scannedFiles.length} files, ${result.catalogEntries} catalog entries, ${result.totalEndpoints} endpoints — total ${totalElapsed}s`);
+      logMemory("chunked-complete");
 
-        const archResult2 = detectArchitecture(appGraph, fileData);
-        sendProgress("Architecture", `Detected: ${archResult2.type} (confidence: ${archResult2.confidence.toFixed(2)})`);
-        archResult2.evidence.forEach((e) => console.log(`[analysis]   → ${e}`));
+      const fullResult = {
+        ...result,
+        projectName: session.projectName,
+        filesScanned: scannedFiles.length,
+      };
 
-        sendProgress("Step 2/4", "Analyzing graph endpoints...");
-        const endpointImpacts = analyzeGraphEndpoints(appGraph);
-        sendProgress("Step 2/4", `Done — ${endpointImpacts.length} endpoints found`);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      cleanupSession();
 
-        sendProgress("Step 3/4", `Analyzing frontend interactions (${frontendCount} files)...`);
-        const feStart = Date.now();
-        const frontendInteractions = analyzeFrontend(fileData, appGraph);
-        sendProgress("Step 3/4", `Done in ${((Date.now() - feStart) / 1000).toFixed(1)}s — ${frontendInteractions.length} frontend interactions found`);
-
-        let catalogEntryData = interactionsToCatalogEntries(
-          frontendInteractions, appGraph, analysisRun.id, project.id, archResult2.type
-        );
-
-        if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
-          catalogEntryData = endpointImpactsToCatalogEntries(
-            endpointImpacts, appGraph, analysisRun.id, project.id
-          );
-        }
-
-        sendProgress("Step 4/4", `Deterministic classification of ${catalogEntryData.length} entries...`);
-        catalogEntryData = classifyEntriesDeterministic(catalogEntryData);
-        sendProgress("Step 4/4", "Deterministic classification complete");
-
-        const created = await storage.createCatalogEntries(catalogEntryData);
-        const graphSummary = appGraph.toJSON();
-
-        await storage.updateAnalysisRun(analysisRun.id, {
-          status: "completed",
-          completedAt: new Date(),
-          totalInteractions: frontendInteractions.length,
-          totalEndpoints: endpointImpacts.length,
-          totalEntities: appGraph.getNodesByType("ENTITY").length,
-        });
-
-        await storage.updateProjectStatus(project.id, "completed");
-
-        const totalElapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
-        console.log(`[chunked-upload] COMPLETE — Project "${session.projectName}" — ${scannedFiles.length} files, ${created.length} catalog entries, ${endpointImpacts.length} endpoints — total ${totalElapsed}s`);
-        logMemory("chunked-complete");
-
-        const result = {
-          projectId: project.id,
-          projectName: session.projectName,
-          filesScanned: scannedFiles.length,
-          analysisRunId: analysisRun.id,
-          totalInteractions: frontendInteractions.length,
-          totalEndpoints: endpointImpacts.length,
-          totalEntities: appGraph.getNodesByType("ENTITY").length,
-          catalogEntries: created.length,
-          graph: {
-            totalNodes: graphSummary.nodes.length,
-            totalEdges: graphSummary.edges.length,
-            nodesByType: {
-              controllers: appGraph.getNodesByType("CONTROLLER").length,
-              services: appGraph.getNodesByType("SERVICE").length,
-              repositories: appGraph.getNodesByType("REPOSITORY").length,
-              entities: appGraph.getNodesByType("ENTITY").length,
-            },
-          },
-          endpointImpacts: endpointImpacts.map((ei) => ({
-            endpoint: ei.endpoint,
-            httpMethod: ei.httpMethod,
-            controllerClass: ei.controllerClass,
-            controllerMethod: ei.controllerMethod,
-            callDepth: ei.callDepth,
-            entitiesTouched: ei.entitiesTouched,
-            fullCallChain: ei.fullCallChain,
-            persistenceOperations: ei.persistenceOperations,
-          })),
-          resolutionErrors: resolutionErrors.length > 0 ? resolutionErrors : undefined,
-        };
-
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
-        cleanupSession();
-
-        if (useSSE) {
-          res.write(`data: ${JSON.stringify({ type: "complete", result })}\n\n`);
-          res.end();
-        } else {
-          res.status(201).json(result);
-        }
-      } catch (analysisError) {
-        const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";
-        console.error(`[chunked-upload] ANALYSIS FAILED: ${errorMsg}`, analysisError instanceof Error ? analysisError.stack : "");
-        await storage.updateAnalysisRun(analysisRun.id, {
-          status: "failed",
-          completedAt: new Date(),
-          errorMessage: errorMsg,
-        });
-        await storage.updateProjectStatus(project.id, "failed");
-        throw analysisError;
+      if (useSSE) {
+        res.write(`data: ${JSON.stringify({ type: "complete", result: fullResult })}\n\n`);
+        res.end();
+      } else {
+        res.status(201).json(fullResult);
       }
     } catch (error) {
       if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -786,125 +597,37 @@ export async function registerRoutes(
 
       await storage.updateProjectStatus(project.id, "uploaded", scannedFiles.length);
 
-      const analysisRun = await storage.createAnalysisRun({ projectId: project.id });
+      const fileData2 = scannedFiles.map((f) => ({
+        filePath: f.filePath,
+        content: f.content,
+      }));
 
-      try {
-        await storage.updateProjectStatus(project.id, "analyzing");
-        await storage.updateAnalysisRun(analysisRun.id, { status: "analyzing" });
+      const pipeline2 = new AnalysisPipeline((p) => {
+        sendProgress(p.step, p.detail);
+      });
 
-        const fileData = scannedFiles.map((f) => ({
-          filePath: f.filePath,
-          content: f.content,
-        }));
+      logMemory("before-analysis");
+      const result2 = await pipeline2.runFullAnalysis(project.id, fileData2);
+      logMemory("after-analysis");
 
-        const javaCount = fileData.filter(f => f.filePath.endsWith(".java")).length;
-        const frontendCount = fileData.length - javaCount;
-        const javaContentKB = fileData.filter(f => f.filePath.endsWith(".java")).reduce((sum, f) => sum + f.content.length, 0) / 1024;
-        sendProgress("Step 1/4", `Building application graph (${javaCount} Java files — ${javaContentKB.toFixed(0)} KB, ${frontendCount} frontend files)...`);
-        const graphStart = Date.now();
-        logMemory("before-java-engine");
-        const buildResult = await buildApplicationGraph(fileData);
-        const appGraph = buildResult.graph;
-        const resolutionErrors = buildResult.resolutionErrors;
-        logMemory("after-java-engine");
-        sendProgress("Step 1/4", `Done in ${((Date.now() - graphStart) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
+      const totalElapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+      console.log(`[upload] COMPLETE — Project "${projectName}" — ${scannedFiles.length} files, ${result2.catalogEntries} catalog entries, ${result2.totalEndpoints} endpoints — total ${totalElapsed}s`);
+      logMemory("complete");
 
-        const archResult3 = detectArchitecture(appGraph, fileData);
-        sendProgress("Architecture", `Detected: ${archResult3.type} (confidence: ${archResult3.confidence.toFixed(2)})`);
-        archResult3.evidence.forEach((e) => console.log(`[analysis]   → ${e}`));
+      const fullResult2 = {
+        ...result2,
+        projectName: projectName,
+        filesScanned: scannedFiles.length,
+      };
 
-        sendProgress("Step 2/4", "Analyzing graph endpoints...");
-        const endpointImpacts = analyzeGraphEndpoints(appGraph);
-        sendProgress("Step 2/4", `Done — ${endpointImpacts.length} endpoints found`);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      cleanupTempFile();
 
-        sendProgress("Step 3/4", `Analyzing frontend interactions (${frontendCount} files)...`);
-        const feStart = Date.now();
-        const frontendInteractions = analyzeFrontend(fileData, appGraph);
-        sendProgress("Step 3/4", `Done in ${((Date.now() - feStart) / 1000).toFixed(1)}s — ${frontendInteractions.length} frontend interactions found`);
-
-        let catalogEntryData = interactionsToCatalogEntries(
-          frontendInteractions, appGraph, analysisRun.id, project.id, archResult3.type
-        );
-
-        if (catalogEntryData.length === 0 && endpointImpacts.length > 0) {
-          catalogEntryData = endpointImpactsToCatalogEntries(
-            endpointImpacts, appGraph, analysisRun.id, project.id
-          );
-        }
-
-        sendProgress("Step 4/4", `Deterministic classification of ${catalogEntryData.length} entries...`);
-        catalogEntryData = classifyEntriesDeterministic(catalogEntryData);
-        sendProgress("Step 4/4", "Deterministic classification complete");
-
-        const created = await storage.createCatalogEntries(catalogEntryData);
-
-        const graphSummary = appGraph.toJSON();
-
-        await storage.updateAnalysisRun(analysisRun.id, {
-          status: "completed",
-          completedAt: new Date(),
-          totalInteractions: frontendInteractions.length,
-          totalEndpoints: endpointImpacts.length,
-          totalEntities: appGraph.getNodesByType("ENTITY").length,
-        });
-
-        await storage.updateProjectStatus(project.id, "completed");
-
-        const totalElapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
-        console.log(`[upload] COMPLETE — Project "${projectName}" — ${scannedFiles.length} files, ${created.length} catalog entries, ${endpointImpacts.length} endpoints — total ${totalElapsed}s`);
-        logMemory("complete");
-
-        const result = {
-          projectId: project.id,
-          projectName: projectName,
-          filesScanned: scannedFiles.length,
-          analysisRunId: analysisRun.id,
-          totalInteractions: frontendInteractions.length,
-          totalEndpoints: endpointImpacts.length,
-          totalEntities: appGraph.getNodesByType("ENTITY").length,
-          catalogEntries: created.length,
-          graph: {
-            totalNodes: graphSummary.nodes.length,
-            totalEdges: graphSummary.edges.length,
-            nodesByType: {
-              controllers: appGraph.getNodesByType("CONTROLLER").length,
-              services: appGraph.getNodesByType("SERVICE").length,
-              repositories: appGraph.getNodesByType("REPOSITORY").length,
-              entities: appGraph.getNodesByType("ENTITY").length,
-            },
-          },
-          endpointImpacts: endpointImpacts.map((ei) => ({
-            endpoint: ei.endpoint,
-            httpMethod: ei.httpMethod,
-            controllerClass: ei.controllerClass,
-            controllerMethod: ei.controllerMethod,
-            callDepth: ei.callDepth,
-            entitiesTouched: ei.entitiesTouched,
-            fullCallChain: ei.fullCallChain,
-            persistenceOperations: ei.persistenceOperations,
-          })),
-          resolutionErrors: resolutionErrors.length > 0 ? resolutionErrors : undefined,
-        };
-
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
-        cleanupTempFile();
-
-        if (useSSE) {
-          res.write(`data: ${JSON.stringify({ type: "complete", result })}\n\n`);
-          res.end();
-        } else {
-          res.status(201).json(result);
-        }
-      } catch (analysisError) {
-        const errorMsg = analysisError instanceof Error ? analysisError.message : "Analysis failed";
-        console.error(`[upload] ANALYSIS FAILED: ${errorMsg}`, analysisError instanceof Error ? analysisError.stack : "");
-        await storage.updateAnalysisRun(analysisRun.id, {
-          status: "failed",
-          completedAt: new Date(),
-          errorMessage: errorMsg,
-        });
-        await storage.updateProjectStatus(project.id, "failed");
-        throw analysisError;
+      if (useSSE) {
+        res.write(`data: ${JSON.stringify({ type: "complete", result: fullResult2 })}\n\n`);
+        res.end();
+      } else {
+        res.status(201).json(fullResult2);
       }
     } catch (error) {
       if (heartbeatInterval) clearInterval(heartbeatInterval);
