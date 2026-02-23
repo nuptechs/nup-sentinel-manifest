@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, serial, integer, timestamp, jsonb, real } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, serial, integer, timestamp, jsonb, real, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -27,6 +27,8 @@ export const projects = pgTable("projects", {
   gitRepoUrl: text("git_repo_url"),
   gitDefaultBranch: text("git_default_branch"),
   gitTokenRef: text("git_token_ref"),
+  webhookSecret: text("webhook_secret"),
+  webhookEnabled: boolean("webhook_enabled").default(false),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 
@@ -159,6 +161,25 @@ export const insertAnalysisSnapshotSchema = createInsertSchema(analysisSnapshots
 
 export type AnalysisSnapshot = typeof analysisSnapshots.$inferSelect;
 export type InsertAnalysisSnapshot = z.infer<typeof insertAnalysisSnapshotSchema>;
+
+export const apiKeys = pgTable("api_keys", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  keyHash: text("key_hash").notNull(),
+  keyPrefix: text("key_prefix").notNull(),
+  projectScope: integer("project_scope").references(() => projects.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  lastUsedAt: timestamp("last_used_at"),
+});
+
+export const insertApiKeySchema = createInsertSchema(apiKeys).omit({
+  id: true,
+  createdAt: true,
+  lastUsedAt: true,
+});
+
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type InsertApiKey = z.infer<typeof insertApiKeySchema>;
 
 export const technicalOperations = [
   "READ",

@@ -1,0 +1,89 @@
+{
+  "name": "permacat-vscode",
+  "displayName": "PermaCat - Code Permission Catalog",
+  "description": "Analyze frontend-to-backend interactions, generate permission catalogs, and detect security gaps directly from VS Code.",
+  "version": "0.1.0",
+  "publisher": "permacat",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "permacat.analyzeFile",
+        "title": "PermaCat: Analyze Current File"
+      },
+      {
+        "command": "permacat.analyzeWorkspace",
+        "title": "PermaCat: Analyze Workspace (Local)"
+      },
+      {
+        "command": "permacat.analyzeWorkspaceFull",
+        "title": "PermaCat: Analyze Workspace (Full Remote)"
+      },
+      {
+        "command": "permacat.showCatalog",
+        "title": "PermaCat: Show Catalog"
+      },
+      {
+        "command": "permacat.connectServer",
+        "title": "PermaCat: Connect to Server"
+      },
+      {
+        "command": "permacat.clearResults",
+        "title": "PermaCat: Clear Results"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "permacat-explorer",
+          "title": "PermaCat",
+          "icon": "$(shield)"
+        }
+      ]
+    },
+    "views": {
+      "permacat-explorer": [
+        {
+          "id": "permacat-catalog-tree",
+          "name": "Catalog"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "PermaCat",
+      "properties": {
+        "permacat.serverUrl": {
+          "type": "string",
+          "default": "",
+          "description": "URL of the PermaCat analysis server"
+        },
+        "permacat.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for authenticating with the PermaCat server"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.0"
+  }
+}

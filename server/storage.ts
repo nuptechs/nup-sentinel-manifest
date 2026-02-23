@@ -6,6 +6,7 @@ import {
   analysisRuns,
   catalogEntries,
   analysisSnapshots,
+  apiKeys,
   type Project,
   type InsertProject,
   type SourceFile,
@@ -16,6 +17,8 @@ import {
   type InsertCatalogEntry,
   type AnalysisSnapshot,
   type InsertAnalysisSnapshot,
+  type ApiKey,
+  type InsertApiKey,
   users,
   type User,
   type InsertUser,
@@ -31,6 +34,8 @@ export interface IStorage {
   createProject(project: InsertProject): Promise<Project>;
   updateProjectStatus(id: number, status: string, fileCount?: number): Promise<void>;
   updateProjectGitConfig(id: number, config: { gitProvider: string; gitRepoUrl: string; gitDefaultBranch: string; gitTokenRef: string }): Promise<void>;
+  updateProjectWebhookConfig(id: number, config: { webhookSecret: string | null; webhookEnabled: boolean }): Promise<void>;
+  getProjectByGitRepoUrl(repoUrl: string): Promise<Project | undefined>;
   deleteProject(id: number): Promise<void>;
 
   getSourceFiles(projectId: number): Promise<SourceFile[]>;
@@ -54,6 +59,12 @@ export interface IStorage {
   getAnalysisSnapshot(analysisRunId: number): Promise<AnalysisSnapshot | undefined>;
   getAnalysisSnapshots(projectId: number): Promise<AnalysisSnapshot[]>;
   getLastTwoSnapshots(projectId: number): Promise<AnalysisSnapshot[]>;
+
+  createApiKey(key: InsertApiKey): Promise<ApiKey>;
+  getApiKeys(): Promise<ApiKey[]>;
+  getApiKeyByHash(keyHash: string): Promise<ApiKey | undefined>;
+  deleteApiKey(id: number): Promise<void>;
+  updateApiKeyLastUsed(id: number): Promise<void>;
 
   getStats(): Promise<{
     totalProjects: number;
@@ -106,6 +117,18 @@ export class DatabaseStorage implements IStorage {
       gitDefaultBranch: config.gitDefaultBranch,
       gitTokenRef: config.gitTokenRef,
     }).where(eq(projects.id, id));
+  }
+
+  async updateProjectWebhookConfig(id: number, config: { webhookSecret: string | null; webhookEnabled: boolean }): Promise<void> {
+    await db.update(projects).set({
+      webhookSecret: config.webhookSecret,
+      webhookEnabled: config.webhookEnabled,
+    }).where(eq(projects.id, id));
+  }
+
+  async getProjectByGitRepoUrl(repoUrl: string): Promise<Project | undefined> {
+    const [project] = await db.select().from(projects).where(eq(projects.gitRepoUrl, repoUrl));
+    return project;
   }
 
   async deleteProject(id: number): Promise<void> {
@@ -213,6 +236,28 @@ export class DatabaseStorage implements IStorage {
       totalCatalogEntries: entryCount.count,
       criticalActions: criticalCount.count,
     };
+  }
+
+  async createApiKey(key: InsertApiKey): Promise<ApiKey> {
+    const [created] = await db.insert(apiKeys).values(key).returning();
+    return created;
+  }
+
+  async getApiKeys(): Promise<ApiKey[]> {
+    return db.select().from(apiKeys).orderBy(desc(apiKeys.createdAt));
+  }
+
+  async getApiKeyByHash(keyHash: string): Promise<ApiKey | undefined> {
+    const [key] = await db.select().from(apiKeys).where(eq(apiKeys.keyHash, keyHash));
+    return key;
+  }
+
+  async deleteApiKey(id: number): Promise<void> {
+    await db.delete(apiKeys).where(eq(apiKeys.id, id));
+  }
+
+  async updateApiKeyLastUsed(id: number): Promise<void> {
+    await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, id));
   }
 }
 

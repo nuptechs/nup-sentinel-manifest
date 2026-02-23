@@ -13,6 +13,7 @@ import { generateAgentsMd } from "./generators/agents-md-generator";
 import { generateOpenAPISpec } from "./generators/openapi-generator";
 import { generatePolicyMatrix } from "./generators/policy-matrix-generator";
 import { AnalysisPipeline } from "./pipeline/analysis-pipeline";
+import { apiAuthMiddleware, generateApiKey, hashApiKey } from "./middleware/api-auth";
 import { z } from "zod";
 
 const upload = multer({
@@ -83,6 +84,188 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+
+  app.use("/api", apiAuthMiddleware);
+
+  app.post("/api/keys", async (req, res) => {
+    try {
+      const { name, projectScope } = req.body;
+      if (!name || typeof name !== "string") {
+        return res.status(400).json({ message: "Name is required" });
+      }
+
+      const { raw, prefix, hash } = generateApiKey();
+      const apiKey = await storage.createApiKey({
+        name,
+        keyHash: hash,
+        keyPrefix: prefix,
+        projectScope: projectScope || null,
+      });
+
+      res.json({
+        id: apiKey.id,
+        name: apiKey.name,
+        key: raw,
+        prefix,
+        projectScope: apiKey.projectScope,
+        createdAt: apiKey.createdAt,
+        message: "Store this key securely — it will not be shown again.",
+      });
+    } catch (error) {
+      console.error("Error creating API key:", error);
+      res.status(500).json({ message: "Failed to create API key" });
+    }
+  });
+
+  app.get("/api/keys", async (_req, res) => {
+    try {
+      const keys = await storage.getApiKeys();
+      res.json(keys.map(k => ({
+        id: k.id,
+        name: k.name,
+        prefix: k.keyPrefix,
+        projectScope: k.projectScope,
+        createdAt: k.createdAt,
+        lastUsedAt: k.lastUsedAt,
+      })));
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch API keys" });
+    }
+  });
+
+  app.delete("/api/keys/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid key ID" });
+      await storage.deleteApiKey(id);
+      res.json({ message: "API key revoked" });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to delete API key" });
+    }
+  });
+
+  app.post("/api/analyze", async (req, res) => {
+    try {
+      const { files, options } = req.body;
+      if (!files || !Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ message: "files array is required with at least one entry { path, content }" });
+      }
+
+      for (const f of files) {
+        if (!f.path || !f.content) {
+          return res.status(400).json({ message: "Each file must have 'path' and 'content' fields" });
+        }
+      }
+
+      const format = options?.format || "manifest";
+      const projectName = options?.projectName || `headless-${Date.now()}`;
+
+      const project = await storage.createProject({ name: projectName, description: "Headless analysis" });
+      const fileData = files.map((f: any) => ({
+        filePath: f.path,
+        content: f.content,
+      }));
+
+      for (const f of fileData) {
+        const fileType = getFileType(f.filePath);
+        await storage.createSourceFile({
+          projectId: project.id,
+          filePath: f.filePath,
+          fileType,
+          content: f.content,
+          contentHash: crypto.createHash("sha256").update(f.content).digest("hex"),
+        });
+      }
+      await storage.updateProjectStatus(project.id, "uploaded", fileData.length);
+
+      const pipeline = new AnalysisPipeline();
+      const result = await pipeline.runFullAnalysis(project.id, fileData);
+
+      const entries = await storage.getCatalogEntries(project.id);
+      const manifest = generateManifest(project, entries);
+
+      let output: any = { analysis: result, manifest };
+
+      if (format === "agents-md") {
+        output.agentsMd = generateAgentsMd(manifest);
+      } else if (format === "openapi") {
+        output.openapi = generateOpenAPISpec(manifest);
+      } else if (format === "policy-matrix") {
+        output.policyMatrix = generatePolicyMatrix(manifest);
+      } else if (format === "all") {
+        output.agentsMd = generateAgentsMd(manifest);
+        output.openapi = generateOpenAPISpec(manifest);
+        output.policyMatrix = generatePolicyMatrix(manifest);
+      }
+
+      res.json(output);
+    } catch (error) {
+      console.error("Headless analysis error:", error);
+      const msg = error instanceof Error ? error.message : "Analysis failed";
+      res.status(500).json({ message: msg });
+    }
+  });
+
+  app.post("/api/analyze-zip", upload.single("file"), async (req, res) => {
+    try {
+      const file = req.file;
+      if (!file) return res.status(400).json({ message: "ZIP file is required" });
+
+      const format = (req.query.format as string) || "manifest";
+      const projectName = (req.body.name as string) || `headless-zip-${Date.now()}`;
+
+      const project = await storage.createProject({ name: projectName, description: "Headless ZIP analysis" });
+
+      const scannedFiles = await extractAndScanZip(file.path);
+      for (const f of scannedFiles) {
+        await storage.createSourceFile({
+          projectId: project.id,
+          filePath: f.filePath,
+          fileType: getFileType(f.filePath),
+          content: f.content,
+          contentHash: crypto.createHash("sha256").update(f.content).digest("hex"),
+        });
+      }
+      await storage.updateProjectStatus(project.id, "uploaded", scannedFiles.length);
+
+      try { fs.unlinkSync(file.path); } catch {}
+
+      const fileData = scannedFiles.map(f => ({ filePath: f.filePath, content: f.content }));
+      const pipeline = new AnalysisPipeline();
+      const result = await pipeline.runFullAnalysis(project.id, fileData);
+
+      const entries = await storage.getCatalogEntries(project.id);
+      const manifest = generateManifest(project, entries);
+
+      let output: any = { analysis: result, manifest, projectId: project.id };
+
+      if (format === "agents-md" || format === "all") output.agentsMd = generateAgentsMd(manifest);
+      if (format === "openapi" || format === "all") output.openapi = generateOpenAPISpec(manifest);
+      if (format === "policy-matrix" || format === "all") output.policyMatrix = generatePolicyMatrix(manifest);
+
+      res.json(output);
+    } catch (error) {
+      console.error("Headless ZIP analysis error:", error);
+      const msg = error instanceof Error ? error.message : "ZIP analysis failed";
+      res.status(500).json({ message: msg });
+    }
+  });
+
+  app.get("/api/docs/openapi.json", async (_req, res) => {
+    const { getOpenAPISpec } = await import("./api-spec");
+    res.json(getOpenAPISpec());
+  });
+
+  app.get("/api/docs", async (_req, res) => {
+    res.send(`<!DOCTYPE html>
+<html><head><title>PermaCat API Documentation</title>
+<meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@scalar/api-reference@latest/dist/style.css">
+</head><body>
+<script id="api-reference" data-url="/api/docs/openapi.json"></script>
+<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@latest"></script>
+</body></html>`);
+  });
 
   app.get("/api/stats", async (_req, res) => {
     try {
@@ -1140,8 +1323,8 @@ export async function registerRoutes(
         diff = diffManifests(
           baseSnapshot.manifestJson as any,
           headSnapshot.manifestJson as any,
-          `Run #${baseSnapshot.analysisRunId} (${prDiff.pullRequest.targetBranch})`,
-          `Run #${headSnapshot.analysisRunId} (${prDiff.pullRequest.sourceBranch})`
+          baseSnapshot.analysisRunId,
+          headSnapshot.analysisRunId
         );
       }
 
@@ -1270,6 +1453,134 @@ export async function registerRoutes(
       console.error("Error enriching with LLM:", error);
       const msg = error instanceof Error ? error.message : "LLM enrichment failed";
       res.status(500).json({ message: msg });
+    }
+  });
+
+  app.post("/api/projects/:id/webhook/configure", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid project ID" });
+
+      const project = await storage.getProject(id);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+
+      const schema = z.object({
+        webhookSecret: z.string().nullable(),
+        webhookEnabled: z.boolean(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Validation failed", errors: parsed.error.issues.map(i => i.message) });
+      }
+
+      await storage.updateProjectWebhookConfig(id, parsed.data);
+      res.json({ message: "Webhook configuration updated" });
+    } catch (error) {
+      console.error("Error configuring webhook:", error);
+      res.status(500).json({ message: "Failed to configure webhook" });
+    }
+  });
+
+  app.post("/api/webhook/github", async (req, res) => {
+    try {
+      const signature = req.headers["x-hub-signature-256"] as string | undefined;
+      const event = req.headers["x-github-event"] as string | undefined;
+
+      if (event !== "pull_request") {
+        return res.status(200).json({ message: "Event ignored" });
+      }
+
+      const body = req.body;
+      const action = body?.action;
+      if (action !== "opened" && action !== "synchronize") {
+        return res.status(200).json({ message: "Action ignored" });
+      }
+
+      const repoUrl = body?.repository?.html_url;
+      if (!repoUrl) {
+        return res.status(400).json({ message: "Missing repository URL" });
+      }
+
+      const project = await storage.getProjectByGitRepoUrl(repoUrl);
+      if (!project || !project.webhookEnabled) {
+        return res.status(200).json({ message: "No matching project or webhook disabled" });
+      }
+
+      if (project.webhookSecret && signature) {
+        const rawBody = JSON.stringify(req.body);
+        const hmac = crypto.createHmac("sha256", project.webhookSecret).update(rawBody).digest("hex");
+        const expected = `sha256=${hmac}`;
+        if (signature !== expected) {
+          return res.status(401).json({ message: "Invalid signature" });
+        }
+      } else if (project.webhookSecret && !signature) {
+        return res.status(401).json({ message: "Missing signature" });
+      }
+
+      res.status(200).json({ message: "Webhook received, analysis triggered" });
+
+      const prNumber = body?.pull_request?.number;
+      if (prNumber && project.gitTokenRef) {
+        try {
+          const pipeline = new AnalysisPipeline();
+          await pipeline.runFromProject(project.id);
+          console.log(`[webhook:github] PR #${prNumber} analysis complete for project ${project.id}`);
+        } catch (err) {
+          console.error(`[webhook:github] PR #${prNumber} analysis failed:`, err);
+        }
+      }
+    } catch (error) {
+      console.error("[webhook:github] Error:", error);
+      res.status(500).json({ message: "Webhook processing failed" });
+    }
+  });
+
+  app.post("/api/webhook/gitlab", async (req, res) => {
+    try {
+      const token = req.headers["x-gitlab-token"] as string | undefined;
+      const body = req.body;
+
+      const objectKind = body?.object_kind;
+      if (objectKind !== "merge_request") {
+        return res.status(200).json({ message: "Event ignored" });
+      }
+
+      const action = body?.object_attributes?.action;
+      if (action !== "open" && action !== "update") {
+        return res.status(200).json({ message: "Action ignored" });
+      }
+
+      const repoUrl = body?.project?.web_url;
+      if (!repoUrl) {
+        return res.status(400).json({ message: "Missing project URL" });
+      }
+
+      const project = await storage.getProjectByGitRepoUrl(repoUrl);
+      if (!project || !project.webhookEnabled) {
+        return res.status(200).json({ message: "No matching project or webhook disabled" });
+      }
+
+      if (project.webhookSecret) {
+        if (!token || token !== project.webhookSecret) {
+          return res.status(401).json({ message: "Invalid token" });
+        }
+      }
+
+      res.status(200).json({ message: "Webhook received, analysis triggered" });
+
+      const mrIid = body?.object_attributes?.iid;
+      if (mrIid && project.gitTokenRef) {
+        try {
+          const pipeline = new AnalysisPipeline();
+          await pipeline.runFromProject(project.id);
+          console.log(`[webhook:gitlab] MR !${mrIid} analysis complete for project ${project.id}`);
+        } catch (err) {
+          console.error(`[webhook:gitlab] MR !${mrIid} analysis failed:`, err);
+        }
+      }
+    } catch (error) {
+      console.error("[webhook:gitlab] Error:", error);
+      res.status(500).json({ message: "Webhook processing failed" });
     }
   });
 

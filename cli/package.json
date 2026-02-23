@@ -1,0 +1,27 @@
+{
+  "name": "permacat-cli",
+  "version": "0.1.0",
+  "description": "PermaCat CLI - Code-to-Permission Catalog Generator",
+  "bin": {
+    "permacat": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "cli-table3": "^0.6.3",
+    "node-fetch": "^2.7.0",
+    "form-data": "^4.0.0",
+    "adm-zip": "^0.5.10"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "@types/node-fetch": "^2.6.0",
+    "ts-node": "^10.9.0"
+  }
+}
