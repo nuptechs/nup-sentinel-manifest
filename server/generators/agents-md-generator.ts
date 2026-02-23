@@ -43,7 +43,10 @@ export function generateAgentsMd(manifest: PermaCatManifest): string {
     for (const ep of manifest.endpoints) {
       const roles = ep.requiredRoles.length > 0 ? ep.requiredRoles.join(", ") : "—";
       const sensitive = ep.sensitiveFieldsAccessed.length > 0 ? "⚠ Yes" : "No";
-      lines.push(`| ${ep.method} | \`${ep.path}\` | ${ep.controller}.${ep.controllerMethod} | ${ep.technicalOperation} | ${ep.criticalityScore} | ${roles} | ${sensitive} |`);
+      const controller = ep.controller && ep.controllerMethod
+        ? `${ep.controller}.${ep.controllerMethod}`
+        : ep.controller || ep.controllerMethod || "—";
+      lines.push(`| ${ep.method} | \`${ep.path}\` | ${controller} | ${ep.technicalOperation} | ${ep.criticalityScore} | ${roles} | ${sensitive} |`);
     }
     lines.push("");
   }

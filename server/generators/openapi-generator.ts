@@ -43,7 +43,7 @@ export function generateOpenAPISpec(manifest: PermaCatManifest): OpenAPISpec {
 
     const method = ep.method.toLowerCase();
     const operationId = buildOperationId(ep.controller, ep.controllerMethod, method, ep.path);
-    const tags = ep.controller ? [ep.controller.replace(/Controller$/, "")] : ["default"];
+    const tags = ep.controller ? [ep.controller.replace(/Controller$/, "")] : [extractTagFromPath(ep.path)];
 
     const operation: OpenAPIOperation = {
       summary: buildSummary(ep.technicalOperation, ep.path, ep.controllerMethod),
@@ -148,14 +148,26 @@ function buildOperationId(controller: string, method: string, httpMethod: string
   if (controller && method) {
     return `${controller}.${method}`;
   }
-  const segments = path.split("/").filter(Boolean);
-  const lastSegment = segments[segments.length - 1] || "root";
-  return `${httpMethod}_${lastSegment.replace(/[{}]/g, "")}`;
+  const segments = path.split("/").filter(Boolean).map(s => s.replace(/[{}]/g, ""));
+  const meaningful = segments.filter(s => s !== "api" && s !== "param");
+  const base = meaningful.length > 0 ? meaningful.join("_") : segments.join("_") || "root";
+  return `${httpMethod}_${base}`;
 }
 
 function buildSummary(operation: string, path: string, method: string): string {
   if (method) return `${operation}: ${method}`;
-  return `${operation} ${path}`;
+  const segments = path.split("/").filter(s => s && s !== "api" && !s.startsWith("{"));
+  const resource = segments[segments.length - 1] || path;
+  return `${operation} ${resource}`;
+}
+
+function extractTagFromPath(path: string): string {
+  const segments = path.split("/").filter(s => s && s !== "api" && !s.startsWith("{"));
+  if (segments.length > 0) {
+    const tag = segments[0];
+    return tag.charAt(0).toUpperCase() + tag.slice(1);
+  }
+  return "default";
 }
 
 function mapJavaTypeToOpenAPI(javaType: string): string {
