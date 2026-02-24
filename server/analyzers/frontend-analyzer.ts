@@ -51,6 +51,7 @@ interface TemplateBinding {
   eventType: string;
   handlerName: string;
   lineNumber: number;
+  objectName?: string;
 }
 
 interface SymbolDeclaration {
@@ -58,6 +59,18 @@ interface SymbolDeclaration {
   node: ts.Node;
   httpCalls: HttpCall[];
   calledNodes: ts.Node[];
+}
+
+interface DestructuredBinding {
+  name: string;
+  sourceCallName: string;
+  sourceIsHook: boolean;
+}
+
+interface VariableOrigin {
+  varName: string;
+  sourceCallName: string;
+  sourceIsHook: boolean;
 }
 
 interface ComponentEmitEntry {
@@ -280,11 +293,14 @@ class ScriptSymbolTable {
   private nodeMap = new Map<ts.Node, SymbolDeclaration>();
   private nameIndex = new Map<string, ts.Node>();
   private httpClients: ImportedHttpClients;
+  private destructuredBindings = new Map<string, DestructuredBinding>();
+  private variableOrigins = new Map<string, VariableOrigin>();
 
   static build(sourceFile: ts.SourceFile): ScriptSymbolTable {
     const table = new ScriptSymbolTable();
     table.httpClients = ImportedHttpClients.build(sourceFile);
     table.indexDeclarations(sourceFile);
+    table.indexDestructuredBindings(sourceFile);
     table.extractCallInfo(sourceFile);
     return table;
   }
@@ -327,6 +343,52 @@ class ScriptSymbolTable {
     };
     this.nodeMap.set(node, decl);
     this.nameIndex.set(name, node);
+  }
+
+  private indexDestructuredBindings(sourceFile: ts.SourceFile): void {
+    const visit = (node: ts.Node) => {
+      if (ts.isVariableDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer)) {
+        const callExpr = node.initializer.expression;
+        let callName = "";
+        if (ts.isIdentifier(callExpr)) {
+          callName = callExpr.text;
+        } else if (ts.isPropertyAccessExpression(callExpr)) {
+          callName = callExpr.name.text;
+        }
+
+        if (!callName) { ts.forEachChild(node, visit); return; }
+
+        const isHook = callName.startsWith("use") && callName.length > 3 && callName[3] === callName[3].toUpperCase();
+
+        if (ts.isObjectBindingPattern(node.name)) {
+          for (const el of node.name.elements) {
+            if (ts.isBindingElement(el) && ts.isIdentifier(el.name)) {
+              this.destructuredBindings.set(el.name.text, {
+                name: el.name.text,
+                sourceCallName: callName,
+                sourceIsHook: isHook,
+              });
+            }
+          }
+        } else if (ts.isIdentifier(node.name) && isHook) {
+          this.variableOrigins.set(node.name.text, {
+            varName: node.name.text,
+            sourceCallName: callName,
+            sourceIsHook: true,
+          });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+
+  getDestructuredBinding(name: string): DestructuredBinding | undefined {
+    return this.destructuredBindings.get(name);
+  }
+
+  getVariableOrigin(name: string): VariableOrigin | undefined {
+    return this.variableOrigins.get(name);
   }
 
   private extractCallInfo(sourceFile: ts.SourceFile): void {
@@ -2163,7 +2225,7 @@ function detectReactJSXListeners(
                   } else if (ts.isPropertyAccessExpression(expr)) {
                     handlerName = expr.name.text;
                   } else if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) {
-                    handlerName = extractInlineHandlerTarget(expr);
+                    handlerName = extractInlineHandlerTarget(expr).handlerName;
                   }
                 }
                 if (handlerName) {
@@ -4095,19 +4157,28 @@ function parseJSXTemplate(sourceFile: ts.SourceFile): TemplateBinding[] {
           const eventType = eventMap[attrName];
           if (eventType && attr.initializer) {
             let handlerName = "";
+            let objectName: string | undefined;
             if (ts.isJsxExpression(attr.initializer) && attr.initializer.expression) {
               const expr = attr.initializer.expression;
               if (ts.isIdentifier(expr)) {
                 handlerName = expr.text;
               } else if (ts.isPropertyAccessExpression(expr)) {
                 handlerName = expr.name.text;
+                if (ts.isIdentifier(expr.expression)) {
+                  objectName = expr.expression.text;
+                }
               } else if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) {
-                handlerName = extractInlineHandlerTarget(expr);
+                const inlineResult = extractInlineHandlerTarget(expr);
+                handlerName = inlineResult.handlerName;
+                objectName = inlineResult.objectName;
               } else if (ts.isCallExpression(expr)) {
                 if (ts.isIdentifier(expr.expression)) {
                   handlerName = expr.expression.text;
                 } else if (ts.isPropertyAccessExpression(expr.expression)) {
                   handlerName = expr.expression.name.text;
+                  if (ts.isIdentifier(expr.expression.expression)) {
+                    objectName = expr.expression.expression.text;
+                  }
                 }
               }
             }
@@ -4118,6 +4189,7 @@ function parseJSXTemplate(sourceFile: ts.SourceFile): TemplateBinding[] {
                 eventType,
                 handlerName,
                 lineNumber: getLineNumber(sourceFile, node.getStart(sourceFile)),
+                objectName,
               });
             }
           }
@@ -4132,8 +4204,9 @@ function parseJSXTemplate(sourceFile: ts.SourceFile): TemplateBinding[] {
   return bindings;
 }
 
-function extractInlineHandlerTarget(node: ts.ArrowFunction | ts.FunctionExpression): string {
+function extractInlineHandlerTarget(node: ts.ArrowFunction | ts.FunctionExpression): { handlerName: string; objectName?: string } {
   let result = "";
+  let objectName: string | undefined;
   function visit(n: ts.Node) {
     if (result) return;
     if (ts.isCallExpression(n)) {
@@ -4141,12 +4214,15 @@ function extractInlineHandlerTarget(node: ts.ArrowFunction | ts.FunctionExpressi
         result = n.expression.text;
       } else if (ts.isPropertyAccessExpression(n.expression)) {
         result = n.expression.name.text;
+        if (ts.isIdentifier(n.expression.expression)) {
+          objectName = n.expression.expression.text;
+        }
       }
     }
     ts.forEachChild(n, visit);
   }
   visit(node.body);
-  return result || "__inline_handler__";
+  return { handlerName: result || "__inline_handler__", objectName };
 }
 
 function classifyElement(tagName: string): string {
@@ -4592,7 +4668,7 @@ function resolveBindingsViaNodes(
       binding.handlerName, symbolTable, filePath, graph,
       externalCalls, crossFileContext, globalCallGraph,
       eventGraph, allFiles, serviceMap, allFilePaths,
-      stateFlowGraph, archLayerGraph
+      stateFlowGraph, archLayerGraph, binding.objectName
     );
 
     const handlerGuards = scriptSourceFile
@@ -4652,15 +4728,20 @@ function tierToConfidence(tier: string | null): number {
   switch (tier) {
     case "local": return 1.0;
     case "serviceMap": return 0.95;
+    case "objectMethodImport": return 0.93;
+    case "hookMethodBridge": return 0.90;
+    case "destructuredBinding": return 0.88;
+    case "destructuredHookBridge": return 0.87;
+    case "contextHook": return 0.90;
+    case "dynamicImport": return 0.88;
     case "globalCallGraph": return 0.85;
+    case "serviceMapBroadSearch": return 0.82;
     case "eventGraph": return 0.80;
     case "eventGraph+serviceMap": return 0.75;
     case "eventGraph+globalCallGraph": return 0.70;
     case "stateFlowGraph": return 0.65;
-    case "fuzzyGlobalMatch": return 0.45;
     case "architecturalLayerGraph": return 0.55;
-    case "contextHook": return 0.90;
-    case "dynamicImport": return 0.88;
+    case "fuzzyGlobalMatch": return 0.45;
     default: return 0.5;
   }
 }
@@ -4678,7 +4759,8 @@ function resolveHandlerHttpCalls(
   serviceMap?: HttpServiceMap,
   allFilePaths?: string[],
   stateFlowGraph?: StateFlowGraph,
-  archLayerGraph?: ArchitecturalLayerGraph
+  archLayerGraph?: ArchitecturalLayerGraph,
+  objectName?: string
 ): HttpCall[] {
   function tagResolution(calls: HttpCall[], tier: string, path: ResolutionStep[]): HttpCall[] {
     for (const call of calls) {
@@ -4694,6 +4776,95 @@ function resolveHandlerHttpCalls(
     if (httpCalls.length > 0) return tagResolution(httpCalls, "local", [
       { tier: "local", file: filePath, function: handlerName, detail: "direct HTTP call in handler" }
     ]);
+  }
+
+  if (objectName && crossFileContext && crossFileContext.importBindings) {
+    const importBindings = crossFileContext.importBindings;
+    const binding = importBindings.get(objectName);
+    if (binding) {
+      const fileEntry = crossFileContext.serviceMap.get(binding.sourcePath);
+      if (fileEntry) {
+        const lookupKeys = [
+          binding.originalName + "." + handlerName,
+          "default." + handlerName,
+          objectName + "." + handlerName,
+          handlerName,
+        ];
+        for (const key of lookupKeys) {
+          const methodEntry = fileEntry.methods.get(key);
+          if (methodEntry && methodEntry.httpCalls.length > 0) {
+            return tagResolution(methodEntry.httpCalls, "objectMethodImport", [
+              { tier: "local", file: filePath, function: objectName + "." + handlerName, detail: "method call on imported object" },
+              { tier: "objectMethodImport", file: binding.sourcePath, function: key, detail: "resolved via import binding + method lookup" }
+            ]);
+          }
+          const funcCalls = fileEntry.directFunctions.get(key);
+          if (funcCalls && funcCalls.length > 0) {
+            return tagResolution(funcCalls, "objectMethodImport", [
+              { tier: "local", file: filePath, function: objectName + "." + handlerName, detail: "function call on imported object" },
+              { tier: "objectMethodImport", file: binding.sourcePath, function: key, detail: "resolved via import binding + function lookup" }
+            ]);
+          }
+        }
+      }
+    }
+
+    const varOrigin = symbolTable.getVariableOrigin(objectName);
+    if (varOrigin && globalCallGraph) {
+      const hookBinding = importBindings?.get(varOrigin.sourceCallName);
+      const hookSourcePath = hookBinding ? hookBinding.sourcePath : filePath;
+      const lookupKeys = [
+        makeGlobalKey(hookSourcePath, handlerName),
+        makeGlobalKey(hookSourcePath, "default." + handlerName),
+        makeGlobalKey(filePath, objectName + "." + handlerName),
+      ];
+      for (const lk of lookupKeys) {
+        const gNode = globalCallGraph.get(lk);
+        if (gNode) {
+          const calls = gNode.propagatedHttpCalls || (gNode.httpCalls.length > 0 ? gNode.httpCalls : null);
+          if (calls && calls.length > 0) {
+            return tagResolution(calls, "hookMethodBridge", [
+              { tier: "local", file: filePath, function: objectName + "." + handlerName, detail: "method call on hook-returned object" },
+              { tier: "hookMethodBridge", file: hookSourcePath, function: handlerName, detail: `resolved via hook ${varOrigin.sourceCallName} return value` }
+            ]);
+          }
+        }
+      }
+    }
+  }
+
+  {
+    const destructured = symbolTable.getDestructuredBinding(handlerName);
+    if (destructured && globalCallGraph) {
+      const gcgKey = makeGlobalKey(filePath, handlerName);
+      const gNode = globalCallGraph.get(gcgKey);
+      if (gNode) {
+        const calls = gNode.propagatedHttpCalls || (gNode.httpCalls.length > 0 ? gNode.httpCalls : null);
+        if (calls && calls.length > 0) {
+          return tagResolution(calls, "destructuredBinding", [
+            { tier: "local", file: filePath, function: handlerName, detail: `destructured from ${destructured.sourceCallName}()` },
+            { tier: "destructuredBinding", file: filePath, function: handlerName, detail: "resolved via GCG node for destructured binding" }
+          ]);
+        }
+      }
+
+      if (destructured.sourceIsHook && crossFileContext && crossFileContext.importBindings) {
+        const hookBinding = crossFileContext.importBindings.get(destructured.sourceCallName);
+        if (hookBinding) {
+          const hookKey = makeGlobalKey(hookBinding.sourcePath, handlerName);
+          const hookNode = globalCallGraph.get(hookKey);
+          if (hookNode) {
+            const calls = hookNode.propagatedHttpCalls || (hookNode.httpCalls.length > 0 ? hookNode.httpCalls : null);
+            if (calls && calls.length > 0) {
+              return tagResolution(calls, "destructuredHookBridge", [
+                { tier: "local", file: filePath, function: handlerName, detail: `destructured from ${destructured.sourceCallName}()` },
+                { tier: "destructuredHookBridge", file: hookBinding.sourcePath, function: handlerName, detail: `resolved in hook source file` }
+              ]);
+            }
+          }
+        }
+      }
+    }
   }
 
   if (externalCalls && crossFileContext) {
@@ -4854,6 +5025,54 @@ function resolveHandlerHttpCalls(
       { tier: "local", file: filePath, function: handlerName, detail: "handler entry point" },
       { tier: "dynamicImport", file: filePath, function: handlerName, detail: "resolved via dynamic import()" }
     ]);
+  }
+
+  if (serviceMap) {
+    const handlerNode2 = symbolTable.resolveHandlerNode(handlerName);
+    if (handlerNode2) {
+      const decl = symbolTable.getDeclaration(handlerNode2);
+      if (decl) {
+        for (const calledNode of decl.calledNodes) {
+          const calledDecl = symbolTable.getDeclaration(calledNode);
+          if (calledDecl) {
+            const calledName = calledDecl.name;
+            for (const [smPath, smEntry] of Array.from(serviceMap)) {
+              if (smPath === filePath) continue;
+              const methodEntry = smEntry.methods.get(calledName) || smEntry.methods.get("default." + calledName);
+              if (methodEntry && methodEntry.httpCalls.length > 0) {
+                return tagResolution(methodEntry.httpCalls, "serviceMapBroadSearch", [
+                  { tier: "local", file: filePath, function: handlerName, detail: "handler calls " + calledName },
+                  { tier: "serviceMapBroadSearch", file: smPath, function: calledName, detail: "broad serviceMap method name match" }
+                ]);
+              }
+              const fnCalls = smEntry.directFunctions.get(calledName);
+              if (fnCalls && fnCalls.length > 0) {
+                return tagResolution(fnCalls, "serviceMapBroadSearch", [
+                  { tier: "local", file: filePath, function: handlerName, detail: "handler calls " + calledName },
+                  { tier: "serviceMapBroadSearch", file: smPath, function: calledName, detail: "broad serviceMap function name match" }
+                ]);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (objectName) {
+      const fullMethodName = objectName + "." + handlerName;
+      for (const [smPath, smEntry] of Array.from(serviceMap)) {
+        const lookups = [handlerName, fullMethodName, "default." + handlerName];
+        for (const lookup of lookups) {
+          const me = smEntry.methods.get(lookup);
+          if (me && me.httpCalls.length > 0) {
+            return tagResolution(me.httpCalls, "serviceMapBroadSearch", [
+              { tier: "local", file: filePath, function: fullMethodName, detail: "object.method call" },
+              { tier: "serviceMapBroadSearch", file: smPath, function: lookup, detail: "broad serviceMap method match for object.method" }
+            ]);
+          }
+        }
+      }
+    }
   }
 
   return [];
@@ -5529,11 +5748,21 @@ function buildRouteMap(files: { filePath: string; content: string }[]): RouteMap
       if (componentName) {
         const normalizedName = componentName.replace(/\.(vue|tsx|jsx|ts|js)$/, "");
         const baseName = normalizedName.split("/").pop() || normalizedName;
-        routeMap.set(baseName.toLowerCase(), { route: fullPath, guards: mergedGuards });
-        routeMap.set(normalizedName.toLowerCase(), { route: fullPath, guards: mergedGuards });
+        const lowerBase = baseName.toLowerCase();
+        const routeEntry = { route: fullPath, guards: mergedGuards };
+        routeMap.set(lowerBase, routeEntry);
+        routeMap.set(normalizedName.toLowerCase(), routeEntry);
         const pascalToKebab = baseName.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
-        if (pascalToKebab !== baseName.toLowerCase()) {
-          routeMap.set(pascalToKebab, { route: fullPath, guards: mergedGuards });
+        if (pascalToKebab !== lowerBase) {
+          routeMap.set(pascalToKebab, routeEntry);
+        }
+        const noHyphens = lowerBase.replace(/[-_]/g, "");
+        if (noHyphens !== lowerBase) {
+          routeMap.set(noHyphens, routeEntry);
+        }
+        const withSpaces = baseName.replace(/[-_]/g, " ").toLowerCase();
+        if (withSpaces !== lowerBase) {
+          routeMap.set(withSpaces, routeEntry);
         }
       }
 
@@ -5985,13 +6214,16 @@ export function analyzeFrontend(
     let routeEnriched = 0;
     for (const interaction of interactions) {
       const componentName = interaction.component.toLowerCase();
-      let matched = routeMap.get(componentName);
+      const componentNameNoSpaces = componentName.replace(/\s+/g, "");
+      let matched = routeMap.get(componentName) || routeMap.get(componentNameNoSpaces);
       if (!matched) {
         const fileName = interaction.sourceFile
           .split("/").pop()
           ?.replace(/\.(vue|tsx|jsx|ts|js)$/, "")
           ?.toLowerCase();
-        if (fileName) matched = routeMap.get(fileName);
+        if (fileName) {
+          matched = routeMap.get(fileName) || routeMap.get(fileName.replace(/[-_]/g, ""));
+        }
       }
       if (!matched) {
         const pathParts = interaction.sourceFile.replace(/\\/g, "/").split("/");
@@ -6006,18 +6238,23 @@ export function analyzeFrontend(
           }
         }
       }
-      if (!matched && componentName.length >= 5) {
+      if (!matched && componentNameNoSpaces.length >= 4) {
         for (const [key, val] of Array.from(routeMap)) {
-          if (key === componentName) continue;
-          if (key.length < 5) continue;
-          if (key === componentName.replace(/page$/i, "") || key === componentName.replace(/view$/i, "") || key === componentName.replace(/screen$/i, "")) {
+          if (key === componentNameNoSpaces) continue;
+          if (key.length < 4) continue;
+          const keyNoSep = key.replace(/[-_\s]/g, "");
+          if (keyNoSep === componentNameNoSpaces) {
             matched = val;
             break;
           }
-          if (componentName === key.replace(/page$/i, "") || componentName === key.replace(/view$/i, "") || componentName === key.replace(/screen$/i, "")) {
-            matched = val;
-            break;
+          const suffixes = [/page$/i, /view$/i, /screen$/i, /component$/i, /container$/i];
+          for (const suffix of suffixes) {
+            if (keyNoSep === componentNameNoSpaces.replace(suffix, "") || componentNameNoSpaces === keyNoSep.replace(suffix, "")) {
+              matched = val;
+              break;
+            }
           }
+          if (matched) break;
         }
       }
       if (matched) {
@@ -6081,6 +6318,39 @@ export function analyzeFrontend(
   const bridges = interactions.filter(i => i.interactionCategory === "SERVICE_BRIDGE");
   const externals = interactions.filter(i => i.interactionCategory === "EXTERNAL_SERVICE");
   console.log(`[frontend-analyzer] Results: ${interactions.length} interactions, ${withUrls.length} with URLs (${withoutUrls.length} without), ${matched.length} matched to backend, ${bridges.length} service bridges, ${externals.length} external services`);
+
+  const tierCounts = new Map<string, number>();
+  for (const i of interactions) {
+    const tier = i.resolutionTier || "unresolved";
+    tierCounts.set(tier, (tierCounts.get(tier) || 0) + 1);
+  }
+  const tierEntries = Array.from(tierCounts.entries()).sort((a, b) => b[1] - a[1]);
+  console.log(`[frontend-analyzer] Resolution tier distribution:`);
+  for (const [tier, count] of tierEntries) {
+    console.log(`[frontend-analyzer]   ${tier}: ${count} (${((count / interactions.length) * 100).toFixed(1)}%)`);
+  }
+
+  if (withoutUrls.length > 0 && withoutUrls.length <= 20) {
+    console.log(`[frontend-analyzer] Unresolved handlers:`);
+    for (const i of withoutUrls) {
+      console.log(`[frontend-analyzer]   ${i.sourceFile} :: ${i.actionName} (${i.elementType})`);
+    }
+  } else if (withoutUrls.length > 20) {
+    const unresolvedByFile = new Map<string, number>();
+    for (const i of withoutUrls) {
+      unresolvedByFile.set(i.sourceFile, (unresolvedByFile.get(i.sourceFile) || 0) + 1);
+    }
+    const topFiles = Array.from(unresolvedByFile.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    console.log(`[frontend-analyzer] Top files with unresolved handlers (${withoutUrls.length} total):`);
+    for (const [file, count] of topFiles) {
+      console.log(`[frontend-analyzer]   ${file}: ${count} unresolved`);
+    }
+  }
+
+  const withRoutes = interactions.filter(i => i.frontendRoute);
+  const withGuards = interactions.filter(i => i.routeGuards && i.routeGuards.length > 0);
+  const withRoles = interactions.filter(i => i.detectedRoles && i.detectedRoles.length > 0);
+  console.log(`[frontend-analyzer] Enrichment: ${withRoutes.length} with routes, ${withGuards.length} with guards, ${withRoles.length} with detected roles`);
 
   return interactions;
 }
