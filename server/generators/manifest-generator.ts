@@ -14,6 +14,7 @@ interface ManifestEndpoint {
   sensitiveFieldsAccessed: string[];
   criticalityScore: number;
   technicalOperation: string;
+  dataSource: Record<string, "extracted" | "inferred">;
 }
 
 interface ManifestScreen {
@@ -29,6 +30,7 @@ interface ManifestScreen {
     criticalityScore: number;
     confidence: number;
     resolutionPath: { tier: string; file: string; function: string | null; detail: string | null }[];
+    dataSource: Record<string, "extracted" | "inferred">;
   }[];
 }
 
@@ -84,6 +86,11 @@ export interface PermaCatManifest {
     entityCoverage: number;
     controllerCoverage: number;
     overallScore: number;
+    dataProvenance: {
+      fieldsWithData: Record<string, { total: number; extracted: number; inferred: number }>;
+      overallExtractedPct: number;
+      overallInferredPct: number;
+    };
     interactionBreakdown: {
       total: number;
       withEndpoint: number;
@@ -118,6 +125,7 @@ export function generateManifest(project: Project, entries: CatalogEntry[]): Per
           sensitiveFieldsAccessed: [],
           criticalityScore: entry.criticalityScore || 0,
           technicalOperation: entry.technicalOperation || "UNKNOWN",
+          dataSource: (entry.dataSource as Record<string, "extracted" | "inferred">) || {},
         });
       }
       const ep = endpointMap.get(key)!;
@@ -160,6 +168,7 @@ export function generateManifest(project: Project, entries: CatalogEntry[]): Per
       criticalityScore: entry.criticalityScore || 0,
       confidence: entry.confidence || 0,
       resolutionPath: (entry.resolutionPath as any[]) || [],
+      dataSource: (entry.dataSource as Record<string, "extracted" | "inferred">) || {},
     });
 
     const roles = (entry.requiredRoles as string[]) || [];
@@ -317,7 +326,46 @@ export function generateManifest(project: Project, entries: CatalogEntry[]): Per
         httpRelevant: httpRelevantEntries.length,
         httpRelevantResolved: httpRelevantWithEndpoint,
       },
+      dataProvenance: computeDataProvenance(entries),
     },
+  };
+}
+
+function computeDataProvenance(entries: CatalogEntry[]): {
+  fieldsWithData: Record<string, { total: number; extracted: number; inferred: number }>;
+  overallExtractedPct: number;
+  overallInferredPct: number;
+} {
+  const fields = ["endpoint", "httpMethod", "controllerClass", "entitiesTouched", "requiredRoles", "securityAnnotations", "frontendRoute", "routeGuards"];
+  const result: Record<string, { total: number; extracted: number; inferred: number }> = {};
+  for (const field of fields) {
+    result[field] = { total: 0, extracted: 0, inferred: 0 };
+  }
+  let totalExtracted = 0;
+  let totalInferred = 0;
+  let totalPopulated = 0;
+
+  for (const entry of entries) {
+    const ds = (entry.dataSource as Record<string, "extracted" | "inferred">) || {};
+    for (const field of fields) {
+      if (ds[field]) {
+        result[field].total++;
+        if (ds[field] === "extracted") {
+          result[field].extracted++;
+          totalExtracted++;
+        } else {
+          result[field].inferred++;
+          totalInferred++;
+        }
+        totalPopulated++;
+      }
+    }
+  }
+
+  return {
+    fieldsWithData: result,
+    overallExtractedPct: totalPopulated > 0 ? Math.round((totalExtracted / totalPopulated) * 100) : 0,
+    overallInferredPct: totalPopulated > 0 ? Math.round((totalInferred / totalPopulated) * 100) : 0,
   };
 }
 

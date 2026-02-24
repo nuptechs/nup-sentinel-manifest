@@ -135,6 +135,7 @@ export const catalogEntries = pgTable("catalog_entries", {
   routeGuards: jsonb("route_guards").$type<string[]>().default([]),
   duplicateCount: integer("duplicate_count").default(1),
   operationHint: text("operation_hint"),
+  dataSource: jsonb("data_source").$type<Record<string, "extracted" | "inferred">>().default({}),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

@@ -275,8 +275,36 @@ export function endpointImpactsToCatalogEntries(
       routeGuards: [],
       duplicateCount: 1,
       operationHint: null,
+      dataSource: {
+        endpoint: "extracted" as const,
+        httpMethod: "extracted" as const,
+        controllerClass: "extracted" as const,
+        ...(impact.entitiesTouched.length > 0 ? { entitiesTouched: "extracted" as const } : {}),
+        ...(requiredRoles.length > 0 ? { requiredRoles: "extracted" as const } : {}),
+        ...(securityAnns.length > 0 ? { securityAnnotations: "extracted" as const } : {}),
+      },
     };
   });
+}
+
+function buildExtractedDataSource(
+  interaction: FrontendInteraction,
+  controllerClass: string | null,
+  entitiesTouched: string[],
+  requiredRoles: string[],
+  securityAnnotations: SecurityAnnotationMeta[]
+): Record<string, "extracted" | "inferred"> {
+  const ds: Record<string, "extracted" | "inferred"> = {};
+  if (interaction.url) ds.endpoint = "extracted";
+  if (interaction.httpMethod) ds.httpMethod = "extracted";
+  if (controllerClass) ds.controllerClass = "extracted";
+  if (entitiesTouched.length > 0) ds.entitiesTouched = "extracted";
+  if (requiredRoles.length > 0) ds.requiredRoles = "extracted";
+  if (securityAnnotations.length > 0) ds.securityAnnotations = "extracted";
+  if (interaction.frontendRoute) ds.frontendRoute = "extracted";
+  if (interaction.routeGuards && interaction.routeGuards.length > 0) ds.routeGuards = "extracted";
+  if (interaction.detectedRoles && interaction.detectedRoles.length > 0) ds.detectedRoles = "extracted";
+  return ds;
 }
 
 export function interactionsToCatalogEntries(
@@ -390,6 +418,7 @@ export function interactionsToCatalogEntries(
       routeGuards: interaction.routeGuards || [],
       duplicateCount: 1,
       operationHint: interaction.operationHint || null,
+      dataSource: buildExtractedDataSource(interaction, controllerClass, entitiesTouched, requiredRoles, securityAnns),
     };
   });
 

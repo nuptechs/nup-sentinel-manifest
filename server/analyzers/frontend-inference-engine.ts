@@ -163,12 +163,14 @@ export function enrichCatalogEntriesWithInference(entries: InsertCatalogEntry[])
     const annotations = inferSecurityAnnotations(entry.endpoint, entry.httpMethod || null, mergedRoles);
     const existingAnnotations = entry.securityAnnotations as Array<{ type: string; expression: string; roles: string[] }> || [];
 
-    if (controller) entry.controllerClass = controller;
-    if (entities.length > 0) entry.entitiesTouched = entities;
-    if (persistenceOps.length > 0) entry.persistenceOperations = persistenceOps;
-    if (mergedRoles.length > 0) entry.requiredRoles = mergedRoles;
-    if (annotations.length > 0) entry.securityAnnotations = [...existingAnnotations, ...annotations];
-    if (sensitive.length > 0) entry.sensitiveFieldsAccessed = sensitive;
+    const ds = (entry.dataSource as Record<string, "extracted" | "inferred">) || {};
+    if (controller) { entry.controllerClass = controller; ds.controllerClass = ds.controllerClass || "inferred"; }
+    if (entities.length > 0) { entry.entitiesTouched = entities; ds.entitiesTouched = ds.entitiesTouched || "inferred"; }
+    if (persistenceOps.length > 0) { entry.persistenceOperations = persistenceOps; ds.persistenceOperations = ds.persistenceOperations || "inferred"; }
+    if (mergedRoles.length > 0) { entry.requiredRoles = mergedRoles; ds.requiredRoles = ds.requiredRoles || "inferred"; }
+    if (annotations.length > 0) { entry.securityAnnotations = [...existingAnnotations, ...annotations]; ds.securityAnnotations = ds.securityAnnotations || "inferred"; }
+    if (sensitive.length > 0) { entry.sensitiveFieldsAccessed = sensitive; ds.sensitiveFieldsAccessed = ds.sensitiveFieldsAccessed || "inferred"; }
+    entry.dataSource = ds;
 
     enrichedCount++;
   }
