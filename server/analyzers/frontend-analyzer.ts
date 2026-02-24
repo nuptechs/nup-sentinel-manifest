@@ -463,6 +463,9 @@ class ScriptSymbolTable {
         const targetNode = this.nameIndex.get(expr.name.text);
         return targetNode || null;
       }
+      const methodName = expr.name.text;
+      const methodNode = this.nameIndex.get(methodName);
+      if (methodNode) return methodNode;
     }
     return null;
   }
@@ -5001,26 +5004,41 @@ function resolveHandlerHttpCalls(
     if (handlerNodeFuzzy) {
       const declFuzzy = symbolTable.getDeclaration(handlerNodeFuzzy);
       if (declFuzzy) {
-        for (const calledNode of declFuzzy.calledNodes) {
-          const calledDecl = symbolTable.getDeclaration(calledNode);
-          if (calledDecl && calledDecl.name.length >= 5 && !FUZZY_COMMON_NAMES.has(calledDecl.name.toLowerCase())) {
-            const candidates: { gNode: any; calls: any[] }[] = [];
-            for (const [, gNode] of Array.from(globalCallGraph)) {
-              if (gNode.functionName === calledDecl.name || gNode.functionName.endsWith("." + calledDecl.name)) {
-                const calls = gNode.propagatedHttpCalls || (gNode.httpCalls.length > 0 ? gNode.httpCalls : null);
-                if (calls && calls.length > 0) {
-                  candidates.push({ gNode, calls });
+        const visitedFuzzy = new Set<ts.Node>();
+        const fuzzyQueue = [...declFuzzy.calledNodes];
+        let fuzzyDepth = 0;
+        while (fuzzyQueue.length > 0 && fuzzyDepth < 3) {
+          const batch = [...fuzzyQueue];
+          fuzzyQueue.length = 0;
+          for (const calledNode of batch) {
+            if (visitedFuzzy.has(calledNode)) continue;
+            visitedFuzzy.add(calledNode);
+            const calledDecl = symbolTable.getDeclaration(calledNode);
+            if (calledDecl) {
+              if (calledDecl.name.length >= 5 && !FUZZY_COMMON_NAMES.has(calledDecl.name.toLowerCase())) {
+                const candidates: { gNode: any; calls: any[] }[] = [];
+                for (const [, gNode] of Array.from(globalCallGraph)) {
+                  if (gNode.functionName === calledDecl.name || gNode.functionName.endsWith("." + calledDecl.name)) {
+                    const calls = gNode.propagatedHttpCalls || (gNode.httpCalls.length > 0 ? gNode.httpCalls : null);
+                    if (calls && calls.length > 0) {
+                      candidates.push({ gNode, calls });
+                    }
+                  }
+                }
+                if (candidates.length === 1) {
+                  const { gNode, calls } = candidates[0];
+                  return tagResolution(calls, "fuzzyGlobalMatch", [
+                    { tier: "local", file: filePath, function: handlerName, detail: "handler entry point" + (fuzzyDepth > 0 ? ` (depth ${fuzzyDepth + 1})` : "") },
+                    { tier: "fuzzyGlobalMatch", file: gNode.filePath, function: gNode.functionName, detail: "unique function name match across project" }
+                  ]);
                 }
               }
-            }
-            if (candidates.length === 1) {
-              const { gNode, calls } = candidates[0];
-              return tagResolution(calls, "fuzzyGlobalMatch", [
-                { tier: "local", file: filePath, function: handlerName, detail: "handler entry point" },
-                { tier: "fuzzyGlobalMatch", file: gNode.filePath, function: gNode.functionName, detail: "unique function name match across project" }
-              ]);
+              for (const nextNode of calledDecl.calledNodes) {
+                fuzzyQueue.push(nextNode);
+              }
             }
           }
+          fuzzyDepth++;
         }
       }
     }
@@ -5096,28 +5114,41 @@ function resolveHandlerHttpCalls(
     if (handlerNode2) {
       const decl = symbolTable.getDeclaration(handlerNode2);
       if (decl) {
-        for (const calledNode of decl.calledNodes) {
-          const calledDecl = symbolTable.getDeclaration(calledNode);
-          if (calledDecl) {
-            const calledName = calledDecl.name;
-            for (const [smPath, smEntry] of Array.from(serviceMap)) {
-              if (smPath === filePath) continue;
-              const methodEntry = smEntry.methods.get(calledName) || smEntry.methods.get("default." + calledName);
-              if (methodEntry && methodEntry.httpCalls.length > 0) {
-                return tagResolution(methodEntry.httpCalls, "serviceMapBroadSearch", [
-                  { tier: "local", file: filePath, function: handlerName, detail: "handler calls " + calledName },
-                  { tier: "serviceMapBroadSearch", file: smPath, function: calledName, detail: "broad serviceMap method name match" }
-                ]);
+        const visited = new Set<ts.Node>();
+        const queue = [...decl.calledNodes];
+        let depth = 0;
+        while (queue.length > 0 && depth < 3) {
+          const batch = [...queue];
+          queue.length = 0;
+          for (const calledNode of batch) {
+            if (visited.has(calledNode)) continue;
+            visited.add(calledNode);
+            const calledDecl = symbolTable.getDeclaration(calledNode);
+            if (calledDecl) {
+              const calledName = calledDecl.name;
+              for (const [smPath, smEntry] of Array.from(serviceMap)) {
+                if (smPath === filePath) continue;
+                const methodEntry = smEntry.methods.get(calledName) || smEntry.methods.get("default." + calledName);
+                if (methodEntry && methodEntry.httpCalls.length > 0) {
+                  return tagResolution(methodEntry.httpCalls, "serviceMapBroadSearch", [
+                    { tier: "local", file: filePath, function: handlerName, detail: "handler calls " + calledName + (depth > 0 ? ` (depth ${depth + 1})` : "") },
+                    { tier: "serviceMapBroadSearch", file: smPath, function: calledName, detail: "broad serviceMap method name match" }
+                  ]);
+                }
+                const fnCalls = smEntry.directFunctions.get(calledName);
+                if (fnCalls && fnCalls.length > 0) {
+                  return tagResolution(fnCalls, "serviceMapBroadSearch", [
+                    { tier: "local", file: filePath, function: handlerName, detail: "handler calls " + calledName + (depth > 0 ? ` (depth ${depth + 1})` : "") },
+                    { tier: "serviceMapBroadSearch", file: smPath, function: calledName, detail: "broad serviceMap function name match" }
+                  ]);
+                }
               }
-              const fnCalls = smEntry.directFunctions.get(calledName);
-              if (fnCalls && fnCalls.length > 0) {
-                return tagResolution(fnCalls, "serviceMapBroadSearch", [
-                  { tier: "local", file: filePath, function: handlerName, detail: "handler calls " + calledName },
-                  { tier: "serviceMapBroadSearch", file: smPath, function: calledName, detail: "broad serviceMap function name match" }
-                ]);
+              for (const nextNode of calledDecl.calledNodes) {
+                queue.push(nextNode);
               }
             }
           }
+          depth++;
         }
       }
     }

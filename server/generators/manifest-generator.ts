@@ -237,12 +237,29 @@ export function generateManifest(project: Project, entries: CatalogEntry[]): Per
   });
 
   const UI_STATE_SETTER = /^set[A-Z]/;
-  const UI_ONLY_EXACT = new Set(["stopPropagation", "preventDefault", "onChange", "onClose", "onBlur", "onFocus", "cancelSelection", "formatDate", "getSortIcon"]);
+  const UI_ONLY_EXACT = new Set([
+    "stopPropagation", "preventDefault", "onChange", "onClose", "onBlur", "onFocus",
+    "cancelSelection", "formatDate", "getSortIcon", "onCancel", "handleCancel",
+    "copyToClipboard", "copyJsonToClipboard", "toggleRegistration", "handleDismiss",
+    "handlePrev", "handleNext", "handleSkip", "handleSort", "handleReset",
+    "handleCapture", "startCamera", "exportToCSV", "onBackToLogin",
+    "toggleExtractedFields", "handleDataManagerOpen", "handleCancelEdit",
+    "handleSelectAllProcesses", "onClick",
+  ]);
+  const UI_ONLY_PATTERNS = [
+    /^toggle[A-Z]/,
+    /^on(Close|Cancel|Blur|Focus|Back|Dismiss)/,
+    /^copy\w*ToClipboard$/,
+    /^(show|hide|open|close)[A-Z]/,
+    /^handle(Cancel|Close|Dismiss|Back|Reset|Clear|Toggle)$/,
+  ];
   const isUiOnly = (entry: CatalogEntry): boolean => {
     if (entry.endpoint) return false;
+    if (entry.interactionCategory === "UI_ONLY" || entry.interactionCategory === "STATE_ONLY") return true;
     const handlerName = entry.interaction.replace(/^(button|input|element|link): /, "");
     if (UI_STATE_SETTER.test(handlerName)) return true;
     if (UI_ONLY_EXACT.has(handlerName)) return true;
+    if (UI_ONLY_PATTERNS.some(p => p.test(handlerName))) return true;
     return false;
   };
   const httpRelevantEntries = entries.filter(e => !isUiOnly(e));
