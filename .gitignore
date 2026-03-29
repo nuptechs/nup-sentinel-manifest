@@ -4,3 +4,16 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+
+# Java build artifacts
+target/
+*.class
+*.jar
+
+# Runtime / AI agent state
+.local/
+.agent_state_*
+session_plan.md
+*.db
+*.db-shm
+*.db-wal
