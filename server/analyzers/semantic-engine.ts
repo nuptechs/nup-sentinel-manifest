@@ -71,7 +71,7 @@ Respond ONLY with valid JSON array of objects with fields: index, technicalOpera
 
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-5-mini",
+      model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
       max_completion_tokens: 4096,
     });
