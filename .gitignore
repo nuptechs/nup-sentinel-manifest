@@ -17,3 +17,5 @@ session_plan.md
 *.db
 *.db-shm
 *.db-wal
+.env
+.env.*
