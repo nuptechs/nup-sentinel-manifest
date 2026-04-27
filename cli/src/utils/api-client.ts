@@ -7,7 +7,7 @@ export interface AnalyzeFile {
   content: string;
 }
 
-export class PermaCatClient {
+export class ManifestClient {
   private serverUrl: string;
   private apiKey: string;
 

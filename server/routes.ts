@@ -24,7 +24,7 @@ const upload = multer({
   storage: multer.diskStorage({
     destination: os.tmpdir(),
     filename: (_req, file, cb) => {
-      const uniqueName = `permacat-upload-${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(file.originalname)}`;
+      const uniqueName = `nup-manifest-upload-${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(file.originalname)}`;
       cb(null, uniqueName);
     },
   }),
@@ -35,7 +35,7 @@ const chunkUpload = multer({
   storage: multer.diskStorage({
     destination: os.tmpdir(),
     filename: (_req, _file, cb) => {
-      const uniqueName = `permacat-chunk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const uniqueName = `nup-manifest-chunk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       cb(null, uniqueName);
     },
   }),
@@ -343,7 +343,7 @@ export async function registerRoutes(
 
   app.get("/api/docs", async (_req, res) => {
     res.send(`<!DOCTYPE html>
-<html><head><title>PermaCat API Documentation</title>
+<html><head><title>Manifest API Documentation</title>
 <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@scalar/api-reference@latest/dist/style.css">
 </head><body>
@@ -489,7 +489,7 @@ export async function registerRoutes(
       }
       const { fileName, totalSize, totalChunks, projectName, projectDescription } = parsed.data;
       const uploadId = crypto.randomUUID();
-      const tempFilePath = path.join(os.tmpdir(), `permacat-chunked-${uploadId}.zip`);
+      const tempFilePath = path.join(os.tmpdir(), `nup-manifest-chunked-${uploadId}.zip`);
       const fd = fs.openSync(tempFilePath, "w");
       fs.closeSync(fd);
 

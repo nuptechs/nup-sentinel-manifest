@@ -2,10 +2,10 @@ export function getOpenAPISpec() {
   return {
     openapi: "3.0.3",
     info: {
-      title: "PermaCat API",
+      title: "Manifest API",
       version: "1.0.0",
       description: "Code-to-Permission Catalog Generator API. Analyze frontend (Vue/React/Angular) and Spring Boot backend source code to automatically generate Technical Action Catalogs for IAM systems.",
-      contact: { name: "PermaCat" },
+      contact: { name: "Manifest" },
     },
     servers: [
       { url: "/", description: "Current server" },

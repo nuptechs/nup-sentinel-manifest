@@ -1,4 +1,4 @@
-import type { PermaCatManifest } from "../generators/manifest-generator";
+import type { ManifestData } from "../generators/manifest-generator";
 
 export interface EndpointChange {
   path: string;
@@ -108,7 +108,7 @@ function epSnapshot(ep: any) {
   };
 }
 
-function diffEndpoints(a: PermaCatManifest, b: PermaCatManifest): EndpointChange[] {
+function diffEndpoints(a: ManifestData, b: ManifestData): EndpointChange[] {
   const changes: EndpointChange[] = [];
   const aMap = new Map<string, (typeof a.endpoints)[0]>();
   const bMap = new Map<string, (typeof b.endpoints)[0]>();
@@ -161,7 +161,7 @@ function diffEndpoints(a: PermaCatManifest, b: PermaCatManifest): EndpointChange
   return changes;
 }
 
-function diffScreens(a: PermaCatManifest, b: PermaCatManifest): ScreenChange[] {
+function diffScreens(a: ManifestData, b: ManifestData): ScreenChange[] {
   const changes: ScreenChange[] = [];
   const aMap = new Map<string, (typeof a.screens)[0]>();
   const bMap = new Map<string, (typeof b.screens)[0]>();
@@ -211,7 +211,7 @@ function diffScreens(a: PermaCatManifest, b: PermaCatManifest): ScreenChange[] {
   return changes;
 }
 
-function diffRoles(a: PermaCatManifest, b: PermaCatManifest): RoleChange[] {
+function diffRoles(a: ManifestData, b: ManifestData): RoleChange[] {
   const changes: RoleChange[] = [];
   const aMap = new Map<string, (typeof a.roles)[0]>();
   const bMap = new Map<string, (typeof b.roles)[0]>();
@@ -245,7 +245,7 @@ function diffRoles(a: PermaCatManifest, b: PermaCatManifest): RoleChange[] {
   return changes;
 }
 
-function diffEntities(a: PermaCatManifest, b: PermaCatManifest): EntityChange[] {
+function diffEntities(a: ManifestData, b: ManifestData): EntityChange[] {
   const changes: EntityChange[] = [];
   const aMap = new Map<string, (typeof a.entities)[0]>();
   const bMap = new Map<string, (typeof b.entities)[0]>();
@@ -279,7 +279,7 @@ function diffEntities(a: PermaCatManifest, b: PermaCatManifest): EntityChange[] 
 }
 
 function computeSecurityImpact(
-  a: PermaCatManifest, b: PermaCatManifest, endpointChanges: EndpointChange[]
+  a: ManifestData, b: ManifestData, endpointChanges: EndpointChange[]
 ): SecurityImpact {
   const newUnprotected: SecurityImpact["newUnprotectedEndpoints"] = [];
   const removedProtections: SecurityImpact["removedProtections"] = [];
@@ -336,8 +336,8 @@ function computeImpactLevel(security: SecurityImpact, endpointChanges: EndpointC
 }
 
 export function diffManifests(
-  manifestA: PermaCatManifest,
-  manifestB: PermaCatManifest,
+  manifestA: ManifestData,
+  manifestB: ManifestData,
   runA: number,
   runB: number
 ): ManifestDiff {

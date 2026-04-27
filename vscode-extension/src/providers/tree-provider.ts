@@ -10,7 +10,7 @@ interface TreeEntry {
   children?: TreeEntry[];
 }
 
-export class PermaCatTreeProvider implements vscode.TreeDataProvider<TreeEntry> {
+export class ManifestTreeProvider implements vscode.TreeDataProvider<TreeEntry> {
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeEntry | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 

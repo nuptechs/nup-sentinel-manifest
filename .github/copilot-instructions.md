@@ -1,4 +1,4 @@
-# Manifest (PermaCat) — AI Agent Guidelines
+# Manifest (Manifest) — AI Agent Guidelines
 
 ## Overview
 

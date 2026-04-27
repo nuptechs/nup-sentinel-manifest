@@ -1,7 +1,7 @@
 {
-  "name": "permacat-cli",
+  "name": "@nuptechs/manifest-cli",
   "version": "0.1.0",
-  "description": "PermaCat CLI - Code-to-Permission Catalog Generator",
+  "description": "Manifest CLI - Code-to-Permission Catalog Generator",
   "bin": {
     "permacat": "./dist/index.js"
   },

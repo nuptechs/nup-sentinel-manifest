@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-export class PermaCatDecorationProvider {
+export class ManifestDecorationProvider {
   private highCriticalityType: vscode.TextEditorDecorationType;
   private mediumCriticalityType: vscode.TextEditorDecorationType;
   private lowCriticalityType: vscode.TextEditorDecorationType;
@@ -132,7 +132,7 @@ export class PermaCatDecorationProvider {
   }
 
   private buildHoverMessage(entry: any): string {
-    const lines: string[] = ["**PermaCat Analysis**", ""];
+    const lines: string[] = ["**Manifest Analysis**", ""];
 
     if (entry.handlerName || entry.handler) {
       lines.push(`**Handler:** \`${entry.handlerName || entry.handler}\``);

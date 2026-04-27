@@ -1,4 +1,4 @@
-import type { PermaCatManifest } from "./manifest-generator";
+import type { ManifestData } from "./manifest-generator";
 
 // =============================================================================
 // NuPIdentity Exporter (Fase 3 — RBAC + ABAC only)
@@ -236,7 +236,7 @@ function mapGuardToAbac(expression: string): GuardMapResult {
 // -----------------------------------------------------------------------------
 
 export function generateNupidentityBundle(
-  manifest: PermaCatManifest,
+  manifest: ManifestData,
   options: NupidentityExportOptions,
 ): NupidentityBundle {
   const warnings: NupidentityBundle["warnings"] = [];
@@ -367,7 +367,7 @@ export function generateNupidentityBundle(
     $schema: SCHEMA_VERSION,
     version: "1.0",
     generatedAt: new Date().toISOString(),
-    generator: { name: "PermaCat NuPIdentity Exporter", version: GENERATOR_VERSION },
+    generator: { name: "Manifest NuPIdentity Exporter", version: GENERATOR_VERSION },
     systemId,
     warnings,
     stats: {

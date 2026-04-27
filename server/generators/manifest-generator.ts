@@ -48,7 +48,7 @@ interface ManifestEntity {
   fieldMetadata: { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[];
 }
 
-export interface PermaCatManifest {
+export interface ManifestData {
   $schema: string;
   version: string;
   generatedAt: string;
@@ -101,7 +101,7 @@ export interface PermaCatManifest {
   };
 }
 
-export function generateManifest(project: Project, entries: CatalogEntry[]): PermaCatManifest {
+export function generateManifest(project: Project, entries: CatalogEntry[]): ManifestData {
   const endpointMap = new Map<string, ManifestEndpoint>();
   const screenMap = new Map<string, ManifestScreen>();
   const roleMap = new Map<string, ManifestRole>();
@@ -289,10 +289,10 @@ export function generateManifest(project: Project, entries: CatalogEntry[]): Per
   );
 
   return {
-    $schema: "https://permacat.dev/schemas/manifest-v1.json",
+    $schema: "https://nuptechs.com/schemas/manifest-v1.json",
     version: "1.0.0",
     generatedAt: new Date().toISOString(),
-    generator: { name: "PermaCat", version: "1.0.0" },
+    generator: { name: "Manifest", version: "1.0.0" },
     project: {
       name: project.name,
       description: project.description || null,

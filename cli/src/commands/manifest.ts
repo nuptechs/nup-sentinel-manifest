@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import * as fs from 'fs';
 import chalk from 'chalk';
 import ora from 'ora';
-import { PermaCatClient } from '../utils/api-client';
+import { ManifestClient } from '../utils/api-client';
 import { loadConfig, mergeConfig } from '../utils/config';
 import { formatManifest, formatJson } from '../utils/output';
 
@@ -16,7 +16,7 @@ export function createManifestCommand(): Command {
       try {
         const globalOpts = command.parent?.opts() || {};
         const config = mergeConfig(globalOpts, loadConfig(globalOpts.config));
-        const client = new PermaCatClient(config.serverUrl, config.apiKey);
+        const client = new ManifestClient(config.serverUrl, config.apiKey);
         const pid = parseInt(projectId, 10);
 
         if (isNaN(pid)) {

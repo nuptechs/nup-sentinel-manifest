@@ -1,4 +1,4 @@
-import type { PermaCatManifest } from "./manifest-generator";
+import type { ManifestData } from "./manifest-generator";
 
 interface OpenAPISpec {
   openapi: string;
@@ -22,7 +22,7 @@ interface OpenAPIOperation {
   operationId: string;
   tags: string[];
   security?: { [key: string]: string[] }[];
-  "x-permacat": {
+  "x-manifest": {
     technicalOperation: string;
     criticalityScore: number;
     entitiesTouched: string[];
@@ -34,7 +34,7 @@ interface OpenAPIOperation {
   responses: Record<string, { description: string }>;
 }
 
-export function generateOpenAPISpec(manifest: PermaCatManifest): OpenAPISpec {
+export function generateOpenAPISpec(manifest: ManifestData): OpenAPISpec {
   const paths: Record<string, Record<string, OpenAPIOperation>> = {};
 
   for (const ep of manifest.endpoints) {
@@ -49,7 +49,7 @@ export function generateOpenAPISpec(manifest: PermaCatManifest): OpenAPISpec {
       summary: buildSummary(ep.technicalOperation, ep.path, ep.controllerMethod),
       operationId,
       tags,
-      "x-permacat": {
+      "x-manifest": {
         technicalOperation: ep.technicalOperation,
         criticalityScore: ep.criticalityScore,
         entitiesTouched: ep.entitiesTouched,
@@ -105,7 +105,7 @@ export function generateOpenAPISpec(manifest: PermaCatManifest): OpenAPISpec {
       type: "object",
       properties,
       ...(required.length > 0 ? { required } : {}),
-      "x-permacat": {
+      "x-manifest": {
         operations: entity.operations,
         sensitiveFields: entity.sensitiveFields,
       },
@@ -126,9 +126,9 @@ export function generateOpenAPISpec(manifest: PermaCatManifest): OpenAPISpec {
     openapi: "3.0.3",
     info: {
       title: `${manifest.project.name} — API Specification`,
-      description: `Auto-generated OpenAPI specification derived from static code analysis by PermaCat.\n\nSecurity Coverage: ${manifest.summary.securityCoverage}% of endpoints have explicit security annotations.\nAverage Criticality: ${manifest.summary.averageCriticality}/100.`,
+      description: `Auto-generated OpenAPI specification derived from static code analysis by Manifest.\n\nSecurity Coverage: ${manifest.summary.securityCoverage}% of endpoints have explicit security annotations.\nAverage Criticality: ${manifest.summary.averageCriticality}/100.`,
       version: manifest.version,
-      "x-generated-by": "PermaCat",
+      "x-generated-by": "Manifest",
       "x-generated-at": manifest.generatedAt,
     },
     paths,

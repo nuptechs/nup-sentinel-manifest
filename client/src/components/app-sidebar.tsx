@@ -35,7 +35,7 @@ export function AppSidebar() {
             <FileSearch className="h-4 w-4 text-primary-foreground" />
           </div>
           <div>
-            <h2 className="text-sm font-semibold tracking-tight">PermaCat</h2>
+            <h2 className="text-sm font-semibold tracking-tight">Manifest</h2>
             <p className="text-xs text-muted-foreground">Code-to-Permission Catalog</p>
           </div>
         </div>

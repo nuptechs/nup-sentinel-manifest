@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import { LocalAnalyzer, Interaction } from "./local-analyzer";
 import { RemoteAnalyzer } from "./remote-analyzer";
-import { PermaCatTreeProvider } from "./providers/tree-provider";
-import { PermaCatDecorationProvider } from "./providers/decoration-provider";
+import { ManifestTreeProvider } from "./providers/tree-provider";
+import { ManifestDecorationProvider } from "./providers/decoration-provider";
 import { CatalogPanel } from "./panels/catalog-panel";
 
 let analysisResults: any = null;
@@ -10,16 +10,16 @@ let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
   const localAnalyzer = new LocalAnalyzer();
-  const treeProvider = new PermaCatTreeProvider();
-  const decorationProvider = new PermaCatDecorationProvider();
+  const treeProvider = new ManifestTreeProvider();
+  const decorationProvider = new ManifestDecorationProvider();
   const catalogPanel = new CatalogPanel(context);
 
-  vscode.window.registerTreeDataProvider("permacat-catalog-tree", treeProvider);
+  vscode.window.registerTreeDataProvider("nup-manifest-catalog-tree", treeProvider);
 
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  statusBarItem.text = "$(shield) PermaCat";
-  statusBarItem.tooltip = "PermaCat - Click to analyze";
-  statusBarItem.command = "permacat.analyzeFile";
+  statusBarItem.text = "$(shield) Manifest";
+  statusBarItem.tooltip = "Manifest - Click to analyze";
+  statusBarItem.command = "nup-manifest.analyzeFile";
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
@@ -32,7 +32,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("permacat.analyzeFile", async () => {
+    vscode.commands.registerCommand("nup-manifest.analyzeFile", async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
         vscode.window.showWarningMessage("No active file to analyze.");
@@ -55,17 +55,17 @@ export function activate(context: vscode.ExtensionContext) {
         decorationProvider.updateDecorations(editor, interactions);
         setStatus("done", interactions.length);
         vscode.window.showInformationMessage(
-          `PermaCat: Found ${interactions.length} interaction(s) in ${filePath.split("/").pop()}`
+          `Manifest: Found ${interactions.length} interaction(s) in ${filePath.split("/").pop()}`
         );
       } catch (err: any) {
         setStatus("error");
-        vscode.window.showErrorMessage(`PermaCat analysis failed: ${err.message}`);
+        vscode.window.showErrorMessage(`Manifest analysis failed: ${err.message}`);
       }
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("permacat.analyzeWorkspace", async () => {
+    vscode.commands.registerCommand("nup-manifest.analyzeWorkspace", async () => {
       const workspaceFolders = vscode.workspace.workspaceFolders;
       if (!workspaceFolders) {
         vscode.window.showWarningMessage("No workspace folder open.");
@@ -100,24 +100,24 @@ export function activate(context: vscode.ExtensionContext) {
 
         setStatus("done", interactions.length);
         vscode.window.showInformationMessage(
-          `PermaCat: Analyzed ${files.length} file(s), found ${interactions.length} interaction(s)`
+          `Manifest: Analyzed ${files.length} file(s), found ${interactions.length} interaction(s)`
         );
       } catch (err: any) {
         setStatus("error");
-        vscode.window.showErrorMessage(`PermaCat workspace analysis failed: ${err.message}`);
+        vscode.window.showErrorMessage(`Manifest workspace analysis failed: ${err.message}`);
       }
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("permacat.analyzeWorkspaceFull", async () => {
-      const config = vscode.workspace.getConfiguration("permacat");
+    vscode.commands.registerCommand("nup-manifest.analyzeWorkspaceFull", async () => {
+      const config = vscode.workspace.getConfiguration("nup-manifest");
       const serverUrl = config.get<string>("serverUrl", "");
       const apiKey = config.get<string>("apiKey", "");
 
       if (!serverUrl) {
         vscode.window.showWarningMessage(
-          "PermaCat server URL not configured. Run 'PermaCat: Connect to Server' first."
+          "Manifest server URL not configured. Run 'Manifest: Connect to Server' first."
         );
         return;
       }
@@ -155,17 +155,17 @@ export function activate(context: vscode.ExtensionContext) {
         const count = analysisResults?.interactions?.length || 0;
         setStatus("done", count);
         vscode.window.showInformationMessage(
-          `PermaCat: Full analysis complete. ${count} interaction(s) found.`
+          `Manifest: Full analysis complete. ${count} interaction(s) found.`
         );
       } catch (err: any) {
         setStatus("error");
-        vscode.window.showErrorMessage(`PermaCat remote analysis failed: ${err.message}`);
+        vscode.window.showErrorMessage(`Manifest remote analysis failed: ${err.message}`);
       }
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("permacat.showCatalog", () => {
+    vscode.commands.registerCommand("nup-manifest.showCatalog", () => {
       if (!analysisResults) {
         vscode.window.showWarningMessage(
           "No analysis results. Run an analysis first."
@@ -177,13 +177,13 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("permacat.connectServer", async () => {
-      const config = vscode.workspace.getConfiguration("permacat");
+    vscode.commands.registerCommand("nup-manifest.connectServer", async () => {
+      const config = vscode.workspace.getConfiguration("nup-manifest");
 
       const serverUrl = await vscode.window.showInputBox({
-        prompt: "Enter PermaCat server URL",
+        prompt: "Enter Manifest server URL",
         value: config.get<string>("serverUrl", ""),
-        placeHolder: "https://your-permacat-server.com",
+        placeHolder: "https://your-manifest-server.com",
       });
 
       if (serverUrl === undefined) return;
@@ -201,13 +201,13 @@ export function activate(context: vscode.ExtensionContext) {
       await config.update("apiKey", apiKey, vscode.ConfigurationTarget.Global);
 
       vscode.window.showInformationMessage(
-        `PermaCat: Connected to ${serverUrl}`
+        `Manifest: Connected to ${serverUrl}`
       );
     })
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("permacat.clearResults", () => {
+    vscode.commands.registerCommand("nup-manifest.clearResults", () => {
       analysisResults = null;
       treeProvider.clear();
 
@@ -217,7 +217,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       setStatus("idle");
-      vscode.window.showInformationMessage("PermaCat: Results cleared.");
+      vscode.window.showInformationMessage("Manifest: Results cleared.");
     })
   );
 
@@ -227,23 +227,23 @@ export function activate(context: vscode.ExtensionContext) {
 function setStatus(state: "idle" | "analyzing" | "uploading" | "done" | "error", count?: number) {
   switch (state) {
     case "idle":
-      statusBarItem.text = "$(shield) PermaCat";
-      statusBarItem.tooltip = "PermaCat - Click to analyze";
+      statusBarItem.text = "$(shield) Manifest";
+      statusBarItem.tooltip = "Manifest - Click to analyze";
       break;
     case "analyzing":
-      statusBarItem.text = "$(loading~spin) PermaCat: Analyzing...";
+      statusBarItem.text = "$(loading~spin) Manifest: Analyzing...";
       statusBarItem.tooltip = "Analysis in progress";
       break;
     case "uploading":
-      statusBarItem.text = "$(cloud-upload) PermaCat: Uploading...";
+      statusBarItem.text = "$(cloud-upload) Manifest: Uploading...";
       statusBarItem.tooltip = "Sending files to server";
       break;
     case "done":
-      statusBarItem.text = `$(shield) PermaCat: ${count || 0} found`;
+      statusBarItem.text = `$(shield) Manifest: ${count || 0} found`;
       statusBarItem.tooltip = `Analysis complete - ${count || 0} interaction(s)`;
       break;
     case "error":
-      statusBarItem.text = "$(error) PermaCat: Error";
+      statusBarItem.text = "$(error) Manifest: Error";
       statusBarItem.tooltip = "Analysis encountered an error";
       break;
   }

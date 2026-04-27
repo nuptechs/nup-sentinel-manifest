@@ -1,21 +1,21 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
-import { PermaCatClient } from '../utils/api-client';
+import { ManifestClient } from '../utils/api-client';
 import { loadConfig, mergeConfig } from '../utils/config';
 
 export function createConnectCommand(): Command {
   const cmd = new Command('connect')
-    .description('Connect a Git repository to a PermaCat project')
+    .description('Connect a Git repository to a Manifest project')
     .argument('<repoUrl>', 'Git repository URL')
     .requiredOption('--provider <provider>', 'Git provider: github or gitlab')
     .requiredOption('--token <token>', 'Git access token')
-    .requiredOption('--project <projectId>', 'PermaCat project ID')
+    .requiredOption('--project <projectId>', 'Manifest project ID')
     .action(async (repoUrl: string, options: any, command: Command) => {
       try {
         const globalOpts = command.parent?.opts() || {};
         const config = mergeConfig(globalOpts, loadConfig(globalOpts.config));
-        const client = new PermaCatClient(config.serverUrl, config.apiKey);
+        const client = new ManifestClient(config.serverUrl, config.apiKey);
         const pid = parseInt(options.project, 10);
 
         if (isNaN(pid)) {

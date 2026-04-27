@@ -13,8 +13,8 @@ export class CatalogPanel {
       this.panel.reveal(vscode.ViewColumn.One);
     } else {
       this.panel = vscode.window.createWebviewPanel(
-        "permacatCatalog",
-        "PermaCat Catalog",
+        "manifestCatalog",
+        "Manifest Catalog",
         vscode.ViewColumn.One,
         {
           enableScripts: true,
@@ -85,7 +85,7 @@ export class CatalogPanel {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PermaCat Catalog</title>
+<title>Manifest Catalog</title>
 <style>
   body {
     font-family: var(--vscode-font-family);
@@ -163,7 +163,7 @@ export class CatalogPanel {
 </style>
 </head>
 <body>
-  <h1>PermaCat Catalog</h1>
+  <h1>Manifest Catalog</h1>
   <div class="summary">
     <div class="stat">
       <div class="stat-value">${totalInteractions}</div>

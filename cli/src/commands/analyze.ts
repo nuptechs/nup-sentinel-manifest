@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import chalk from 'chalk';
 import ora from 'ora';
-import { PermaCatClient, AnalyzeFile } from '../utils/api-client';
+import { ManifestClient, AnalyzeFile } from '../utils/api-client';
 import { loadConfig, mergeConfig } from '../utils/config';
 import { formatTable, formatSummary, formatJson } from '../utils/output';
 
@@ -127,7 +127,7 @@ export function createAnalyzeCommand(): Command {
           spinner.succeed(`Analyzed ${files.length} files locally`);
         } else {
           const config = mergeConfig(globalOpts, loadConfig(globalOpts.config));
-          const client = new PermaCatClient(config.serverUrl, config.apiKey);
+          const client = new ManifestClient(config.serverUrl, config.apiKey);
 
           if (options.zip) {
             const spinner = ora('Uploading and analyzing zip file...').start();

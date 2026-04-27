@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
-import { PermaCatClient } from '../utils/api-client';
+import { ManifestClient } from '../utils/api-client';
 import { loadConfig, mergeConfig } from '../utils/config';
 import { formatTable, formatJson, severityColor } from '../utils/output';
 
@@ -16,7 +16,7 @@ export function createDiffCommand(): Command {
       try {
         const globalOpts = command.parent?.opts() || {};
         const config = mergeConfig(globalOpts, loadConfig(globalOpts.config));
-        const client = new PermaCatClient(config.serverUrl, config.apiKey);
+        const client = new ManifestClient(config.serverUrl, config.apiKey);
         const pid = parseInt(projectId, 10);
 
         if (isNaN(pid)) {

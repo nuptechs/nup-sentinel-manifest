@@ -1,9 +1,9 @@
 {
-  "name": "permacat-vscode",
-  "displayName": "PermaCat - Code Permission Catalog",
+  "name": "nup-manifest-vscode",
+  "displayName": "Manifest - Code Permission Catalog",
   "description": "Analyze frontend-to-backend interactions, generate permission catalogs, and detect security gaps directly from VS Code.",
   "version": "0.1.0",
-  "publisher": "permacat",
+  "publisher": "nuptechs",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -18,59 +18,59 @@
   "contributes": {
     "commands": [
       {
-        "command": "permacat.analyzeFile",
-        "title": "PermaCat: Analyze Current File"
+        "command": "nup-manifest.analyzeFile",
+        "title": "Manifest: Analyze Current File"
       },
       {
-        "command": "permacat.analyzeWorkspace",
-        "title": "PermaCat: Analyze Workspace (Local)"
+        "command": "nup-manifest.analyzeWorkspace",
+        "title": "Manifest: Analyze Workspace (Local)"
       },
       {
-        "command": "permacat.analyzeWorkspaceFull",
-        "title": "PermaCat: Analyze Workspace (Full Remote)"
+        "command": "nup-manifest.analyzeWorkspaceFull",
+        "title": "Manifest: Analyze Workspace (Full Remote)"
       },
       {
-        "command": "permacat.showCatalog",
-        "title": "PermaCat: Show Catalog"
+        "command": "nup-manifest.showCatalog",
+        "title": "Manifest: Show Catalog"
       },
       {
-        "command": "permacat.connectServer",
-        "title": "PermaCat: Connect to Server"
+        "command": "nup-manifest.connectServer",
+        "title": "Manifest: Connect to Server"
       },
       {
-        "command": "permacat.clearResults",
-        "title": "PermaCat: Clear Results"
+        "command": "nup-manifest.clearResults",
+        "title": "Manifest: Clear Results"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "permacat-explorer",
-          "title": "PermaCat",
+          "id": "nup-manifest-explorer",
+          "title": "Manifest",
           "icon": "$(shield)"
         }
       ]
     },
     "views": {
-      "permacat-explorer": [
+      "nup-manifest-explorer": [
         {
-          "id": "permacat-catalog-tree",
+          "id": "nup-manifest-catalog-tree",
           "name": "Catalog"
         }
       ]
     },
     "configuration": {
-      "title": "PermaCat",
+      "title": "Manifest",
       "properties": {
-        "permacat.serverUrl": {
+        "nup-manifest.serverUrl": {
           "type": "string",
           "default": "",
-          "description": "URL of the PermaCat analysis server"
+          "description": "URL of the Manifest analysis server"
         },
-        "permacat.apiKey": {
+        "nup-manifest.apiKey": {
           "type": "string",
           "default": "",
-          "description": "API key for authenticating with the PermaCat server"
+          "description": "API key for authenticating with the Manifest server"
         }
       }
     }

@@ -1,4 +1,4 @@
-import type { PermaCatManifest } from "./manifest-generator";
+import type { ManifestData } from "./manifest-generator";
 import type { SecurityFindingRecord } from "@shared/schema";
 
 interface KeycloakRole {
@@ -110,7 +110,7 @@ function generateId(prefix: string, name: string): string {
 }
 
 export function generateKeycloakRealm(
-  manifest: PermaCatManifest,
+  manifest: ManifestData,
   securityFindings?: SecurityFindingRecord[]
 ): KeycloakRealmExport {
   const realmName = sanitize(manifest.project.name);
@@ -124,7 +124,7 @@ export function generateKeycloakRealm(
   const realmRoles: KeycloakRole[] = Array.from(roleSet).map((roleName) => ({
     id: generateId("role", roleName),
     name: roleName,
-    description: `Auto-generated role from PermaCat analysis: ${roleName}`,
+    description: `Auto-generated role from Manifest analysis: ${roleName}`,
     composite: false,
     clientRole: false,
     containerId: realmName,
@@ -183,7 +183,7 @@ export function generateKeycloakRealm(
   const client: KeycloakClient = {
     clientId,
     name: manifest.project.name,
-    description: `Auto-generated client for ${manifest.project.name} by PermaCat`,
+    description: `Auto-generated client for ${manifest.project.name} by Manifest`,
     enabled: true,
     bearerOnly: false,
     consentRequired: false,

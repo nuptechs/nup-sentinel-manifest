@@ -1,12 +1,12 @@
-import type { PermaCatManifest } from "./manifest-generator";
+import type { ManifestData } from "./manifest-generator";
 
 export interface OpaBundle {
   policies: { path: string; content: string }[];
   data: object;
 }
 
-export function generateOpaRego(manifest: PermaCatManifest): { policy: string; bundle: OpaBundle } {
-  const packageName = `permacat.${sanitizeName(manifest.project.name)}`;
+export function generateOpaRego(manifest: ManifestData): { policy: string; bundle: OpaBundle } {
+  const packageName = `manifest.${sanitizeName(manifest.project.name)}`;
   const lines: string[] = [];
 
   lines.push(`package ${packageName}`);
