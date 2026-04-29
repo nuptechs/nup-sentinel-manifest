@@ -1,5 +1,5 @@
 {
-  "name": "@nuptechs/manifest-cli",
+  "name": "@nuptechs/sentinel-manifest-cli",
   "version": "0.1.0",
   "description": "Manifest CLI - Code-to-Permission Catalog Generator",
   "bin": {

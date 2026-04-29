@@ -1,5 +1,5 @@
 {
-  "name": "@nuptechs/manifest",
+  "name": "@nuptechs/sentinel-manifest",
   "version": "1.0.0",
   "type": "module",
   "license": "MIT",
@@ -131,5 +131,6 @@
   },
   "optionalDependencies": {
     "bufferutil": "4.1.0"
-  }
+  },
+  "description": "NuP Sentinel Manifest — auth/schema analyzer module of the NuP Sentinel platform."
 }
