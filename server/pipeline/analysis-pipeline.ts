@@ -9,6 +9,7 @@ import { computeFileHashes, detectChanges } from "./change-detector";
 import type { FileHash } from "./change-detector";
 import type { InsertCatalogEntry } from "@shared/schema";
 import { analyzeSecurityOmissions, type SecurityFinding, type SecurityCoverageMetrics } from "../security/omission-engine";
+import { emitSecurityFindings } from "../security/sentinel-emitter";
 import { enrichCatalogEntriesWithInference } from "../analyzers/frontend-inference-engine";
 
 export interface FileData {
@@ -195,6 +196,19 @@ export class AnalysisPipeline {
       const criticalCount = securityFindings.filter(f => f.severity === "critical").length;
       const highCount = securityFindings.filter(f => f.severity === "high").length;
       this.progress("Security", `Found ${securityFindings.length} findings (${criticalCount} critical, ${highCount} high). Coverage: ${securityMetrics.coveragePercent}%`);
+
+      const emitResult = await emitSecurityFindings(securityFindings, {
+        manifestProjectId: projectId,
+        analysisRunId: analysisRun.id,
+      });
+      if (emitResult.skipped) {
+        this.progress("Sentinel", `emitter skipped: ${emitResult.reason}`);
+      } else {
+        this.progress(
+          "Sentinel",
+          `emitted ${emitResult.emitted} permission_drift findings (session=${emitResult.sessionId})`
+        );
+      }
 
       const graphSummary = appGraph.toJSON();
       await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData);
