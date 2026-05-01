@@ -212,7 +212,7 @@ export class AnalysisPipeline {
 
       const graphSummary = appGraph.toJSON();
       await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData);
-      await this.saveSnapshot(analysisRun.id, projectId, created);
+      await this.saveSnapshot(analysisRun.id, projectId, created, appGraph);
 
       let cacheStatus = "full analysis";
       if (backendReused && frontendReused) cacheStatus = "fully cached (no changes)";
@@ -309,17 +309,73 @@ export class AnalysisPipeline {
     return storage.createCatalogEntries(entries);
   }
 
-  private async saveSnapshot(analysisRunId: number, projectId: number, entries: any[]) {
+  private async saveSnapshot(
+    analysisRunId: number,
+    projectId: number,
+    entries: any[],
+    appGraph?: any,
+  ) {
     try {
       const project = await storage.getProject(projectId);
       if (!project) return;
       const manifest = generateManifest(project, entries);
+
+      // Capture entities directly from the application graph as a fallback
+      // for downstream consumers (notably Sentinel's Field Death detector).
+      // `manifest.entities` only includes entities reached by some endpoint;
+      // when the analyzer produces ENTITY nodes that no endpoint touches,
+      // they vanish from the catalog. This shadow copy preserves them so
+      // /api/projects/:id/schema-fields can fall back when the curated list
+      // is empty. Additive — never removed entries from the regular
+      // `entities` shape, never breaks legacy consumers.
+      const allEntitiesFromGraph: Array<{
+        name: string;
+        sourceFile?: string;
+        fields: Array<{
+          name: string;
+          type: string;
+          isId: boolean;
+          isSensitive: boolean;
+          validations?: string[];
+        }>;
+      }> = [];
+      if (appGraph && typeof appGraph.getNodesByType === "function") {
+        const entityNodes: any[] = appGraph.getNodesByType("ENTITY");
+        for (const node of entityNodes) {
+          const meta = (node.metadata || {}) as Record<string, unknown>;
+          const enriched = Array.isArray(meta.enrichedFields)
+            ? (meta.enrichedFields as any[])
+            : [];
+          allEntitiesFromGraph.push({
+            name: node.className || String(node.id || "<unknown>"),
+            ...(typeof meta.sourceFile === "string" ? { sourceFile: meta.sourceFile } : {}),
+            fields: enriched.map((f) => ({
+              name: String(f?.name || ""),
+              type: String(f?.type || "unknown"),
+              isId: !!f?.isId,
+              isSensitive: !!f?.isSensitive,
+              ...(Array.isArray(f?.validations) && f.validations.length > 0
+                ? { validations: f.validations }
+                : {}),
+            })),
+          });
+        }
+      }
+
+      const enrichedManifest = {
+        ...manifest,
+        ...(allEntitiesFromGraph.length > 0 ? { allEntitiesFromGraph } : {}),
+      };
+
       await storage.createAnalysisSnapshot({
         analysisRunId,
         projectId,
-        manifestJson: manifest,
+        manifestJson: enrichedManifest,
       });
-      this.progress("Snapshot", `Manifest snapshot saved for run #${analysisRunId}`);
+      this.progress(
+        "Snapshot",
+        `Manifest snapshot saved for run #${analysisRunId} (graphEntities=${allEntitiesFromGraph.length})`,
+      );
     } catch (err) {
       console.error(`[pipeline] Failed to save snapshot: ${err}`);
     }

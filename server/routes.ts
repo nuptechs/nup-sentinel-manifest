@@ -1061,6 +1061,7 @@ export async function registerRoutes(
         isSensitive?: boolean;
         repo?: string;
       }> = [];
+      let source: "manifest" | "graph_fallback" = "manifest";
 
       const repo = (project.gitRepoUrl as string | null) || undefined;
       for (const ent of manifest.entities) {
@@ -1077,10 +1078,59 @@ export async function registerRoutes(
         }
       }
 
+      // Fallback: when manifest.entities is empty (analyzer reported entities
+      // in the graph but no endpoint touched them, so the catalog projection
+      // dropped them), read directly from the graph snapshot persisted by
+      // the pipeline's `saveSnapshot`. Requires a fresh analysis run with
+      // the snapshot writer that emits `allEntitiesFromGraph`.
+      if (schemaFields.length === 0) {
+        try {
+          const runs = await storage.getAnalysisRuns(project.id);
+          const latest = runs.find((r: any) => r.status === "completed") ?? runs[0];
+          if (latest) {
+            const snapshot = await storage.getAnalysisSnapshot(latest.id);
+            const graphEntities = (snapshot?.manifestJson as any)?.allEntitiesFromGraph as
+              | Array<{
+                  name: string;
+                  fields: Array<{
+                    name: string;
+                    type: string;
+                    isId: boolean;
+                    isSensitive: boolean;
+                    validations?: string[];
+                  }>;
+                }>
+              | undefined;
+            if (Array.isArray(graphEntities) && graphEntities.length > 0) {
+              for (const ent of graphEntities) {
+                for (const f of ent.fields || []) {
+                  schemaFields.push({
+                    entity: ent.name,
+                    fieldName: f.name,
+                    kind: "column",
+                    ...(f.type ? { type: f.type } : {}),
+                    ...(f.isId ? { isId: true } : {}),
+                    ...(f.isSensitive ? { isSensitive: true } : {}),
+                    ...(repo ? { repo } : {}),
+                  });
+                }
+              }
+              source = "graph_fallback";
+            }
+          }
+        } catch (err) {
+          console.warn(`[schema-fields] graph fallback failed: ${err}`);
+        }
+      }
+
       return res.json({
         projectId: project.id,
         projectName: project.name,
-        totalEntities: manifest.entities.length,
+        source,
+        totalEntities:
+          source === "manifest"
+            ? manifest.entities.length
+            : new Set(schemaFields.map((f) => f.entity)).size,
         totalFields: schemaFields.length,
         schemaFields,
       });
