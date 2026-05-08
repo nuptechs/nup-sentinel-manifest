@@ -58,6 +58,7 @@ export function extractAndScanZip(zipPathOrBuffer: string | Buffer): ScannedFile
     }
 
     if (!entryPath) continue;
+    if (isHostilePath(entryPath)) { ignoredByDir++; continue; }
     if (isIgnoredPath(entryPath)) { ignoredByDir++; continue; }
 
     const ext = path.extname(entryPath).toLowerCase();
@@ -102,6 +103,19 @@ function findCommonRootFolder(paths: string[]): string {
 function isIgnoredPath(filePath: string): boolean {
   const parts = filePath.split("/");
   return parts.some((part) => IGNORED_DIRS.has(part));
+}
+
+/**
+ * Adversarial guard: reject ZIP entry names that would propagate path
+ * traversal (`..`), absolute paths, or NUL bytes through the analyzer
+ * pipeline. AdmZip itself does not enforce zip-slip; this is the choke
+ * point.
+ */
+function isHostilePath(filePath: string): boolean {
+  if (filePath.includes("\u0000")) return true;
+  if (filePath.startsWith("/")) return true;
+  const parts = filePath.split("/");
+  return parts.some((p) => p === ".." || p === "");
 }
 
 export function getFileType(filePath: string): string {
