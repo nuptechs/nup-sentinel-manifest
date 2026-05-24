@@ -18,6 +18,12 @@ import { generateComplianceReport } from "./generators/compliance-report-generat
 import { generateNupidentityBundle, generateNupidentityRunnerScript } from "./generators/nupidentity-generator";
 import { AnalysisPipeline } from "./pipeline/analysis-pipeline";
 import { apiAuthMiddleware, generateApiKey, hashApiKey } from "./middleware/api-auth";
+import {
+  codelensExtractionSchema,
+  ingestCodelensExtraction,
+  lookupManifest,
+  type LookupType,
+} from "./manifest-lookup";
 import { z } from "zod";
 
 const upload = multer({
@@ -363,6 +369,66 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error fetching security findings:", error);
       res.status(500).json({ message: "Failed to fetch security findings" });
+    }
+  });
+
+  // ─── Codelens extraction ingest + lookup (ADR-044 Onda 1 PR 1.3) ──────────
+  // Codelens (no CI ou local-dev) extrai entidades JPA + páginas Vue +
+  // composables + rotas + i18n keys via AST e POSTa o payload aqui. O
+  // endpoint cria um analysisRun novo e popula 5 tabelas dedicadas pra
+  // lookup ergonômico (consumido pelo MCP server da PR 1.4).
+  app.post("/api/projects/:projectId/codelens-extraction", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+
+      const parsed = codelensExtractionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid payload", issues: parsed.error.format() });
+      }
+
+      const result = await ingestCodelensExtraction(projectId, parsed.data);
+      res.status(201).json(result);
+    } catch (error) {
+      console.error("Error ingesting codelens extraction:", error);
+      const msg = error instanceof Error ? error.message : "Failed to ingest extraction";
+      res.status(500).json({ message: msg });
+    }
+  });
+
+  // Lookup ergonômico — always reads from the latest analysisRun of the project.
+  // ?type=entity|page|composable|route|i18n
+  // ?name=Acceptance (entity/page/composable) | ?path=/contratos (route) | ?key=pages.home (i18n)
+  // ?limit=25 (default 25, max 100)
+  app.get("/api/projects/:projectId/lookup", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+
+      const type = req.query.type as LookupType | undefined;
+      if (!type || !["entity", "page", "composable", "route", "i18n"].includes(type)) {
+        return res.status(400).json({
+          message: "Query 'type' is required and must be one of: entity, page, composable, route, i18n",
+        });
+      }
+
+      const limit = req.query.limit ? Math.min(parseInt(req.query.limit as string), 100) : undefined;
+      const result = await lookupManifest({
+        projectId,
+        type,
+        name: typeof req.query.name === "string" ? req.query.name : undefined,
+        path: typeof req.query.path === "string" ? req.query.path : undefined,
+        key: typeof req.query.key === "string" ? req.query.key : undefined,
+        limit,
+      });
+      res.json(result);
+    } catch (error) {
+      console.error("Error looking up manifest:", error);
+      const msg = error instanceof Error ? error.message : "Failed to look up";
+      res.status(500).json({ message: msg });
     }
   });
 

@@ -217,3 +217,96 @@ export const technicalOperations = [
 ] as const;
 
 export type TechnicalOperation = typeof technicalOperations[number];
+
+// ---------------------------------------------------------------------------
+// Codelens-sourced catálogo (ADR-044 Onda 1 PR 1.3)
+//
+// Tabelas dedicadas a lookup ergonômico ("essa entidade existe? em que
+// arquivo?", "essa rota tem palette?") consumidas pelo MCP server da PR 1.4.
+// Population vem do server/analyzers/codelens-adapter.ts que invoca os
+// extractors AST do Codelens (@nuptechs-sentinel-code/java-parser + lang/vue).
+//
+// Não substitui catalogEntries — esses persistem por analysisRunId, com FK em
+// cascade. Para um snapshot atual basta consultar pela maior analysisRunId.
+// ---------------------------------------------------------------------------
+
+export const manifestEntities = pgTable("manifest_entities", {
+  id: serial("id").primaryKey(),
+  analysisRunId: integer("analysis_run_id").notNull().references(() => analysisRuns.id, { onDelete: "cascade" }),
+  projectId: integer("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  package: text("package").notNull().default(""),
+  tableName: text("table_name"),
+  extendsClass: text("extends_class"),
+  sourcePath: text("source_path").notNull(),
+  fields: jsonb("fields").$type<Array<{ name: string; type: string; column?: string; isId: boolean; relationship?: string; annotations: string[] }>>().default([]),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+export const insertManifestEntitySchema = createInsertSchema(manifestEntities).omit({ id: true, createdAt: true });
+export type ManifestEntity = typeof manifestEntities.$inferSelect;
+export type InsertManifestEntity = z.infer<typeof insertManifestEntitySchema>;
+
+export const manifestPages = pgTable("manifest_pages", {
+  id: serial("id").primaryKey(),
+  analysisRunId: integer("analysis_run_id").notNull().references(() => analysisRuns.id, { onDelete: "cascade" }),
+  projectId: integer("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  sourcePath: text("source_path").notNull(),
+  imports: jsonb("imports").$type<string[]>().default([]),
+  props: jsonb("props").$type<string[]>().default([]),
+  emits: jsonb("emits").$type<string[]>().default([]),
+  composables: jsonb("composables").$type<string[]>().default([]),
+  i18nKeys: jsonb("i18n_keys").$type<string[]>().default([]),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+export const insertManifestPageSchema = createInsertSchema(manifestPages).omit({ id: true, createdAt: true });
+export type ManifestPage = typeof manifestPages.$inferSelect;
+export type InsertManifestPage = z.infer<typeof insertManifestPageSchema>;
+
+export const manifestComposables = pgTable("manifest_composables", {
+  id: serial("id").primaryKey(),
+  analysisRunId: integer("analysis_run_id").notNull().references(() => analysisRuns.id, { onDelete: "cascade" }),
+  projectId: integer("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  sourcePath: text("source_path").notNull(),
+  returns: jsonb("returns").$type<string[]>().default([]),
+  dependencies: jsonb("dependencies").$type<string[]>().default([]),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+export const insertManifestComposableSchema = createInsertSchema(manifestComposables).omit({ id: true, createdAt: true });
+export type ManifestComposable = typeof manifestComposables.$inferSelect;
+export type InsertManifestComposable = z.infer<typeof insertManifestComposableSchema>;
+
+export const manifestRoutes = pgTable("manifest_routes", {
+  id: serial("id").primaryKey(),
+  analysisRunId: integer("analysis_run_id").notNull().references(() => analysisRuns.id, { onDelete: "cascade" }),
+  projectId: integer("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  routePath: text("route_path").notNull(),
+  name: text("name"),
+  component: text("component"),
+  paletteLabel: text("palette_label"),
+  paletteCategory: text("palette_category"),
+  permissions: jsonb("permissions").$type<string[]>().default([]),
+  hasPaletteMeta: boolean("has_palette_meta").notNull().default(false),
+  sourcePath: text("source_path").notNull(),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+export const insertManifestRouteSchema = createInsertSchema(manifestRoutes).omit({ id: true, createdAt: true });
+export type ManifestRoute = typeof manifestRoutes.$inferSelect;
+export type InsertManifestRoute = z.infer<typeof insertManifestRouteSchema>;
+
+export const manifestI18nKeys = pgTable("manifest_i18n_keys", {
+  id: serial("id").primaryKey(),
+  analysisRunId: integer("analysis_run_id").notNull().references(() => analysisRuns.id, { onDelete: "cascade" }),
+  projectId: integer("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  /** Dotted key (e.g. `pages.aIConfig.title`). */
+  key: text("key").notNull(),
+  /** Number of distinct pages that reference this key. */
+  usageCount: integer("usage_count").notNull().default(1),
+  /** Sample of files (capped at 5) for quick triage. */
+  sampleFiles: jsonb("sample_files").$type<string[]>().default([]),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+export const insertManifestI18nKeySchema = createInsertSchema(manifestI18nKeys).omit({ id: true, createdAt: true });
+export type ManifestI18nKey = typeof manifestI18nKeys.$inferSelect;
+export type InsertManifestI18nKey = z.infer<typeof insertManifestI18nKeySchema>;
