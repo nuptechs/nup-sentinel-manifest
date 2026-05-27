@@ -12,6 +12,7 @@
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
     "test": "tsx --test \"tests/**/*.test.ts\"",
+    "test:schemathesis": "bash scripts/schemathesis-local.sh",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
