@@ -23,6 +23,7 @@
  * any Sentinel running.
  */
 import type { SecurityFinding } from "./omission-engine";
+import type { ConsistencyFinding } from "../analyzers/frontend-backend-consistency";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 
@@ -39,7 +40,7 @@ type FindingV2Payload = {
   sessionId: string;
   projectId: string;
   source: "auto_manifest";
-  type: "permission_drift";
+  type: "permission_drift" | "inconsistency";
   severity: "critical" | "high" | "medium" | "low";
   title: string;
   description: string;
@@ -149,7 +150,78 @@ export async function emitSecurityFindings(
   if (findings.length === 0) {
     return { skipped: true, reason: "no findings to emit" };
   }
+  return emitToSentinel(
+    ctx,
+    (sessionId, organizationId) => findings.map((f) => translate(f, ctx, sessionId, organizationId)),
+    "permission_drift"
+  );
+}
 
+/**
+ * Emit a batch of ConsistencyFindings (frontend calls with no matching backend
+ * endpoint) to Sentinel as `inconsistency` findings. Same best-effort contract
+ * and transport as emitSecurityFindings — reuses emitToSentinel.
+ */
+export async function emitConsistencyFindings(
+  findings: ConsistencyFinding[],
+  ctx: EmitContext
+): Promise<EmitResult> {
+  if (findings.length === 0) {
+    return { skipped: true, reason: "no findings to emit" };
+  }
+  return emitToSentinel(
+    ctx,
+    (sessionId, organizationId) =>
+      findings.map((f) => translateConsistency(f, ctx, sessionId, organizationId)),
+    "inconsistency"
+  );
+}
+
+function translateConsistency(
+  f: ConsistencyFinding,
+  ctx: EmitContext,
+  sessionId: string,
+  organizationId: string | undefined
+): FindingV2Payload {
+  const observedAt = new Date().toISOString();
+  const route = `${(f.httpMethod || "ANY").toUpperCase()} ${f.url}`;
+  return {
+    sessionId,
+    projectId: String(ctx.manifestProjectId),
+    source: "auto_manifest",
+    type: "inconsistency",
+    severity: f.severity,
+    title: f.title,
+    description: f.description,
+    subtype: f.subtype,
+    schemaVersion: "2.0.0",
+    evidences: [
+      {
+        source: "auto_manifest",
+        sourceRunId: String(ctx.analysisRunId),
+        observation: `${route} chamado em ${f.sourceFile}:${f.lineNumber} (${f.component}) sem endpoint de backend correspondente`,
+        observedAt,
+      },
+    ],
+    symbolRef: { kind: "route", identifier: route },
+    manifestProjectId: String(ctx.manifestProjectId),
+    manifestRunId: String(ctx.analysisRunId),
+    ...(organizationId ? { organizationId } : {}),
+  };
+}
+
+/**
+ * Shared transport: create a session, build the payloads (with the resolved
+ * sessionId), ingest them as one batch. Best-effort — any failure resolves to
+ * `{ skipped: true }` and never throws, so a Manifest analysis run survives a
+ * Sentinel outage. `buildPayloads` is a callback because each payload needs the
+ * sessionId that only exists after the session is created.
+ */
+async function emitToSentinel(
+  ctx: EmitContext,
+  buildPayloads: (sessionId: string, organizationId: string | undefined) => FindingV2Payload[],
+  label: string
+): Promise<EmitResult> {
   const baseUrl = process.env.SENTINEL_URL?.replace(/\/+$/, "");
   const apiKey = process.env.SENTINEL_API_KEY;
   const projectId = process.env.SENTINEL_PROJECT_ID;
@@ -200,8 +272,8 @@ export async function emitSecurityFindings(
     return { skipped: true, reason: `session create error: ${msg}` };
   }
 
-  // 2. Translate + ingest findings as a single batch.
-  const payloads = findings.map((f) => translate(f, ctx, sessionId, organizationId));
+  // 2. Build + ingest findings as a single batch.
+  const payloads = buildPayloads(sessionId, organizationId);
   try {
     const { status, body } = await fetchJson(`${baseUrl}/api/findings/ingest`, {
       method: "POST",
@@ -230,7 +302,7 @@ export async function emitSecurityFindings(
       );
     }
     console.log(
-      `[sentinel-emitter] emitted ${accepted} permission_drift findings (session=${sessionId}, run=${ctx.analysisRunId})`
+      `[sentinel-emitter] emitted ${accepted} ${label} findings (session=${sessionId}, run=${ctx.analysisRunId})`
     );
     return { skipped: false, sessionId, emitted: accepted, rejected };
   } catch (err) {

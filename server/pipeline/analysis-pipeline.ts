@@ -9,7 +9,8 @@ import { computeFileHashes, detectChanges } from "./change-detector";
 import type { FileHash } from "./change-detector";
 import type { InsertCatalogEntry } from "@shared/schema";
 import { analyzeSecurityOmissions, type SecurityFinding, type SecurityCoverageMetrics } from "../security/omission-engine";
-import { emitSecurityFindings } from "../security/sentinel-emitter";
+import { emitSecurityFindings, emitConsistencyFindings } from "../security/sentinel-emitter";
+import { detectFrontendBackendInconsistencies } from "../analyzers/frontend-backend-consistency";
 import { enrichCatalogEntriesWithInference } from "../analyzers/frontend-inference-engine";
 
 export interface FileData {
@@ -208,6 +209,33 @@ export class AnalysisPipeline {
           "Sentinel",
           `emitted ${emitResult.emitted} permission_drift findings (session=${emitResult.sessionId})`
         );
+      }
+
+      // Frontend↔backend consistency: telas que chamam endpoint inexistente.
+      // Guarda contra falso-positivo: só roda quando HOUVE análise de backend
+      // (sem endpoints, toda chamada HTTP é trivialmente "não-mapeada").
+      if (endpointImpacts.length > 0 && frontendInteractions.length > 0) {
+        const consistencyFindings = detectFrontendBackendInconsistencies(frontendInteractions);
+        this.progress(
+          "Consistency",
+          `${consistencyFindings.length} chamadas de frontend sem endpoint de backend correspondente`
+        );
+        if (consistencyFindings.length > 0) {
+          const consistencyEmit = await emitConsistencyFindings(consistencyFindings, {
+            manifestProjectId: projectId,
+            analysisRunId: analysisRun.id,
+          });
+          if (consistencyEmit.skipped) {
+            this.progress("Sentinel", `inconsistency emitter skipped: ${consistencyEmit.reason}`);
+          } else {
+            this.progress(
+              "Sentinel",
+              `emitted ${consistencyEmit.emitted} inconsistency findings (session=${consistencyEmit.sessionId})`
+            );
+          }
+        }
+      } else {
+        this.progress("Consistency", "pulado: sem cobertura de backend para cruzar");
       }
 
       const graphSummary = appGraph.toJSON();
