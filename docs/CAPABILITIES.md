@@ -13,6 +13,12 @@ monta um grafo de aplicação, cataloga endpoints/permissões/entidades, roda
 detectores de segurança e de consistência, e **emite os achados** para o
 orquestrador central (`nup-sentinel`) como `Finding v2`.
 
+Além da análise, é também uma **plataforma de manifesto**: gera artefatos a partir do
+catálogo (AGENTS.md, OpenAPI, policy-matrix, Keycloak realm, OPA/Rego, bundle NuPIdentity,
+relatório de compliance HTML — §1.4), integra com Git/GitHub/GitLab incluindo webhooks e
+análise de branch/PR (§6), diferencia snapshots pra detectar drift de permissão (§7),
+e expõe tudo via API HTTP (§9), CLI e extensão VS Code.
+
 ---
 
 ## 1. Análise de código
@@ -44,6 +50,22 @@ orquestrador central (`nup-sentinel`) como `Finding v2`.
 | Classificação da interação (HTTP / UI_ONLY / STATE_ONLY / SERVICE_BRIDGE / EXTERNAL_SERVICE) | ✅ | `server/analyzers/frontend-analyzer.ts:60,236,284,301` |
 | Detecção de papéis/guards declarados no frontend (`detectedRoles`, route guards) | ✅ | `server/analyzers/frontend-analyzer.ts:64,405-406` |
 | Enriquecimento de catálogo por inferência (estrutura de backend inferida quando o backend não foi analisado) | ✅ | `server/analyzers/frontend-inference-engine.ts`, chamado em `analysis-pipeline.ts:173` |
+| Grafo global de chamadas do frontend (resolve cadeia fn→fn entre arquivos/imports + propaga "capacidade HTTP") | ✅ | `server/analyzers/frontend/global-call-graph.ts:1` (`buildGlobalCallGraph`/`propagateHttpCapability`), montado em `frontend-analyzer.ts:181` |
+| Grafo de eventos de componente (handler → emit/chamada de serviço) | ✅ | `server/analyzers/frontend/event-graph.ts:1` (`buildComponentEventGraph`), usado em `frontend-analyzer.ts:7` |
+| Grafo de fluxo de estado (store/composable → ação que dispara HTTP) | ✅ | `server/analyzers/frontend/state-flow-graph.ts:1` (`buildStateFlowGraph`), montado em `frontend-analyzer.ts:184` |
+| Grafo de camadas arquiteturais do frontend | ✅ | `server/analyzers/frontend/architectural-layer-graph.ts:1` (`buildArchitecturalLayerGraph`), usado em `frontend-analyzer.ts:27` |
+| Extração de rotas do frontend (Vue Router / React Router / Angular) | ✅ | `server/analyzers/frontend/route-extraction.ts:1` |
+| Tabela de símbolos + resolução de HTTP por arquivo (parsers Babel/TS) | ✅ | `server/analyzers/frontend/symbol-table.ts:1`, `http-resolution.ts:1`, `parsers.ts:1`, `file-analyzers.ts:1` |
+| Detecção de auth no frontend (interceptors/headers/guards) | ✅ | `server/analyzers/frontend/auth-detection.ts:1` |
+
+> Os grafos de evento/estado/camadas/call-graph são módulos grandes e ligados (`frontend-analyzer.ts:181-184` etc.), mas o que **vira catálogo** hoje é a interação HTTP resolvida (§1.2 linha 1). Os demais grafos enriquecem a análise; o consumo direto deles pelo catálogo final é parcial.
+
+### 1.2-bis Classificação semântica das entradas
+
+| Capacidade | Status | Evidência |
+|---|---|---|
+| Classificador **determinístico** das entradas do catálogo (operação técnica / criticidade / significado, por regras) — é o que roda no pipeline | ✅ | `server/analyzers/deterministic-classifier.ts:3` (`classifyEntriesDeterministic`), chamado em `analysis-pipeline.ts:331` |
+| Classificador **semântico via LLM** (OpenAI) — operação técnica, criticalityScore, suggestedMeaning, em batches de 10 | 🟡 | `server/analyzers/semantic-engine.ts:15` (`classifyEntries`). **Não roda no pipeline normal** — só é acionado sob demanda pela rota `POST /api/enrich-with-llm/:projectId` (`routes.ts:1747`); usa `openai` com `AI_INTEGRATIONS_OPENAI_API_KEY`/`_BASE_URL` (`semantic-engine.ts:4-6`) — sem essas envs, falha. Provider é **OpenAI**, não Anthropic. |
 
 ### 1.3 Catálogo & manifesto
 
@@ -52,6 +74,27 @@ orquestrador central (`nup-sentinel`) como `Finding v2`.
 | Geração de catálogo (entries) ligando frontend↔backend + classificação determinística | ✅ | `analysis-pipeline.ts:167-173` (graph-connector + deterministic-classifier) |
 | Snapshot de manifesto por run (entidades + campos, com cópia-sombra das entidades do grafo) | ✅ | `analysis-pipeline.ts:340-409` |
 | Ingestão de catálogo vindo do Codelens (`POST /api/projects/:id/codelens-extraction`) + lookups | ✅ | `server/manifest-lookup.ts:1-30` |
+| Detecção de mudança por hash de arquivo (decide o que reanalisar / invalida cache incremental) | ✅ | `server/pipeline/change-detector.ts:37-48` (`computeFileHashes`/`detectChanges`), usado em `analysis-pipeline.ts:118-162` |
+| Scanner de repositório (extrai/varre ZIP, classifica tipo de arquivo) | ✅ | `server/analyzers/repository-scanner.ts:23,121` |
+
+---
+
+## 1.4 Geradores de artefato (export do manifesto)
+
+Toda a suíte é gerada a partir do manifesto (`generateManifest`, `manifest-generator.ts:1`) e exposta nas rotas
+`POST /api/analyze`, `/api/analyze-zip` e `GET /api/manifest/:projectId?format=...` (`routes.ts:221-266,309-333,1222-1310`).
+O `format` aceita: `manifest` (default), `agents-md`, `openapi`, `policy-matrix`, `keycloak-realm`, `opa-rego`, `nupidentity`, `nupidentity-runner`, `compliance-report`, `all`.
+
+| Gerador | Status | Evidência |
+|---|---|---|
+| Manifesto canônico (entries + entidades/campos) | ✅ | `server/generators/manifest-generator.ts:1` (`generateManifest`) |
+| `AGENTS.md` (catálogo legível por IA) | ✅ | `server/generators/agents-md-generator.ts:1` (`generateAgentsMd`) |
+| OpenAPI spec (JSON) | ✅ | `server/generators/openapi-generator.ts:1` (`generateOpenAPISpec`) |
+| Policy matrix (matriz endpoint × permissão) | ✅ | `server/generators/policy-matrix-generator.ts:1` (`generatePolicyMatrix`) |
+| Keycloak realm export (consome findings de segurança) | ✅ | `server/generators/keycloak-realm-generator.ts:1` (`generateKeycloakRealm`) |
+| OPA / Rego (bundle ou `policy.rego`) | ✅ | `server/generators/opa-rego-generator.ts:1` (`generateOpaRego`) |
+| Bundle NuPIdentity + runner script | ✅ | `server/generators/nupidentity-generator.ts:238,392` (`generateNupidentityBundle`, `generateNupidentityRunnerScript`) |
+| Relatório de compliance (HTML, consome manifesto + findings) | ✅ | `server/generators/compliance-report-generator.ts:1` (`generateComplianceReport`) |
 
 ---
 
@@ -113,14 +156,80 @@ envia ao `nup-sentinel` (cria sessão em `/api/sessions`, ingere em `/api/findin
 | CLI (`@nuptechs/sentinel-manifest-cli`) com `analyze` / `connect` / `diff` / `manifest` | ✅ | `cli/src/commands/` |
 | Seed do banco | 🟡 | `server/seed.ts` cria **apenas** o projeto "Customer Portal (Sample)" (`:566`). Para analisar o EasyNuP (ou outro repo real) é preciso cadastrar o projeto e disparar a análise. |
 | Registro OIDC no NuPIdentify (deploy SaaS) | ⚪ | manifesto de cliente em `nupidentity-client-manifest.json` (registro feito fora, no deploy) |
+| Extensão VS Code (`analyzeFile`/`analyzeWorkspace`/`analyzeWorkspaceFull`/`showCatalog`/`connectServer`) | ✅ | `vscode-extension/src/extension.ts:35,68,113,168,180`; analisadores local/remoto em `local-analyzer.ts`/`remote-analyzer.ts` |
+
+---
+
+## 6. Integração Git, webhooks e análise de branch/PR
+
+| Capacidade | Status | Evidência |
+|---|---|---|
+| Provider Git abstrato + factory (GitHub / GitLab) | ✅ | `server/git/git-provider.ts:86` (`createGitProvider`); `GitHubProvider` (`github-provider.ts:13`), `GitLabProvider` (`gitlab-provider.ts:4`) |
+| Conectar/desconectar repo, listar branches e PRs (`POST .../git/connect`, `GET .../git/branches`, `GET .../git/pull-requests`, `GET .../git/status`, `DELETE .../git/disconnect`) | 🟡 | `routes.ts:1421,1468,1497,1702,1722` — depende de token Git válido cadastrado no projeto |
+| Analisar uma branch específica (`POST .../analyze-branch`) | 🟡 | `routes.ts:1527` — busca arquivos via provider e roda o pipeline |
+| Analisar um PR (delta) (`POST .../analyze-pr`) | 🟡 | `routes.ts:1601` (`analyzePRSchema`) |
+| Webhook GitHub com verificação HMAC-SHA256 (`POST /api/webhook/github`, header `x-hub-signature-256`) | 🟡 | `routes.ts:1832-1864`; HMAC só valida se `project.webhookSecret` estiver setado (`:1857`) — sem secret, **não verifica assinatura** |
+| Webhook GitLab (`POST /api/webhook/gitlab`) | 🟡 | `routes.ts:1886` |
+| Configurar webhook do projeto (`POST .../webhook/configure`) | ✅ | `routes.ts:1807` |
+
+## 7. Diff de manifesto (drift entre snapshots)
+
+| Capacidade | Status | Evidência |
+|---|---|---|
+| Diff entre dois snapshots de run (mudança de permissão/endpoint/entidade) | ✅ | `server/diff/manifest-diff-engine.ts:338` (`diffManifests`) |
+| Rota de diff por run (`GET .../diff?runA&runB`) + diff dos 2 últimos (`GET .../diff/latest`) + listar snapshots (`GET .../snapshots`) | 🟡 | `routes.ts:1338,1370,1399` — só funciona para runs que **têm snapshot** (feature posterior ao snapshot; runs antigos retornam 404, `:1352`) |
+
+## 8. Autenticação e API keys
+
+| Capacidade | Status | Evidência |
+|---|---|---|
+| Auth OIDC (NuPIdentify) via JWT + checagem de permissão/tier | 🟡 | `server/middleware/jwt-auth.ts:64,97,107` (`verifyJWT`/`hasPermission`/`isOIDCConfigured`) — inerte se OIDC não configurado |
+| API keys: criar/listar/revogar (`POST/GET/DELETE /api/keys`) com hash + prefixo | ✅ | `routes.ts:126,156,172`; `server/middleware/api-auth.ts:8,12,34` (`hashApiKey`/`generateApiKey`/`apiAuthMiddleware`) |
+| Quem-sou-eu (`GET /api/auth/me`) resolvendo OIDC **ou** API key | ✅ | `routes.ts:101-125` |
+| Upload em chunks (init/chunk/complete) + ZIP de projeto, com limpeza de uploads temporários antigos | ✅ | `routes.ts:543,582,642,810`; cleanup via `setInterval` (`routes.ts:65`) — **único** timer do sistema, não analisa nada |
+
+## 9. Inventário de rotas HTTP (server/routes.ts)
+
+Todas montadas em `server/routes.ts`. Status do efeito segue as seções acima.
+
+| Método + rota | Linha |
+|---|---|
+| `GET /api/auth/me` | `:101` |
+| `POST /api/keys` · `GET /api/keys` · `DELETE /api/keys/:id` | `:126,156,172` |
+| `POST /api/analyze` · `POST /api/analyze-zip` | `:183,280` |
+| `GET /api/docs/openapi.json` · `GET /api/docs` | `:345,350` |
+| `GET /api/projects/:projectId/security-findings` | `:361` |
+| `POST /api/projects/:projectId/codelens-extraction` | `:380` |
+| `GET /api/projects/:projectId/lookup` | `:406` |
+| `GET /api/stats` | `:435` |
+| `GET /api/projects` · `GET /api/projects/:id` · `POST /api/projects` · `DELETE /api/projects/:id` | `:445,455,470,506` |
+| `POST /api/projects/:id/analyze` | `:518` |
+| `POST /api/uploads/init` · `/:uploadId/chunk` · `/:uploadId/complete` | `:543,582,642` |
+| `POST /api/projects/upload-zip` | `:810` |
+| `GET /api/analysis-runs/recent` · `GET /api/analysis-runs/:id` | `:1000,1010` |
+| `GET /api/catalog-entries/:projectId` · `PATCH /api/catalog-entries/:id` · `.../export` | `:1024,1036,1057` |
+| `GET /api/projects/:projectId/schema-fields` | `:1109` |
+| `GET /api/manifest/:projectId` (export multi-formato) | `:1211` |
+| `GET .../diff` · `.../diff/latest` · `.../snapshots` | `:1338,1370,1399` |
+| `POST .../git/connect` · `GET .../git/branches` · `.../git/pull-requests` · `.../git/status` · `DELETE .../git/disconnect` | `:1421,1468,1497,1702,1722` |
+| `POST .../analyze-branch` · `.../analyze-pr` | `:1527,1601` |
+| `POST /api/enrich-with-llm/:projectId` | `:1747` |
+| `POST /api/projects/:id/webhook/configure` | `:1807` |
+| `POST /api/webhook/github` · `POST /api/webhook/gitlab` | `:1832,1886` |
 
 ---
 
 ## Resumo honesto
 
-- A **análise estática** (grafo Java AST, frontend, catálogo, 6 detectores de
-  segurança, detector de consistência frontend↔backend) está **construída e ligada
-  no pipeline** — ✅ no nível de código.
+- A **análise estática** (grafo Java AST, frontend incl. grafos de call/evento/estado/camadas,
+  catálogo, 6 detectores de segurança, detector de consistência frontend↔backend) está
+  **construída e ligada no pipeline** — ✅ no nível de código. A classificação que roda no
+  pipeline é a **determinística**; a classificação por LLM (OpenAI) é opt-in via rota
+  `enrich-with-llm` e precisa das envs `AI_INTEGRATIONS_OPENAI_*` (🟡).
+- A camada de **geração de artefato** (manifesto, AGENTS.md, OpenAPI, policy-matrix,
+  Keycloak realm, OPA/Rego, bundle NuPIdentity, compliance HTML) está ✅ e exposta por
+  `?format=`. A integração **Git/webhooks/branch/PR** e o **diff de snapshots** estão
+  construídos (✅ código), com efeito 🟡 (dependem de token Git / webhook secret / runs com snapshot).
 - O que separa "existe" de "está produzindo valor pro EasyNuP hoje" é
   **configuração/cadastro**, não código: emitter precisa das 3 envs do Sentinel;
   o motor Java precisa do JAR compilado; e o repo-alvo precisa estar **cadastrado
