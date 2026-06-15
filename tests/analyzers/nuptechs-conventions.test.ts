@@ -101,6 +101,11 @@ describe("extractGatewayPrefixes (A)", () => {
       app.use('/easynup', proxyMiddleware);          // EXCLUÍDO — WsV1 cobre
       app.use('/api/v1/admin', adminProxy);          // EXCLUÍDO — @Ws explícito cobre
       app.use('/api/', apiLimiter);                  // EXCLUÍDO — largo demais
+      const registry = [
+        { path: 'routes/chat-ia.routes.js', mount: '/api/chat-ia', name: 'Chat IA' },
+        { path: 'routes/audit360.js', mount: '/api/audit360', name: 'Audit 360' },
+        { path: 'routes/x.js', mount: '/api', name: 'broad' },   // EXCLUÍDO — largo
+      ];
     `,
   };
 
@@ -113,6 +118,15 @@ describe("extractGatewayPrefixes (A)", () => {
     assert.ok(!prefixes.includes("/api/v1/admin"));
     assert.ok(!prefixes.includes("/api"));
     assert.ok(!prefixes.includes("/api/"));
+  });
+
+  it("captura mounts via factory-config (mount: '<prefix>') — corrige FP do chat-ia", () => {
+    const prefixes = extractGatewayPrefixes([gateway]);
+    assert.ok(prefixes.includes("/api/chat-ia"), "factory mount /api/chat-ia deveria ser coberto");
+    assert.ok(prefixes.includes("/api/audit360"), "factory mount /api/audit360 deveria ser coberto");
+    assert.ok(!prefixes.includes("/api"), "mount factory '/api' largo continua excluído");
+    // a chamada que antes era falso-positivo agora é coberta
+    assert.ok(isCoveredByGatewayPrefix("/api/chat-ia/messages", prefixes));
   });
 
   it("ordena por comprimento decrescente (match determinístico)", () => {
