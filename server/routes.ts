@@ -1444,6 +1444,33 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-070 Onda 2 / Propósito 2 — impacto de um DIFF/entrega: "o fornecedor
+  // entregou estes N arquivos, o que foi impactado?". Agrega o blast radius de
+  // cada arquivo mudado. Body: { files: string[] }.
+  app.post("/api/projects/:projectId/impact-diff", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const files = Array.isArray(req.body?.files) ? req.body.files : null;
+      if (!files || files.length === 0) {
+        return res.status(400).json({ message: "body.files (string[]) is required — os arquivos mudados na entrega" });
+      }
+      if (files.length > 5000) return res.status(400).json({ message: "too many files (max 5000)" });
+
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const { computeImpactForFiles } = await import("./analyzers/impact-analyzer");
+      const report = computeImpactForFiles(manifest, files);
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing diff impact:", error);
+      res.status(500).json({ message: "Failed to compute diff impact" });
+    }
+  });
+
   const gitTokens = new Map<string, string>();
 
   app.post("/api/projects/:projectId/git/connect", async (req, res) => {
