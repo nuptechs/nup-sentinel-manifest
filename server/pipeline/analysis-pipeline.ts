@@ -259,7 +259,7 @@ export class AnalysisPipeline {
 
       const graphSummary = appGraph.toJSON();
       await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData);
-      await this.saveSnapshot(analysisRun.id, projectId, created, appGraph);
+      await this.saveSnapshot(analysisRun.id, projectId, created, appGraph, endpointImpacts);
 
       let cacheStatus = "full analysis";
       if (backendReused && frontendReused) cacheStatus = "fully cached (no changes)";
@@ -369,6 +369,7 @@ export class AnalysisPipeline {
     projectId: number,
     entries: any[],
     appGraph?: any,
+    endpointImpacts?: any[],
   ) {
     try {
       const project = await storage.getProject(projectId);
@@ -417,9 +418,30 @@ export class AnalysisPipeline {
         }
       }
 
+      // ADR-070 Onda 2 — espelho RICO de endpoints para a análise de impacto
+      // cross-stack. O `manifest.endpoints` curado (catálogo) só inclui endpoints
+      // que viraram catalog entry (tipicamente os alcançados por uma tela), então
+      // perde a profundidade de backend (746 reais → ~25 curados) e o
+      // `entitiesTouched` por endpoint. Aqui guardamos os `endpointImpacts`
+      // completos do grafo (controller/callChain/entitiesTouched por endpoint) sob
+      // uma chave dedicada que o `computeImpact` prefere — aditivo, nunca clobbera
+      // o shape curado que os geradores de doc/viewer consomem.
+      const impactEndpoints = Array.isArray(endpointImpacts)
+        ? endpointImpacts.map((ei) => ({
+            path: ei.endpoint,
+            method: ei.httpMethod,
+            controller: ei.controllerClass,
+            controllerMethod: ei.controllerMethod,
+            fullCallChain: Array.isArray(ei.fullCallChain) ? ei.fullCallChain : [],
+            entitiesTouched: Array.isArray(ei.entitiesTouched) ? ei.entitiesTouched : [],
+            persistenceOperations: Array.isArray(ei.persistenceOperations) ? ei.persistenceOperations : [],
+          }))
+        : [];
+
       const enrichedManifest = {
         ...manifest,
         ...(allEntitiesFromGraph.length > 0 ? { allEntitiesFromGraph } : {}),
+        ...(impactEndpoints.length > 0 ? { impactEndpoints } : {}),
       };
 
       await storage.createAnalysisSnapshot({

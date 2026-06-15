@@ -75,6 +75,41 @@ describe("computeImpact — símbolo de entidade", () => {
   });
 });
 
+describe("computeImpact — prefere o espelho RICO (impactEndpoints) sobre o curado", () => {
+  it("usa impactEndpoints (746 do grafo) quando o catálogo curado é raso", () => {
+    // Cenário real: o `endpoints` curado perde a profundidade de backend (só os
+    // endpoints alcançados por tela), mas `impactEndpoints` traz todos do grafo
+    // com entitiesTouched. computeImpact deve responder pela fonte rica.
+    const manifest = {
+      endpoints: [
+        // catálogo curado: NÃO tem o endpoint que toca Sla
+        { path: "/easynup/findContract.v1", method: "POST", controller: "FindContractWsV1", entitiesTouched: ["Contract"] },
+      ],
+      impactEndpoints: [
+        { path: "/easynup/findContract.v1", method: "POST", controller: "FindContractWsV1", controllerMethod: "handle", fullCallChain: [], entitiesTouched: ["Contract"] },
+        { path: "/easynup/createSlaMeasurement.v1", method: "POST", controller: "CreateSlaMeasurementWsV1", controllerMethod: "handle", fullCallChain: [], entitiesTouched: ["SlaMeasurement"] },
+        { path: "/easynup/findSla.v1", method: "POST", controller: "FindSlaWsV1", controllerMethod: "handle", fullCallChain: [], entitiesTouched: ["Sla"] },
+      ],
+      screens: [
+        { name: "SlaPanel", route: "/sla", interactions: [{ endpoint: "/easynup/findSla.v1", httpMethod: "POST" }] },
+      ],
+      entities: [],
+    };
+    // "Sla" só existe na fonte rica → curado responderia 0; rico responde > 0.
+    const r = computeImpact(manifest, "Sla");
+    assert.equal(r.found, true);
+    assert.ok(r.impactedEndpoints.some((e) => e.path === "/easynup/findSla.v1"), "deveria casar via fonte rica");
+    assert.ok(r.entitiesTouched.includes("Sla"));
+    assert.ok(r.impactedScreens.some((s) => s.name === "SlaPanel"), "tela curada casa contra endpoint rico");
+  });
+
+  it("cai no curado quando impactEndpoints ausente (compat snapshot antigo)", () => {
+    const r = computeImpact(MANIFEST, "Contract");
+    assert.equal(r.found, true);
+    assert.ok(r.impactedEndpoints.some((e) => e.path === "/api/contracts/{id}"));
+  });
+});
+
 describe("computeImpact — arquivo", () => {
   it("UserController.java → endpoint GET users + tela UserList", () => {
     const r = computeImpact(MANIFEST, "UserController.java");

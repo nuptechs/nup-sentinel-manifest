@@ -88,7 +88,13 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
   };
   if (sym.length < MIN_SYMBOL_LEN || !manifest) return empty;
 
-  const endpoints: any[] = Array.isArray(manifest.endpoints) ? manifest.endpoints : [];
+  // Prefere o espelho RICO de endpoints (todos os endpoints do grafo, com
+  // `entitiesTouched`/`fullCallChain` por endpoint) quando presente — o
+  // `manifest.endpoints` curado (catálogo) perde a profundidade de backend.
+  // Fallback p/ o curado preserva compatibilidade com snapshots antigos.
+  const endpoints: any[] = Array.isArray(manifest.impactEndpoints) && manifest.impactEndpoints.length
+    ? manifest.impactEndpoints
+    : Array.isArray(manifest.endpoints) ? manifest.endpoints : [];
   const screens: any[] = Array.isArray(manifest.screens) ? manifest.screens : [];
 
   // 1) Endpoints diretamente impactados.
