@@ -112,8 +112,16 @@ export function extractWsV1Endpoints(
 
 /**
  * Extract the Node gateway mount prefixes (A) from Express source files.
- * Returns the set of `app.use('<prefix>', ...)` prefixes that count as "covered"
- * — excluding WsV1-covered and over-broad mounts (see GATEWAY_PREFIX_EXCLUDES).
+ * Returns the set of mount prefixes that count as "covered" — excluding
+ * WsV1-covered and over-broad mounts (see GATEWAY_PREFIX_EXCLUDES).
+ *
+ * Two declaration styles are recognized:
+ *   - direct:  `app.use('<prefix>', router)`
+ *   - factory: a route-registry config entry `{ ..., mount: '<prefix>', ... }`
+ *     that a loader later mounts (the dominant pattern in larger gateways —
+ *     e.g. EasyNuP registers ~47 routers this way). Missing these is exactly
+ *     what false-flagged `/api/chat-ia/messages` in the first validation run.
+ *
  * Longest-first so prefix matching is deterministic.
  */
 export function extractGatewayPrefixes(
@@ -121,17 +129,29 @@ export function extractGatewayPrefixes(
 ): string[] {
   const prefixes = new Set<string>();
   const mountRe = /app\.use\(\s*['"`](\/[a-zA-Z0-9/_-]+)['"`]/g;
+  const factoryRe = /\bmount:\s*['"`](\/[a-zA-Z0-9/_-]+)['"`]/g;
+
+  const add = (raw: string) => {
+    const prefix = raw.replace(/\/$/, ""); // normalize trailing slash
+    if (!prefix) return;
+    if (GATEWAY_PREFIX_EXCLUDES.has(prefix) || GATEWAY_PREFIX_EXCLUDES.has(prefix + "/")) return;
+    prefixes.add(prefix);
+  };
 
   for (const file of fileData) {
     if (file.filePath.endsWith(".java")) continue;
-    if (!file.content.includes("app.use(")) continue;
+    const hasDirect = file.content.includes("app.use(");
+    const hasFactory = file.content.includes("mount:");
+    if (!hasDirect && !hasFactory) continue;
+
     let m: RegExpExecArray | null;
-    mountRe.lastIndex = 0;
-    while ((m = mountRe.exec(file.content)) !== null) {
-      const prefix = m[1].replace(/\/$/, ""); // normalize trailing slash
-      if (!prefix) continue;
-      if (GATEWAY_PREFIX_EXCLUDES.has(prefix) || GATEWAY_PREFIX_EXCLUDES.has(prefix + "/")) continue;
-      prefixes.add(prefix);
+    if (hasDirect) {
+      mountRe.lastIndex = 0;
+      while ((m = mountRe.exec(file.content)) !== null) add(m[1]);
+    }
+    if (hasFactory) {
+      factoryRe.lastIndex = 0;
+      while ((m = factoryRe.exec(file.content)) !== null) add(m[1]);
     }
   }
 
