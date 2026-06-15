@@ -153,6 +153,26 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
     }
   }
 
+  // 3b) Tela casada DIRETAMENTE pelo símbolo (ex.: arquivo de frontend `ChatIa.vue`
+  //     → tela "ChatIa"). A tela é impactada e seus endpoints viram "scope afetado"
+  //     — SEM cascatear pra outras telas que chamam os mesmos endpoints (evita ruído).
+  const screenNamed = new Set(impactedScreens.map((s) => s.name));
+  for (const sc of screens) {
+    const name = lc(sc?.name);
+    const route = lc(sc?.route);
+    const matchedName = (name && (name === sym || name.includes(sym))) || (route && route.includes(sym));
+    if (!matchedName || screenNamed.has(String(sc.name ?? ""))) continue;
+    const own: string[] = [];
+    for (const it of sc.interactions || []) {
+      const path = String(it.endpoint ?? "");
+      if (!path) continue;
+      const method = String(it.httpMethod ?? "ANY").toUpperCase();
+      own.push(`${method} ${path}`);
+    }
+    impactedScreens.push({ name: String(sc.name ?? ""), route: sc.route ?? null, viaEndpoints: Array.from(new Set(own)) });
+    screenNamed.add(String(sc.name ?? ""));
+  }
+
   const found = impactedEndpoints.length > 0 || impactedScreens.length > 0 || entities.size > 0;
   return {
     symbol,
