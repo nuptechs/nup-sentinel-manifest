@@ -156,3 +156,26 @@ describe("computeImpactForFiles (impacto de um diff/entrega)", () => {
     assert.equal(r.aggregate.summary.endpoints, 0);
   });
 });
+
+describe("computeImpact — tela casada direto pelo símbolo (arquivo de frontend)", () => {
+  it("'ContractEdit' (de ContractEdit.vue) → a tela + seus endpoints, sem cascatear", () => {
+    const r = computeImpact(MANIFEST, "ContractEdit");
+    assert.equal(r.found, true);
+    assert.ok(r.impactedScreens.some((s) => s.name === "ContractEdit"));
+    // não puxa UserList (sem cascata)
+    assert.ok(!r.impactedScreens.some((s) => s.name === "UserList"));
+    // a tela traz os endpoints que ELA usa
+    const sc = r.impactedScreens.find((s) => s.name === "ContractEdit")!;
+    assert.ok(sc.viaEndpoints.some((v) => v.includes("/api/contracts/{id}")));
+  });
+  it("via computeImpactForFiles: ChatIa.vue → tela ChatIa", () => {
+    const m = {
+      endpoints: [{ path: "/api/chat/messages", method: "POST", controller: "" }],
+      screens: [{ name: "ChatIa", route: "/chat", interactions: [{ endpoint: "/api/chat/messages", httpMethod: "POST" }] }],
+      entities: [],
+    };
+    const r = computeImpactForFiles(m, ["frontend/src/pages/ChatIa.vue"]);
+    assert.equal(r.matchedFiles, 1);
+    assert.ok(r.aggregate.impactedScreens.some((s) => s.name === "ChatIa"));
+  });
+});
