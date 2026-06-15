@@ -131,6 +131,18 @@ A classe de bug que ele pega (verificada à mão no EasyNuP): tela chama
 SLA Categories / Severity quando o backend só tem `find*` — descrita em
 `frontend-backend-consistency.ts:14-18`.
 
+### 3.1 Inventário de endpoints por convenção NuPtechs — **novo**
+
+O analisador genérico só enxerga endpoints Spring `@*Mapping`. Plataformas NuPtechs
+(EasyNuP) expõem o HTTP por dois caminhos que ele não via — então `endpointImpacts`
+dava **0** e o detector se auto-suprimia. Coberto em `server/analyzers/nuptechs-conventions.ts`:
+
+| Capacidade | Status | Evidência |
+|---|---|---|
+| **(B) Inventário WsV1**: `.../services/web/<área>/<op>/v<N>/<Class>WsV1.java` → endpoint `/easynup/<op>.v<N>` (override por `@Ws("/abs")` explícito); injetado como nó CONTROLLER → `analyzeEndpoints` reporta e `matchUrlToEndpoint` resolve **exato** (typo/renome/removido → flagrado) | ✅ | `nuptechs-conventions.ts:extractWsV1Endpoints/augmentGraphWithWsV1`; ligado em `analysis-pipeline.ts:buildGraph` |
+| **(A) Prefixos do gateway Node**: `app.use('<prefix>', …)` → cobertura coarse das chamadas `/api/<x>` nativas (sem catch-all `/api`, então chamada fora de todo prefixo continua flagrável). Exclui `/easynup` e `/api/v1/admin` (o WsV1 cobre) e `/api`/`/api/` (largos) | ✅ | `nuptechs-conventions.ts:extractGatewayPrefixes/mapInteractionsToGatewayPrefixes`; ligado antes do detector em `analysis-pipeline.ts` |
+| Precisão-primeiro (sem falso-positivo): WsV1 exato no core `/easynup/*`, gateway coarse no `/api/*` nativo; aditivo (só ativa para arquivos que casam os padrões — não afeta projetos não-NuPtechs) | ✅ | testes em `tests/analyzers/nuptechs-conventions.test.ts` (13 casos) |
+
 ---
 
 ## 4. Emissão para o orquestrador Sentinel
