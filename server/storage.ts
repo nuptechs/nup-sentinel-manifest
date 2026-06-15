@@ -147,7 +147,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createSourceFile(file: InsertSourceFile): Promise<SourceFile> {
-    const [created] = await db.insert(sourceFiles).values(file).returning();
+    // Postgres rejeita NUL (0x00) em text/jsonb. Um unico arquivo-fonte com byte
+    // nulo (raro, mas real em repos grandes) derrubava a analise inteira. Sanitiza
+    // na borda de armazenamento (cobre analyze/analyze-zip/analyze-branch).
+    const NUL = String.fromCharCode(0);
+    const safe =
+      typeof file.content === "string" && file.content.indexOf(NUL) !== -1
+        ? { ...file, content: file.content.split(NUL).join("") }
+        : file;
+    const [created] = await db.insert(sourceFiles).values(safe).returning();
     return created;
   }
 
