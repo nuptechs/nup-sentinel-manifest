@@ -12,6 +12,11 @@ import { analyzeSecurityOmissions, type SecurityFinding, type SecurityCoverageMe
 import { emitSecurityFindings, emitConsistencyFindings } from "../security/sentinel-emitter";
 import { detectFrontendBackendInconsistencies } from "../analyzers/frontend-backend-consistency";
 import { enrichCatalogEntriesWithInference } from "../analyzers/frontend-inference-engine";
+import {
+  augmentGraphWithWsV1,
+  extractGatewayPrefixes,
+  mapInteractionsToGatewayPrefixes,
+} from "../analyzers/nuptechs-conventions";
 
 export interface FileData {
   filePath: string;
@@ -164,6 +169,20 @@ export class AnalysisPipeline {
         });
       }
 
+      // NuPtechs convention (A): the SPA talks to the Node gateway, whose mount
+      // prefixes the generic analyzer treats as frontend. Mark calls served by a
+      // known gateway prefix as covered so they are not false-flagged once the
+      // WsV1 inventory un-gates the consistency detector. (No generic /api
+      // catch-all exists, so calls outside every prefix stay flaggable.)
+      const gatewayPrefixes = extractGatewayPrefixes(fileData);
+      const gatewayCovered = mapInteractionsToGatewayPrefixes(frontendInteractions, gatewayPrefixes);
+      if (gatewayCovered > 0) {
+        this.progress(
+          "Consistency",
+          `${gatewayCovered} chamadas cobertas por ${gatewayPrefixes.length} prefixos de gateway (A)`
+        );
+      }
+
       let catalogEntryData = this.connectGraph(
         frontendInteractions, endpointImpacts, appGraph, analysisRun.id, projectId, archType
       );
@@ -286,6 +305,14 @@ export class AnalysisPipeline {
     const appGraph = buildResult.graph;
     const resolutionErrors = buildResult.resolutionErrors;
     this.progress("Step 1/4", `Done in ${((Date.now() - start) / 1000).toFixed(1)}s — ${appGraph.toJSON().nodes.length} nodes, ${appGraph.toJSON().edges.length} edges`);
+
+    // NuPtechs convention: add the WsV1 endpoint inventory (/easynup/<op>.v<N>)
+    // the generic Java analyzer is blind to. Un-gates the frontend↔backend
+    // consistency detector and lets real /easynup calls resolve exactly.
+    const wsV1Added = augmentGraphWithWsV1(appGraph, fileData);
+    if (wsV1Added > 0) {
+      this.progress("Step 1/4", `Augmented with ${wsV1Added} WsV1 convention endpoints (/easynup/*.v<N>)`);
+    }
 
     const archResult = detectArchitecture(appGraph, fileData);
     this.progress("Architecture", `Detected: ${archResult.type} (confidence: ${archResult.confidence.toFixed(2)})`);
