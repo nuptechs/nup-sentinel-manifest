@@ -53,7 +53,11 @@ async function ensureEngineRunning(): Promise<void> {
     javaProcess = null;
   }
 
-  javaProcess = spawn("java", ["-Xmx512m", "-Xms128m", "-jar", JAR_PATH, String(JAVA_ENGINE_PORT)], {
+  // Heap do analisador Java. O default de 512m OOMava em repos grandes (ex.
+  // easynup: ~2-4k arquivos Java → JavaParser monta AST de tudo). Configurável
+  // via JAVA_ANALYZER_XMX (ex. "2g", "3g"); default 2g. -Xss para stacks fundos.
+  const xmx = process.env.JAVA_ANALYZER_XMX || "2g";
+  javaProcess = spawn("java", [`-Xmx${xmx}`, "-Xms128m", "-Xss8m", "-jar", JAR_PATH, String(JAVA_ENGINE_PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
   });
