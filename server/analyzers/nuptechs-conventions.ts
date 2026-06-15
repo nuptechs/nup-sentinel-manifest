@@ -34,7 +34,7 @@
  * Pure + additive: activates only for files matching the patterns, so non-NuPtechs
  * projects are unaffected. No I/O.
  */
-import { ApplicationGraph, GraphNode } from "./application-graph";
+import { ApplicationGraph, GraphNode, GraphEdge } from "./application-graph";
 import type { FrontendInteraction } from "./frontend-analyzer";
 
 export interface SyntheticEndpoint {
@@ -171,23 +171,77 @@ export function augmentGraphWithWsV1(
   const endpoints = extractWsV1Endpoints(fileData);
   let added = 0;
 
+  // Índice de entidades por nome normalizado (lc + sem plural) → id do nó.
+  // Permite ligar o endpoint WsV1 à entidade que ele opera (convenção easynup:
+  // verbo+entidade, ex. findContract → Contract), completando o chain
+  // endpoint→entidade que o analisador Java não monta (WsV1 usa @Ws, não @*Mapping).
+  const entityIndex = new Map<string, string>();
+  for (const en of graph.getNodesByType("ENTITY")) {
+    const norm = normalizeEntityName(en.className);
+    if (norm && !entityIndex.has(norm)) entityIndex.set(norm, en.id);
+  }
+
   for (const ep of endpoints) {
     const id = `wsv1:${ep.httpMethod}:${ep.fullPath}`;
-    if (graph.getNode(id)) continue;
-    graph.addNode(
-      new GraphNode(id, "CONTROLLER", ep.className, "execute", null, {
-        httpMethod: ep.httpMethod,
-        fullPath: ep.fullPath,
-        sourceFile: ep.sourceFile,
-        lineNumber: ep.lineNumber,
+    if (!graph.getNode(id)) {
+      graph.addNode(
+        new GraphNode(id, "CONTROLLER", ep.className, "execute", null, {
+          httpMethod: ep.httpMethod,
+          fullPath: ep.fullPath,
+          sourceFile: ep.sourceFile,
+          lineNumber: ep.lineNumber,
+          synthetic: true,
+          convention: ep.origin,
+        }),
+      );
+      added++;
+    }
+
+    // Liga o endpoint à entidade pela convenção verbo+entidade.
+    const op = operationOf(ep.fullPath); // ex. "findContract" / "createAcceptance"
+    if (!op || entityIndex.size === 0) continue;
+    const { entityCandidate, write } = parseOperation(op);
+    if (!entityCandidate) continue;
+    const norm = normalizeEntityName(entityCandidate);
+    const entityNodeId = entityIndex.get(norm);
+    if (!entityNodeId) continue;
+    graph.addEdge(
+      new GraphEdge(id, entityNodeId, write ? "WRITES_ENTITY" : "READS_ENTITY", {
         synthetic: true,
-        convention: ep.origin,
+        wsOperation: op,
+        convention: "wsv1-name",
       }),
     );
-    added++;
   }
 
   return added;
+}
+
+const WRITE_VERBS = /^(create|update|delete|remove|save|insert|add|set|cancel|approve|reject|submit|process|apply|bulk|register|deactivate|activate|reactivate|close|open|finish|start|import|sync|upsert|patch|put|post|generate|recalculate|move|assign|unassign|link|unlink|reorder)/i;
+const READ_VERBS = /^(find|get|list|search|read|fetch|count|export|validate|resolve|calculate|analyze|preview|check|download|view|suggest|score|simulate)/i;
+
+/** "/easynup/findContract.v1" → "findContract". null pra paths não-easynup. */
+function operationOf(fullPath: string): string | null {
+  const m = fullPath.match(/^\/easynup\/([^/.]+)\.v\d+$/i);
+  return m ? m[1] : null;
+}
+
+/** Separa o verbo da operação → entidade candidata + se é escrita. */
+function parseOperation(op: string): { entityCandidate: string; write: boolean } {
+  const w = WRITE_VERBS.exec(op);
+  if (w) return { entityCandidate: op.slice(w[0].length), write: true };
+  const r = READ_VERBS.exec(op);
+  if (r) return { entityCandidate: op.slice(r[0].length), write: false };
+  return { entityCandidate: "", write: false };
+}
+
+/** Normaliza nome de entidade p/ casar: minúsculo, sem plural simples, sem separadores. */
+function normalizeEntityName(name: string): string {
+  let s = (name || "").toLowerCase().replace(/[_\s-]/g, "");
+  if (s.endsWith("ies")) s = s.slice(0, -3) + "y";
+  else if (s.endsWith("ses") || s.endsWith("xes") || s.endsWith("zes")) s = s.slice(0, -2);
+  else if (s.endsWith("s") && !s.endsWith("ss")) s = s.slice(0, -1);
+  return s;
 }
 
 /**

@@ -24,7 +24,7 @@ import {
   isCoveredByGatewayPrefix,
   mapInteractionsToGatewayPrefixes,
 } from "../../server/analyzers/nuptechs-conventions.ts";
-import { ApplicationGraph, analyzeEndpoints } from "../../server/analyzers/application-graph.ts";
+import { ApplicationGraph, analyzeEndpoints, GraphNode } from "../../server/analyzers/application-graph.ts";
 import { matchUrlToEndpoint } from "../../server/analyzers/frontend/utils.ts";
 import { detectFrontendBackendInconsistencies } from "../../server/analyzers/frontend-backend-consistency.ts";
 import type { FrontendInteraction } from "../../server/analyzers/frontend-analyzer.ts";
@@ -226,5 +226,49 @@ describe("mapInteractionsToGatewayPrefixes (A) — sem falso-positivo em /api na
     assert.equal(covered, 0);
     assert.equal(interactions[0].mappedBackendNode, already);
     assert.equal(interactions[1].mappedBackendNode, null);
+  });
+});
+
+describe("augmentGraphWithWsV1 — conexão WsV1→entidade (profundidade de impacto)", () => {
+  const java = (filePath: string) => ({ filePath, content: "@Ws\npublic class X extends BaseWs {}" });
+
+  it("liga endpoint à entidade pela convenção verbo+entidade (find→READS, create→WRITES)", () => {
+    const graph = new ApplicationGraph();
+    // entidades já extraídas pelo analisador Java
+    graph.addNode(new GraphNode("entity:Contract", "ENTITY", "Contract", null, null, {}));
+    graph.addNode(new GraphNode("entity:Acceptance", "ENTITY", "Acceptance", null, null, {}));
+    augmentGraphWithWsV1(graph, [
+      java("src/main/java/easynup/services/web/contracts/findContract/v1/FindContractWsV1.java"),
+      java("src/main/java/easynup/services/web/acceptances/createAcceptance/v1/CreateAcceptanceWsV1.java"),
+    ]);
+    const eps = analyzeEndpoints(graph);
+    const find = eps.find((e) => e.endpoint === "/easynup/findContract.v1")!;
+    assert.deepEqual(find.entitiesTouched, ["Contract"]); // find → Contract (READS)
+    const create = eps.find((e) => e.endpoint === "/easynup/createAcceptance.v1")!;
+    assert.deepEqual(create.entitiesTouched, ["Acceptance"]);
+    // create = escrita
+    assert.ok(create.persistenceOperations.includes("write"));
+    assert.ok(find.persistenceOperations.includes("read"));
+  });
+
+  it("plural e composto casam (findContracts→Contract, findContractMilestones→ContractMilestone)", () => {
+    const graph = new ApplicationGraph();
+    graph.addNode(new GraphNode("e1", "ENTITY", "Contract", null, null, {}));
+    graph.addNode(new GraphNode("e2", "ENTITY", "ContractMilestone", null, null, {}));
+    augmentGraphWithWsV1(graph, [
+      java("src/main/java/easynup/services/web/x/findContracts/v1/FindContractsWsV1.java"),
+      java("src/main/java/easynup/services/web/x/findContractMilestones/v1/FindContractMilestonesWsV1.java"),
+    ]);
+    const eps = analyzeEndpoints(graph);
+    assert.deepEqual(eps.find((e) => e.endpoint === "/easynup/findContracts.v1")!.entitiesTouched, ["Contract"]);
+    assert.deepEqual(eps.find((e) => e.endpoint === "/easynup/findContractMilestones.v1")!.entitiesTouched, ["ContractMilestone"]);
+  });
+
+  it("sem entidade correspondente → endpoint sem entitiesTouched (não inventa)", () => {
+    const graph = new ApplicationGraph();
+    graph.addNode(new GraphNode("e1", "ENTITY", "Contract", null, null, {}));
+    augmentGraphWithWsV1(graph, [java("src/main/java/easynup/services/web/x/feelEvaluate/v1/FeelEvaluateWsV1.java")]);
+    const ep = analyzeEndpoints(graph).find((e) => e.endpoint === "/easynup/feelEvaluate.v1")!;
+    assert.deepEqual(ep.entitiesTouched, []);
   });
 });
