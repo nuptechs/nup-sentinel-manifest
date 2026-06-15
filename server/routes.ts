@@ -1416,6 +1416,34 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-070 Onda 2 (semente do Living System Graph) — análise de impacto
+  // cross-stack: "se eu mudar o símbolo X, o que é impactado?" (front→endpoint→
+  // service→repo→entidade). Lê o manifest mais recente já persistido; sem re-analisar.
+  app.get("/api/projects/:projectId/impact", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const symbol = typeof req.query.symbol === "string" ? req.query.symbol.trim() : "";
+      if (!symbol) return res.status(400).json({ message: "query param 'symbol' is required (ex: FooService, Foo.java, Contract)" });
+
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const { computeImpact } = await import("./analyzers/impact-analyzer");
+      const report = computeImpact(manifest, symbol);
+      res.json({
+        projectId,
+        analysisRunId: snapshots[0].analysisRunId,
+        ...report,
+      });
+    } catch (error) {
+      console.error("Error computing impact:", error);
+      res.status(500).json({ message: "Failed to compute impact" });
+    }
+  });
+
   const gitTokens = new Map<string, string>();
 
   app.post("/api/projects/:projectId/git/connect", async (req, res) => {
