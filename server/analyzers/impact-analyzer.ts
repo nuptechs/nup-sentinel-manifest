@@ -64,6 +64,10 @@ function endpointMatch(ep: any, sym: string): string | null {
     if (lc(e) === sym || lc(e).includes(sym)) return `entity:${e}`;
   }
   if (ep?.sourceFile && lc(ep.sourceFile).includes(sym)) return "sourceFile";
+  // Match por path/rota: cobre o caso em que o manifest só tem o lado frontend
+  // resolvido (controller/service vazios) — ainda assim responde "quem chama esta
+  // rota". Também permite consultar diretamente por endpoint (ex: "findContract.v1").
+  if (ep?.path && lc(ep.path).includes(sym)) return `path:${ep.path}`;
   return null;
 }
 

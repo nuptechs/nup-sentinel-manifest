@@ -84,6 +84,22 @@ describe("computeImpact — arquivo", () => {
   });
 });
 
+describe("computeImpact — por path/rota (manifest só com lado frontend)", () => {
+  it("'/api/users' → endpoint + tela UserList, mesmo sem controller/service", () => {
+    // Simula manifest frontend-derivado: endpoints só com path/method.
+    const frontendOnly = {
+      endpoints: [{ path: "/api/users/{id}", method: "GET", controller: "", serviceMethods: [], entitiesTouched: [] }],
+      screens: [{ name: "UserList", route: "/users", interactions: [{ endpoint: "/api/users/{id}", httpMethod: "GET" }] }],
+      entities: [],
+    };
+    const r = computeImpact(frontendOnly, "/api/users");
+    assert.equal(r.found, true);
+    assert.equal(r.summary.endpoints, 1);
+    assert.ok(r.impactedEndpoints[0].matchedVia.startsWith("path:"));
+    assert.equal(r.impactedScreens[0].name, "UserList");
+  });
+});
+
 describe("computeImpact — guardas", () => {
   it("símbolo curto (<3) → not found, sem ruído", () => {
     const r = computeImpact(MANIFEST, "ab");
