@@ -7,7 +7,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { computeImpact } from "../../server/analyzers/impact-analyzer.ts";
+import { computeImpact, computeImpactForFiles, symbolsForFile } from "../../server/analyzers/impact-analyzer.ts";
 
 const MANIFEST = {
   endpoints: [
@@ -118,5 +118,41 @@ describe("computeImpact — guardas", () => {
     const r = computeImpact(MANIFEST, "ContractService");
     assert.ok(!r.impactedScreens.some((s) => s.name === "UserList"));
     assert.ok(!r.impactedEndpoints.some((e) => e.path === "/api/users/{id}"));
+  });
+});
+
+describe("symbolsForFile", () => {
+  it("deriva basename + sem-sufixo + caminho", () => {
+    const s = symbolsForFile("src/main/java/easynup/.../ContractController.java");
+    assert.ok(s.includes("ContractController")); // basename
+    assert.ok(s.includes("Contract")); // sem sufixo Controller
+    assert.ok(s.some((x) => x.includes("ContractController"))); // caminho
+  });
+  it("ignora caminho vazio/curto", () => {
+    assert.deepEqual(symbolsForFile(""), []);
+  });
+});
+
+describe("computeImpactForFiles (impacto de um diff/entrega)", () => {
+  it("agrega o blast radius de vários arquivos mudados, dedup", () => {
+    const r = computeImpactForFiles(MANIFEST, [
+      "src/main/java/.../ContractController.java",
+      "src/main/java/.../UserController.java",
+      "docs/README.md", // não casa nada
+    ]);
+    assert.equal(r.files, 3);
+    assert.equal(r.matchedFiles, 2); // README não casa
+    // agrega ambos os endpoints (contracts + users) sem duplicar
+    assert.equal(r.aggregate.summary.endpoints, 2);
+    assert.ok(r.aggregate.impactedScreens.some((s) => s.name === "ContractEdit"));
+    assert.ok(r.aggregate.impactedScreens.some((s) => s.name === "UserList"));
+    // per-file: o README tem 0
+    const readme = r.perFile.find((f) => f.file.endsWith("README.md"));
+    assert.equal(readme.summary.endpoints, 0);
+  });
+  it("lista vazia → tudo zero", () => {
+    const r = computeImpactForFiles(MANIFEST, []);
+    assert.equal(r.files, 0);
+    assert.equal(r.aggregate.summary.endpoints, 0);
   });
 });

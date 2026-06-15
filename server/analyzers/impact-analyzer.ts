@@ -163,3 +163,108 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
     entitiesTouched: Array.from(entities).sort(),
   };
 }
+
+// ─────────────────────────────────────────────
+// Impacto de um DIFF (ADR-070 Onda 2 / Propósito 2) — "o fornecedor entregou
+// estes N arquivos: o que foi impactado no sistema cliente?". Agrega o blast
+// radius de cada arquivo mudado num único mapa. Reusa computeImpact; puro.
+// ─────────────────────────────────────────────
+
+export interface FileImpact {
+  file: string;
+  symbols: string[]; // símbolos candidatos derivados do arquivo
+  summary: { endpoints: number; screens: number; entities: number };
+}
+
+export interface DiffImpactReport {
+  files: number;
+  matchedFiles: number;
+  aggregate: {
+    summary: { endpoints: number; screens: number; entities: number };
+    impactedEndpoints: ImpactedEndpoint[];
+    impactedScreens: ImpactedScreen[];
+    entitiesTouched: string[];
+  };
+  perFile: FileImpact[];
+}
+
+const STRIP_SUFFIX = /(WsV\d+|Ws|ServiceV\d+|Service|RepositoryImpl|Repository|Controller|Resource|Endpoint|\.routes|\.route|\.spec|\.test|\.vue|\.component)$/i;
+
+/** Deriva símbolos candidatos de um caminho de arquivo (basename, sem sufixos
+ *  comuns, e o próprio caminho p/ match por sourceFile/path). */
+export function symbolsForFile(filePath: string): string[] {
+  if (!filePath || typeof filePath !== "string") return [];
+  const base = filePath.split("/").pop() || filePath;
+  const noExt = base.replace(/\.(java|ts|tsx|js|jsx|vue|kt)$/i, "");
+  const stripped = noExt.replace(STRIP_SUFFIX, "");
+  const out = new Set<string>();
+  if (noExt.length >= 3) out.add(noExt);
+  if (stripped.length >= 3 && stripped !== noExt) out.add(stripped);
+  // caminho normalizado (sem extensão) p/ match por sourceFile/path
+  const relNoExt = filePath.replace(/\.(java|ts|tsx|js|jsx|vue|kt)$/i, "");
+  if (relNoExt.length >= 3) out.add(relNoExt);
+  return Array.from(out);
+}
+
+function epKey(e: ImpactedEndpoint): string {
+  return `${e.method} ${e.path}`;
+}
+
+/**
+ * Computa o impacto agregado de um conjunto de arquivos mudados (um diff/entrega).
+ * Para cada arquivo, deriva símbolos candidatos, roda computeImpact e une tudo.
+ * Puro; sem I/O. Quanto mais completo o manifest (backend analisado), mais profundo.
+ */
+export function computeImpactForFiles(manifest: any, files: string[]): DiffImpactReport {
+  const list = Array.isArray(files) ? files.filter((f) => typeof f === "string" && f.trim()) : [];
+  const aggEndpoints = new Map<string, ImpactedEndpoint>();
+  const aggScreens = new Map<string, ImpactedScreen>();
+  const aggEntities = new Set<string>();
+  const perFile: FileImpact[] = [];
+  let matchedFiles = 0;
+
+  for (const file of list) {
+    const symbols = symbolsForFile(file);
+    const eps = new Map<string, ImpactedEndpoint>();
+    const screens = new Map<string, ImpactedScreen>();
+    const ents = new Set<string>();
+
+    for (const sym of symbols) {
+      const r = computeImpact(manifest, sym);
+      if (!r.found) continue;
+      for (const e of r.impactedEndpoints) eps.set(epKey(e), e);
+      for (const s of r.impactedScreens) {
+        const prev = screens.get(s.name);
+        screens.set(s.name, prev ? { ...s, viaEndpoints: Array.from(new Set([...prev.viaEndpoints, ...s.viaEndpoints])) } : s);
+      }
+      for (const e of r.entitiesTouched) ents.add(e);
+    }
+
+    if (eps.size || screens.size || ents.size) matchedFiles++;
+    perFile.push({
+      file,
+      symbols,
+      summary: { endpoints: eps.size, screens: screens.size, entities: ents.size },
+    });
+
+    // une no agregado
+    Array.from(eps.entries()).forEach(([k, v]) => aggEndpoints.set(k, v));
+    Array.from(screens.entries()).forEach(([k, v]) => {
+      const prev = aggScreens.get(k);
+      aggScreens.set(k, prev ? { ...v, viaEndpoints: Array.from(new Set([...prev.viaEndpoints, ...v.viaEndpoints])) } : v);
+    });
+    Array.from(ents).forEach((e) => aggEntities.add(e));
+  }
+
+  return {
+    files: list.length,
+    matchedFiles,
+    aggregate: {
+      summary: { endpoints: aggEndpoints.size, screens: aggScreens.size, entities: aggEntities.size },
+      impactedEndpoints: Array.from(aggEndpoints.values()),
+      impactedScreens: Array.from(aggScreens.values()),
+      entitiesTouched: Array.from(aggEntities).sort(),
+    },
+    perFile,
+  };
+}
