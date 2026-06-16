@@ -1559,6 +1559,34 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-070 Onda 3 (differential) — regressão entre os 2 snapshots mais
+  // recentes: o que PIOROU desde a última análise. Advisory.
+  app.get("/api/projects/:projectId/regression", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      const curr = (snapshots[0]?.manifestJson as any) || null;
+      const prev = (snapshots[1]?.manifestJson as any) || null;
+      const { buildRegressionDiff, renderRegressionMarkdown } = await import("./analyzers/regression-diff");
+      const report = buildRegressionDiff(prev, curr);
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        res.type("text/markdown; charset=utf-8").send(renderRegressionMarkdown(report, { projectName: project?.name }));
+        return;
+      }
+      res.json({
+        projectId,
+        currentRunId: snapshots[0]?.analysisRunId ?? null,
+        previousRunId: snapshots[1]?.analysisRunId ?? null,
+        ...report,
+      });
+    } catch (error) {
+      console.error("Error building regression diff:", error);
+      res.status(500).json({ message: "Failed to build regression diff" });
+    }
+  });
+
   const gitTokens = new Map<string, string>();
 
   app.post("/api/projects/:projectId/git/connect", async (req, res) => {
