@@ -40,7 +40,7 @@ type FindingV2Payload = {
   sessionId: string;
   projectId: string;
   source: "auto_manifest";
-  type: "permission_drift" | "inconsistency";
+  type: "permission_drift" | "inconsistency" | "functional_overlap" | "lifecycle_gap";
   severity: "critical" | "high" | "medium" | "low";
   title: string;
   description: string;
@@ -52,7 +52,7 @@ type FindingV2Payload = {
     observation: string;
     observedAt: string;
   }>;
-  symbolRef: { kind: "route"; identifier: string } | null;
+  symbolRef: { kind: "route" | "entity"; identifier: string } | null;
   manifestProjectId: string;
   manifestRunId: string;
   organizationId?: string;
@@ -208,6 +208,93 @@ function translateConsistency(
     manifestRunId: String(ctx.analysisRunId),
     ...(organizationId ? { organizationId } : {}),
   };
+}
+
+// ── ADR-070 Onda 4 — críticos de grafo no loop + Tribunal ──────────────────
+
+type OverlapItem = { entity: string; opClass: string; severity: string; reason: string; endpoints: Array<{ operation: string }> };
+type LifecycleItem = { entity: string; kind: string; severity: string; reason: string; has: string[] };
+
+/**
+ * Emit sobreposições funcionais (grupos de escrita = 2+ caminhos para a mesma
+ * entidade) como findings `functional_overlap`. Só os de escrita (precisão).
+ */
+export async function emitOverlapFindings(
+  overlaps: OverlapItem[],
+  ctx: EmitContext
+): Promise<EmitResult> {
+  const writes = overlaps.filter((o) => o.severity === "review");
+  if (writes.length === 0) return { skipped: true, reason: "no overlap findings to emit" };
+  return emitToSentinel(
+    ctx,
+    (sessionId, organizationId) =>
+      writes.map((o) => {
+        const observedAt = new Date().toISOString();
+        return {
+          sessionId,
+          projectId: String(ctx.manifestProjectId),
+          source: "auto_manifest" as const,
+          type: "functional_overlap" as const,
+          severity: "medium" as const,
+          title: `${o.endpoints.length} caminhos fazem ${o.opClass} de '${o.entity}'`,
+          description: o.reason,
+          subtype: `${o.opClass.toLowerCase()}_overlap`,
+          schemaVersion: "2.0.0" as const,
+          evidences: [{
+            source: "auto_manifest" as const,
+            sourceRunId: String(ctx.analysisRunId),
+            observation: o.reason,
+            observedAt,
+          }],
+          symbolRef: { kind: "entity" as const, identifier: o.entity },
+          manifestProjectId: String(ctx.manifestProjectId),
+          manifestRunId: String(ctx.analysisRunId),
+          ...(organizationId ? { organizationId } : {}),
+        };
+      }),
+    "functional_overlap"
+  );
+}
+
+/**
+ * Emit buracos de ciclo de vida (entidade escrita sem leitura própria) como
+ * findings `lifecycle_gap`. Só os de severidade alta (writable-not-readable).
+ */
+export async function emitCompletenessFindings(
+  findings: LifecycleItem[],
+  ctx: EmitContext
+): Promise<EmitResult> {
+  const high = findings.filter((f) => f.severity === "high");
+  if (high.length === 0) return { skipped: true, reason: "no lifecycle findings to emit" };
+  return emitToSentinel(
+    ctx,
+    (sessionId, organizationId) =>
+      high.map((f) => {
+        const observedAt = new Date().toISOString();
+        return {
+          sessionId,
+          projectId: String(ctx.manifestProjectId),
+          source: "auto_manifest" as const,
+          type: "lifecycle_gap" as const,
+          severity: "high" as const,
+          title: `'${f.entity}' é escrita (${f.has.join("/")}) mas não tem leitura própria`,
+          description: f.reason,
+          subtype: f.kind.toLowerCase(),
+          schemaVersion: "2.0.0" as const,
+          evidences: [{
+            source: "auto_manifest" as const,
+            sourceRunId: String(ctx.analysisRunId),
+            observation: f.reason,
+            observedAt,
+          }],
+          symbolRef: { kind: "entity" as const, identifier: f.entity },
+          manifestProjectId: String(ctx.manifestProjectId),
+          manifestRunId: String(ctx.analysisRunId),
+          ...(organizationId ? { organizationId } : {}),
+        };
+      }),
+    "lifecycle_gap"
+  );
 }
 
 /**

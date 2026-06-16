@@ -262,6 +262,35 @@ export class AnalysisPipeline {
       await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData);
       await this.saveSnapshot(analysisRun.id, projectId, created, appGraph, endpointImpacts, fileData);
 
+      // ADR-070 Onda 4 — os críticos de grafo (sobreposição funcional +
+      // incompletude de ciclo de vida) viram findings no Sentinel (loop +
+      // Tribunal). Best-effort: nunca derruba a análise. Computado do mesmo
+      // espelho rico de endpoints que o snapshot guarda.
+      if (endpointImpacts.length > 0) {
+        try {
+          const richManifest = {
+            impactEndpoints: endpointImpacts.map((ei) => ({
+              path: ei.endpoint,
+              controller: ei.controllerClass,
+              entitiesTouched: Array.isArray(ei.entitiesTouched) ? ei.entitiesTouched : [],
+            })),
+          };
+          const [{ detectFunctionalOverlap }, { detectCompletenessGaps }, emitter] = await Promise.all([
+            import("../analyzers/overlap-detector"),
+            import("../analyzers/completeness-detector"),
+            import("../security/sentinel-emitter"),
+          ]);
+          const emitCtx = { manifestProjectId: projectId, analysisRunId: analysisRun.id };
+          const overlapEmit = await emitter.emitOverlapFindings(detectFunctionalOverlap(richManifest).overlaps, emitCtx);
+          const lifecycleEmit = await emitter.emitCompletenessFindings(detectCompletenessGaps(richManifest).findings, emitCtx);
+          for (const [label, r] of [["overlap", overlapEmit], ["lifecycle", lifecycleEmit]] as const) {
+            this.progress("Sentinel", r.skipped ? `${label} emitter skipped: ${r.reason}` : `emitted ${r.emitted} ${label} findings (session=${r.sessionId})`);
+          }
+        } catch (err: any) {
+          this.progress("Sentinel", `graph-critic emit failed: ${err?.message || err}`);
+        }
+      }
+
       let cacheStatus = "full analysis";
       if (backendReused && frontendReused) cacheStatus = "fully cached (no changes)";
       else if (backendReused) cacheStatus = "backend cached, frontend re-analyzed";
