@@ -1587,6 +1587,32 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-070 Onda 7 — crítica de negócio "falta Y dado o domínio": cruza as
+  // entidades do sistema com a ontologia-semente do domínio (contratação
+  // pública, citável). Advisory.
+  app.get("/api/projects/:projectId/domain-coverage", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const { checkDomainCoverage, renderDomainCoverageMarkdown } = await import("./analyzers/domain-coverage");
+      const report = checkDomainCoverage(manifest);
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        res.type("text/markdown; charset=utf-8").send(renderDomainCoverageMarkdown(report, { projectName: project?.name }));
+        return;
+      }
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error building domain coverage:", error);
+      res.status(500).json({ message: "Failed to build domain coverage" });
+    }
+  });
+
   const gitTokens = new Map<string, string>();
 
   app.post("/api/projects/:projectId/git/connect", async (req, res) => {
