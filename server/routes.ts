@@ -1463,16 +1463,20 @@ export async function registerRoutes(
       }
       const manifest = (snapshots[0].manifestJson as any) || {};
       const { computeImpactForFiles, renderImpactDiffMarkdown } = await import("./analyzers/impact-analyzer");
+      const { retrieveAdrsForFiles, renderApplicableAdrsMarkdown } = await import("./analyzers/adr-retrieval");
       const report = computeImpactForFiles(manifest, files);
+      // ADR-070 Onda 1 — decisões arquiteturais que governam a entrega (advisory).
+      const applicableAdrs = retrieveAdrsForFiles(Array.isArray(manifest.adrIndex) ? manifest.adrIndex : [], files);
       // ADR-070 Propósito 2 — `?format=md` devolve o relatório pronto p/
       // documentação (anexo de recebimento de entrega do fornecedor).
       if (String(req.query.format || "").toLowerCase() === "md") {
         const project = await storage.getProject(projectId);
-        const md = renderImpactDiffMarkdown(report, { projectName: project?.name });
+        const md = renderImpactDiffMarkdown(report, { projectName: project?.name })
+          + (applicableAdrs.length ? "\n" + renderApplicableAdrsMarkdown(applicableAdrs) : "");
         res.type("text/markdown; charset=utf-8").send(md);
         return;
       }
-      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report, applicableAdrs });
     } catch (error) {
       console.error("Error computing diff impact:", error);
       res.status(500).json({ message: "Failed to compute diff impact" });
