@@ -1613,6 +1613,32 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-070 Onda 7 — "grandes players já fazem Y" (versão segura, base curada
+  // citável, SEM scraping): cruza os sinais do sistema com as capacidades-padrão
+  // do setor. Advisory + verificação humana.
+  app.get("/api/projects/:projectId/market-coverage", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const { checkMarketCoverage, renderMarketCoverageMarkdown } = await import("./analyzers/market-coverage");
+      const report = checkMarketCoverage(manifest);
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        res.type("text/markdown; charset=utf-8").send(renderMarketCoverageMarkdown(report, { projectName: project?.name }));
+        return;
+      }
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error building market coverage:", error);
+      res.status(500).json({ message: "Failed to build market coverage" });
+    }
+  });
+
   const gitTokens = new Map<string, string>();
 
   app.post("/api/projects/:projectId/git/connect", async (req, res) => {
