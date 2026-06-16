@@ -294,3 +294,80 @@ export function computeImpactForFiles(manifest: any, files: string[]): DiffImpac
     perFile,
   };
 }
+
+// ─────────────────────────────────────────────
+// Relatório de impacto pronto para DOCUMENTAÇÃO (ADR-070 Propósito 2 — "saída
+// pronta pra documentação automática"). Renderiza o DiffImpactReport como
+// Markdown determinístico (sem LLM): resumo do blast radius + telas a revalidar
+// (regressão) + tabela por arquivo entregue + endpoints afetados. É o artefato
+// que o gestor anexa ao recebimento (TRP/TRD) ao homologar uma entrega de
+// fornecedor com código-fonte. Puro; sem I/O.
+// ─────────────────────────────────────────────
+
+function basename(p: string): string {
+  return (p || "").split("/").pop() || p;
+}
+
+/** Renderiza um DiffImpactReport como Markdown documentável. */
+export function renderImpactDiffMarkdown(
+  report: DiffImpactReport,
+  opts: { title?: string; projectName?: string } = {},
+): string {
+  const title = opts.title || "Relatório de Impacto da Entrega";
+  const agg = report.aggregate;
+  const L: string[] = [];
+
+  L.push(`# ${title}`);
+  L.push("");
+  if (opts.projectName) L.push(`**Sistema:** ${opts.projectName}  `);
+  L.push(`**Arquivos entregues:** ${report.files} (${report.matchedFiles} com impacto mapeado)`);
+  L.push("");
+
+  L.push("## Resumo do blast radius");
+  L.push("");
+  L.push(`- **Endpoints afetados:** ${agg.summary.endpoints}`);
+  L.push(`- **Telas a revalidar:** ${agg.summary.screens}`);
+  L.push(`- **Entidades tocadas:** ${agg.summary.entities}${agg.entitiesTouched.length ? ` (${agg.entitiesTouched.join(", ")})` : ""}`);
+  L.push("");
+
+  if (report.matchedFiles === 0) {
+    L.push("> Nenhum dos arquivos entregues casou com o sistema analisado — entrega sem impacto mapeável (arquivo novo, fora do escopo, ou nome divergente). Revise manualmente.");
+    L.push("");
+    return L.join("\n");
+  }
+
+  // Telas a revalidar — o item mais acionável p/ o aceite (regressão).
+  if (agg.impactedScreens.length) {
+    L.push("## Telas a revalidar (risco de regressão)");
+    L.push("");
+    for (const sc of [...agg.impactedScreens].sort((a, b) => a.name.localeCompare(b.name))) {
+      const route = sc.route ? ` — \`${sc.route}\`` : "";
+      L.push(`- **${sc.name}**${route}`);
+    }
+    L.push("");
+  }
+
+  // Impacto por arquivo entregue.
+  L.push("## Impacto por arquivo entregue");
+  L.push("");
+  L.push("| Arquivo | Endpoints | Telas | Entidades |");
+  L.push("|---|--:|--:|--:|");
+  for (const f of [...report.perFile].sort((a, b) => b.summary.endpoints - a.summary.endpoints)) {
+    L.push(`| \`${basename(f.file)}\` | ${f.summary.endpoints} | ${f.summary.screens} | ${f.summary.entities} |`);
+  }
+  L.push("");
+
+  // Endpoints afetados (com a entidade que tocam, quando houver).
+  if (agg.impactedEndpoints.length) {
+    L.push("## Endpoints afetados");
+    L.push("");
+    const eps = [...agg.impactedEndpoints].sort((a, b) => `${a.path}`.localeCompare(`${b.path}`));
+    for (const ep of eps) {
+      const ent = ep.entitiesTouched?.length ? ` — _${ep.entitiesTouched.join(", ")}_` : "";
+      L.push(`- \`${ep.method} ${ep.path}\`${ent}`);
+    }
+    L.push("");
+  }
+
+  return L.join("\n");
+}

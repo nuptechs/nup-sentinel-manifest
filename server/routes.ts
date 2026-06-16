@@ -1462,8 +1462,16 @@ export async function registerRoutes(
         return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
       }
       const manifest = (snapshots[0].manifestJson as any) || {};
-      const { computeImpactForFiles } = await import("./analyzers/impact-analyzer");
+      const { computeImpactForFiles, renderImpactDiffMarkdown } = await import("./analyzers/impact-analyzer");
       const report = computeImpactForFiles(manifest, files);
+      // ADR-070 Propósito 2 — `?format=md` devolve o relatório pronto p/
+      // documentação (anexo de recebimento de entrega do fornecedor).
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        const md = renderImpactDiffMarkdown(report, { projectName: project?.name });
+        res.type("text/markdown; charset=utf-8").send(md);
+        return;
+      }
       res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
     } catch (error) {
       console.error("Error computing diff impact:", error);
