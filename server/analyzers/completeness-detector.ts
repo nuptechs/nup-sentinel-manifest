@@ -99,7 +99,7 @@ export function detectCompletenessGaps(manifest: any): CompletenessReport {
         severity: "high",
         has,
         missing: ["READ"],
-        reason: `Endpoints escrevem '${c.entity}' (${has.join("/")}) mas nenhum a lê — dado gerenciado sem consulta via API.`,
+        reason: `Endpoints escrevem '${c.entity}' (${has.join("/")}) mas nenhum a lê DIRETAMENTE — pode ser lida aninhada num agregado pai (ex.: dentro de um find do contrato); verifique se falta um find/list próprio para gestão.`,
       });
     } else if (c.read && !hasWrite) {
       findings.push({
@@ -140,7 +140,7 @@ export function renderCompletenessMarkdown(report: CompletenessReport, opts: { p
     L.push("");
     return L.join("\n");
   }
-  L.push("> Advisory: candidatos a buraco para revisão humana. Ler-sem-escrever costuma ser dado de referência; escrever-sem-ler é o sinal forte.");
+  L.push("> Advisory: candidatos a buraco para revisão humana. \"Escreve mas não lê\" = sem find/list **próprio** (pode ser lida aninhada num agregado pai); \"lê mas não escreve\" costuma ser dado de referência/seed.");
   L.push("");
   for (const f of report.findings) {
     const sev = f.severity === "high" ? "🔴 escreve mas não lê" : "⚪ lê mas não escreve";
