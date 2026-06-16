@@ -377,7 +377,13 @@ async function emitToSentinel(
   }
 
   // 2. Build + ingest findings as a single batch.
-  const payloads = buildPayloads(sessionId, organizationId);
+  // O `projectId` do finding DEVE ser o projeto Sentinel (uuid), não o id
+  // numérico do projeto interno do Manifest. Os translate setam
+  // `projectId: manifestProjectId` por engano — isso faz os findings landarem
+  // sob "16"/"19" (órfãos) em vez do projeto do sistema, e nunca convergirem no
+  // Tribunal com os de outras naturezas. O `manifestProjectId` segue como campo
+  // separado. Override central cobre todos os builders de uma vez.
+  const payloads = buildPayloads(sessionId, organizationId).map((p) => ({ ...p, projectId }));
   try {
     const { status, body } = await fetchJson(`${baseUrl}/api/findings/ingest`, {
       method: "POST",
