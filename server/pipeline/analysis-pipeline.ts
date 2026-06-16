@@ -5,6 +5,7 @@ import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries } from ".
 import { classifyEntriesDeterministic } from "../analyzers/deterministic-classifier";
 import { detectArchitecture } from "../analyzers/architecture-detector";
 import { generateManifest } from "../generators/manifest-generator";
+import { buildAdrIndex } from "../analyzers/adr-retrieval";
 import { computeFileHashes, detectChanges } from "./change-detector";
 import type { FileHash } from "./change-detector";
 import type { InsertCatalogEntry } from "@shared/schema";
@@ -259,7 +260,7 @@ export class AnalysisPipeline {
 
       const graphSummary = appGraph.toJSON();
       await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData);
-      await this.saveSnapshot(analysisRun.id, projectId, created, appGraph, endpointImpacts);
+      await this.saveSnapshot(analysisRun.id, projectId, created, appGraph, endpointImpacts, fileData);
 
       let cacheStatus = "full analysis";
       if (backendReused && frontendReused) cacheStatus = "fully cached (no changes)";
@@ -370,6 +371,7 @@ export class AnalysisPipeline {
     entries: any[],
     appGraph?: any,
     endpointImpacts?: any[],
+    fileData?: FileData[],
   ) {
     try {
       const project = await storage.getProject(projectId);
@@ -438,10 +440,17 @@ export class AnalysisPipeline {
           }))
         : [];
 
+      // ADR-070 Onda 1 — índice de ADRs (conformidade arquitetural via retrieval).
+      // Se a fatia analisada incluir os .md de ADR (docs/adr/), indexa os
+      // símbolos fortes que cada decisão cita, pra depois responder "quais
+      // decisões governam esta entrega?" sem jogar 64+ ADRs no contexto.
+      const adrIndex = buildAdrIndex(fileData || []);
+
       const enrichedManifest = {
         ...manifest,
         ...(allEntitiesFromGraph.length > 0 ? { allEntitiesFromGraph } : {}),
         ...(impactEndpoints.length > 0 ? { impactEndpoints } : {}),
+        ...(adrIndex.length > 0 ? { adrIndex } : {}),
       };
 
       await storage.createAnalysisSnapshot({
