@@ -1483,6 +1483,32 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-070 Onda 4 — sobreposição funcional: endpoints que fazem a mesma coisa
+  // com a mesma entidade por caminhos diferentes (candidatos a duplicação).
+  // Advisory. `?format=md` devolve o relatório documentável.
+  app.get("/api/projects/:projectId/overlap", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const { detectFunctionalOverlap, renderOverlapMarkdown } = await import("./analyzers/overlap-detector");
+      const report = detectFunctionalOverlap(manifest);
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        res.type("text/markdown; charset=utf-8").send(renderOverlapMarkdown(report, { projectName: project?.name }));
+        return;
+      }
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing functional overlap:", error);
+      res.status(500).json({ message: "Failed to compute functional overlap" });
+    }
+  });
+
   const gitTokens = new Map<string, string>();
 
   app.post("/api/projects/:projectId/git/connect", async (req, res) => {
