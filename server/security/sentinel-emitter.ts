@@ -27,6 +27,23 @@ import type { ConsistencyFinding } from "../analyzers/frontend-backend-consisten
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 
+/**
+ * SENTINEL_API_KEY pode vir como `chave:orgId` (tenant-scoped) e/ou múltiplas
+ * entradas separadas por vírgula. O Sentinel autentica comparando SÓ a parte
+ * `chave` (antes do `:`) — então o header X-Sentinel-Key deve levar a chave NUA,
+ * não `chave:orgId`, senão dá 401. Retorna a 1ª chave + o orgId embutido (se
+ * houver), pra derivar a organização sem env extra.
+ */
+export function parseSentinelKey(raw: string | undefined): { apiKey: string; organizationId: string | undefined } {
+  const firstEntry = (raw || "").split(",")[0]?.trim() || "";
+  const colonIdx = firstEntry.indexOf(":");
+  if (colonIdx < 0) return { apiKey: firstEntry, organizationId: undefined };
+  return {
+    apiKey: firstEntry.slice(0, colonIdx).trim(),
+    organizationId: firstEntry.slice(colonIdx + 1).trim() || undefined,
+  };
+}
+
 type EmitContext = {
   manifestProjectId: number;
   analysisRunId: number;
@@ -310,9 +327,9 @@ async function emitToSentinel(
   label: string
 ): Promise<EmitResult> {
   const baseUrl = process.env.SENTINEL_URL?.replace(/\/+$/, "");
-  const apiKey = process.env.SENTINEL_API_KEY;
+  const { apiKey, organizationId: keyOrgId } = parseSentinelKey(process.env.SENTINEL_API_KEY);
   const projectId = process.env.SENTINEL_PROJECT_ID;
-  const organizationId = process.env.SENTINEL_ORG_ID;
+  const organizationId = process.env.SENTINEL_ORG_ID || keyOrgId;
   const timeoutMs = Number(process.env.SENTINEL_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
 
   if (!baseUrl) return { skipped: true, reason: "SENTINEL_URL not set" };
