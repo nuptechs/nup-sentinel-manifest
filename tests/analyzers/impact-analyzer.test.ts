@@ -7,7 +7,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { computeImpact, computeImpactForFiles, symbolsForFile } from "../../server/analyzers/impact-analyzer.ts";
+import { computeImpact, computeImpactForFiles, symbolsForFile, renderImpactDiffMarkdown } from "../../server/analyzers/impact-analyzer.ts";
 
 const MANIFEST = {
   endpoints: [
@@ -189,6 +189,42 @@ describe("computeImpactForFiles (impacto de um diff/entrega)", () => {
     const r = computeImpactForFiles(MANIFEST, []);
     assert.equal(r.files, 0);
     assert.equal(r.aggregate.summary.endpoints, 0);
+  });
+});
+
+describe("renderImpactDiffMarkdown (Propósito 2 — saída p/ documentação)", () => {
+  it("renderiza resumo, telas a revalidar, tabela por arquivo e endpoints", () => {
+    const r = computeImpactForFiles(MANIFEST, [
+      "src/main/java/.../ContractController.java",
+      "src/main/java/.../UserController.java",
+    ]);
+    const md = renderImpactDiffMarkdown(r, { projectName: "easynup" });
+    assert.match(md, /^# Relatório de Impacto da Entrega/);
+    assert.match(md, /\*\*Sistema:\*\* easynup/);
+    assert.match(md, /\*\*Endpoints afetados:\*\* 2/);
+    assert.match(md, /## Telas a revalidar/);
+    assert.match(md, /\*\*ContractEdit\*\*/);
+    assert.match(md, /\*\*UserList\*\*/);
+    assert.match(md, /## Impacto por arquivo entregue/);
+    assert.match(md, /\| Arquivo \| Endpoints \| Telas \| Entidades \|/);
+    assert.match(md, /## Endpoints afetados/);
+    assert.match(md, /`PUT \/api\/contracts\/\{id\}`/);
+    // entidade aparece junto do endpoint
+    assert.match(md, /_Contract/);
+  });
+
+  it("entrega sem casar → relatório honesto (não finge impacto)", () => {
+    const r = computeImpactForFiles(MANIFEST, ["docs/README.md", "infra/deploy.sh"]);
+    const md = renderImpactDiffMarkdown(r);
+    assert.match(md, /Nenhum dos arquivos entregues casou/);
+    assert.doesNotMatch(md, /## Telas a revalidar/);
+  });
+
+  it("título customizável + sem projectName não quebra", () => {
+    const r = computeImpactForFiles(MANIFEST, ["src/main/java/.../ContractController.java"]);
+    const md = renderImpactDiffMarkdown(r, { title: "Recebimento OS-123" });
+    assert.match(md, /^# Recebimento OS-123/);
+    assert.doesNotMatch(md, /\*\*Sistema:\*\*/);
   });
 });
 
