@@ -50,7 +50,7 @@ const VERB_CLASS: Array<[OpClass, RegExp]> = [
   ["READ", /^(find|get|fetch|load|read|view|show|resolve|count|export|download|list|search|browse|query)/],
 ];
 
-function classifyVerb(op: string): OpClass {
+export function classifyVerb(op: string): OpClass {
   const lc = op.toLowerCase();
   for (const [cls, re] of VERB_CLASS) {
     if (re.test(lc)) return cls;
@@ -80,7 +80,7 @@ function parseEntityFromOp(op: string): { entity: string; cardinality: "single" 
 }
 
 /** Extrai a operação de um path `/easynup/<op>.v<N>` (ou null se não casar). */
-function operationOf(path: string): string | null {
+export function operationOf(path: string): string | null {
   if (typeof path !== "string") return null;
   const m = path.match(/\/easynup\/([A-Za-z0-9]+)\.v\d+$/);
   return m ? m[1] : null;
