@@ -287,6 +287,88 @@ export function endpointImpactsToCatalogEntries(
   });
 }
 
+/**
+ * Materializa os endpoints WsV1 (convenção @Ws do easynup) como catalog entries.
+ *
+ * `augmentGraphWithWsV1` cria nós CONTROLLER sintéticos com `fullPath`
+ * (/easynup/<op>.v<N>) + edges READS/WRITES_ENTITY pela convenção verbo+entidade,
+ * MAS o `connectGraph` só emitia entries de interações frontend / endpointImpacts
+ * — então a SUPERFÍCIE DE API WsV1 (a real do backend) sumia do catálogo
+ * (endpoint:"/"). Aqui cada nó WsV1 vira um entry com o path REAL + a entidade que
+ * opera (via `walkCallChain`, que segue as edges sintéticas). Idempotente por
+ * (httpMethod, endpoint) no chamador.
+ */
+export function wsv1NodesToCatalogEntries(
+  graph: ApplicationGraph,
+  analysisRunId: number,
+  projectId: number
+): InsertCatalogEntry[] {
+  const entries: InsertCatalogEntry[] = [];
+  for (const node of graph.getNodesByType("CONTROLLER")) {
+    const meta = node.metadata as Record<string, unknown>;
+    if (meta.synthetic !== true || !meta.fullPath) continue;
+
+    const endpoint = String(meta.fullPath);
+    const httpMethod = (meta.httpMethod as string) || "GET";
+    const chain = walkCallChain(graph, node.id);
+    const technicalOperation = inferOperationType(
+      chain.serviceMethods,
+      chain.repositoryMethods,
+      httpMethod,
+      chain.persistenceOperations
+    );
+
+    entries.push({
+      analysisRunId,
+      projectId,
+      screen: `API: ${node.className}`,
+      interaction: `${httpMethod} ${endpoint}`,
+      interactionType: "endpoint",
+      endpoint,
+      httpMethod,
+      controllerClass: node.className,
+      controllerMethod: null,
+      serviceMethods: chain.serviceMethods,
+      repositoryMethods: chain.repositoryMethods,
+      entitiesTouched: chain.entitiesTouched,
+      fullCallChain: chain.fullCallChain,
+      persistenceOperations: chain.persistenceOperations,
+      technicalOperation,
+      criticalityScore: null,
+      suggestedMeaning: null,
+      humanClassification: null,
+      sourceFile: (meta.sourceFile as string) || null,
+      lineNumber: (meta.lineNumber as number) || null,
+      resolutionPath: [{
+        tier: "backend_only",
+        file: (meta.sourceFile as string) || node.className,
+        function: "handle",
+        detail: "WsV1 convention (@Ws → /easynup/<op>.v<N>)",
+      }],
+      architectureType: "WS_OPERATION_BASED",
+      interactionCategory: "HTTP",
+      confidence: 1.0,
+      requiredRoles: chain.requiredRoles,
+      securityAnnotations: chain.securityAnnotations,
+      entityFieldsMetadata: chain.entityFieldsMetadata,
+      sensitiveFieldsAccessed: chain.sensitiveFieldsAccessed,
+      frontendRoute: null,
+      routeGuards: [],
+      duplicateCount: 1,
+      operationHint: null,
+      dataSource: {
+        endpoint: "extracted" as const,
+        httpMethod: "extracted" as const,
+        controllerClass: "extracted" as const,
+        // entitiesTouched vem da convenção verbo+entidade (inferência, não
+        // resolução de cadeia de chamada real) — marcado honestamente.
+        ...(chain.entitiesTouched.length > 0 ? { entitiesTouched: "inferred" as const } : {}),
+      },
+    });
+  }
+  return entries;
+}
+
 function buildExtractedDataSource(
   interaction: FrontendInteraction,
   controllerClass: string | null,

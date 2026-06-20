@@ -1,7 +1,7 @@
 import { storage } from "../storage";
 import { analyzeFrontend } from "../analyzers/frontend-analyzer";
 import { buildApplicationGraph, analyzeGraphEndpoints, reconstructGraph } from "../analyzers/backend-java-client";
-import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries } from "../analyzers/graph-connector";
+import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries, wsv1NodesToCatalogEntries } from "../analyzers/graph-connector";
 import { classifyEntriesDeterministic } from "../analyzers/deterministic-classifier";
 import { detectArchitecture } from "../analyzers/architecture-detector";
 import { generateManifest } from "../generators/manifest-generator";
@@ -378,6 +378,23 @@ export class AnalysisPipeline {
       catalogEntryData = endpointImpactsToCatalogEntries(
         endpointImpacts, appGraph, analysisRunId, projectId
       );
+    }
+
+    // A SUPERFÍCIE DE API WsV1 (@Ws → /easynup/<op>.v<N>) não aparece como
+    // @*Mapping nem como interação frontend, então o path-frontend acima a perde
+    // (catálogo vinha com endpoint:"/"). `augmentGraphWithWsV1` já criou os nós
+    // CONTROLLER sintéticos com fullPath + edge pra entidade; aqui materializamos
+    // cada um como entry com o path REAL. Dedup por (httpMethod, endpoint).
+    const wsv1Entries = wsv1NodesToCatalogEntries(appGraph, analysisRunId, projectId);
+    if (wsv1Entries.length > 0) {
+      const seen = new Set(catalogEntryData.map((e) => `${e.httpMethod || ""} ${e.endpoint || ""}`));
+      for (const e of wsv1Entries) {
+        const key = `${e.httpMethod || ""} ${e.endpoint || ""}`;
+        if (!seen.has(key)) {
+          catalogEntryData.push(e);
+          seen.add(key);
+        }
+      }
     }
 
     return catalogEntryData;
