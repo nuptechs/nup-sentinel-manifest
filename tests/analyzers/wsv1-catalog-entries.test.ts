@@ -54,6 +54,24 @@ describe("wsv1NodesToCatalogEntries", () => {
     assert.notEqual(e!.endpoint, "/");
   });
 
+  it("deriva httpMethod + technicalOperation do VERBO (find→GET/READ), ignorando o método sintético errado", () => {
+    const g = new ApplicationGraph();
+    // metadata com httpMethod errado (POST) — o verbo deve prevalecer
+    g.addNode(new GraphNode("wsv1:POST:/easynup/findUsers.v1", "CONTROLLER", "FindUsersWsV1", "execute", null, {
+      httpMethod: "POST", fullPath: "/easynup/findUsers.v1", synthetic: true,
+    }));
+    g.addNode(new GraphNode("wsv1:POST:/easynup/deleteUser.v1", "CONTROLLER", "DeleteUserWsV1", "execute", null, {
+      httpMethod: "POST", fullPath: "/easynup/deleteUser.v1", synthetic: true,
+    }));
+    const entries = wsv1NodesToCatalogEntries(g, 1, 3);
+    const find = entries.find((x) => x.endpoint === "/easynup/findUsers.v1")!;
+    const del = entries.find((x) => x.endpoint === "/easynup/deleteUser.v1")!;
+    assert.equal(find.httpMethod, "GET");
+    assert.equal(find.technicalOperation, "READ");   // era CREATE (bug)
+    assert.equal(del.httpMethod, "POST");
+    assert.equal(del.technicalOperation, "DELETE");  // era CREATE (bug)
+  });
+
   it("popula entitiesTouched + entityFieldsMetadata via a edge sintética", () => {
     const entries = wsv1NodesToCatalogEntries(graphWithWsV1(), 1, 3);
     const e = entries.find((x) => x.endpoint === "/easynup/findContracts.v1")!;

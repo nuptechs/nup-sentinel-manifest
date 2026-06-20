@@ -287,6 +287,28 @@ export function endpointImpactsToCatalogEntries(
   });
 }
 
+/** "/easynup/findContracts.v1" → "findContracts". null pra paths fora da convenção. */
+function wsv1OperationOf(fullPath: string): string | null {
+  const m = String(fullPath).match(/^\/easynup\/([A-Za-z0-9]+)\.v\d+$/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * Deriva (httpMethod, technicalOperation) do VERBO da operação WsV1 — a fonte
+ * autoritativa pro easynup (find=leitura/GET, create=escrita/POST...). Necessário
+ * porque o nó sintético não carrega o verbo HTTP real (extractWsV1Endpoints
+ * marcava tudo POST) e o `inferOperationType` sem cadeia de chamada real retorna
+ * CREATE pra tudo. Retorna null em campo desconhecido (caller cai no fallback).
+ */
+function wsv1VerbClassification(op: string | null): { httpMethod: string | null; technicalOperation: string | null } {
+  if (!op) return { httpMethod: null, technicalOperation: null };
+  if (/^(delete|remove|destroy|archive|purge|clear|deactivate)/i.test(op)) return { httpMethod: "POST", technicalOperation: "DELETE" };
+  if (/^(update|edit|patch|modify|save|set|reorder|move|assign|unassign|link|unlink|reactivate)/i.test(op)) return { httpMethod: "POST", technicalOperation: "UPDATE" };
+  if (/^(create|add|new|register|insert|import|bulk|generate|provision|upsert|approve|reject|submit|process|apply|sync|cancel|close|open|finish|start|recalculate)/i.test(op)) return { httpMethod: "POST", technicalOperation: "CREATE" };
+  if (/^(find|get|list|search|count|export|validate|resolve|calculate|preview|check|download|view|simulate|suggest|score|fetch|read|analyze)/i.test(op)) return { httpMethod: "GET", technicalOperation: "READ" };
+  return { httpMethod: null, technicalOperation: null };
+}
+
 /**
  * Materializa os endpoints WsV1 (convenção @Ws do easynup) como catalog entries.
  *
@@ -295,7 +317,8 @@ export function endpointImpactsToCatalogEntries(
  * MAS o `connectGraph` só emitia entries de interações frontend / endpointImpacts
  * — então a SUPERFÍCIE DE API WsV1 (a real do backend) sumia do catálogo
  * (endpoint:"/"). Aqui cada nó WsV1 vira um entry com o path REAL + a entidade que
- * opera (via `walkCallChain`, que segue as edges sintéticas). Idempotente por
+ * opera (via `walkCallChain`, que segue as edges sintéticas) + httpMethod e
+ * technicalOperation derivados do VERBO (find=READ/GET...). Idempotente por
  * (httpMethod, endpoint) no chamador.
  */
 export function wsv1NodesToCatalogEntries(
@@ -309,9 +332,12 @@ export function wsv1NodesToCatalogEntries(
     if (meta.synthetic !== true || !meta.fullPath) continue;
 
     const endpoint = String(meta.fullPath);
-    const httpMethod = (meta.httpMethod as string) || "GET";
     const chain = walkCallChain(graph, node.id);
-    const technicalOperation = inferOperationType(
+    // Verbo da operação é a fonte autoritativa do método+operação no easynup.
+    // Fallback: método extraído / inferOperationType quando o verbo é desconhecido.
+    const verb = wsv1VerbClassification(wsv1OperationOf(endpoint));
+    const httpMethod = verb.httpMethod || (meta.httpMethod as string) || "GET";
+    const technicalOperation = verb.technicalOperation || inferOperationType(
       chain.serviceMethods,
       chain.repositoryMethods,
       httpMethod,
