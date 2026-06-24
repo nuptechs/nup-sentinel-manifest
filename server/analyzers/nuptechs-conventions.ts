@@ -44,6 +44,14 @@ export interface SyntheticEndpoint {
   sourceFile: string;
   lineNumber: number;
   origin: "wsv1" | "wsv1-explicit";
+  /**
+   * Permissions/roles the endpoint requires, parsed from the WsV1 file content.
+   * easynup guards endpoints with `@HasPermission(P.UPDATE_CONTRACT)` and
+   * `@IsAuthenticated` (cloudsupport convention) — neither is `@PreAuthorize`,
+   * so the Java engine's standard security extraction misses them. We recover
+   * the permission constant (e.g. `UPDATE_CONTRACT`) and `AUTHENTICATED` here.
+   */
+  requiredRoles: string[];
 }
 
 /** Mount prefixes the WsV1 inventory already covers precisely, or that are too
@@ -103,11 +111,49 @@ export function extractWsV1Endpoints(
         .pop()
         ?.replace(/\.java$/, "") || fullPath;
     const lineNumber = lineOf(file.content, explicitMatch?.[0] ?? "@Ws");
+    const requiredRoles = extractWsV1Roles(file.content);
 
-    out.push({ fullPath, httpMethod: "POST", className, sourceFile: file.filePath, lineNumber, origin });
+    out.push({ fullPath, httpMethod: "POST", className, sourceFile: file.filePath, lineNumber, origin, requiredRoles });
   }
 
   return out;
+}
+
+const HAS_PERMISSION_RE = /@HasPermission\s*\(([^)]*)\)/g;
+const PERMISSION_CONST_RE = /\bP\.([A-Z][A-Z0-9_]*)/g;
+const PERMISSION_STRING_RE = /["']([^"']+)["']/g;
+const IS_AUTHENTICATED_RE = /@IsAuthenticated\b/;
+
+/**
+ * Parse the security guards from a WsV1 file's content.
+ * Recovers the permission constants inside `@HasPermission(P.X[, P.Y])`
+ * (stored without the `P.` prefix → `X`, `Y`) and a string-literal form
+ * `@HasPermission("custom.perm")`, plus `AUTHENTICATED` when `@IsAuthenticated`
+ * is present. Returns a de-duplicated, stable-ordered list. Pure, no I/O.
+ * These guards are the cloudsupport convention easynup uses instead of Spring's
+ * `@PreAuthorize`, which is why the Java engine's standard extraction returns [].
+ */
+export function extractWsV1Roles(content: string): string[] {
+  const roles = new Set<string>();
+  let m: RegExpExecArray | null;
+  HAS_PERMISSION_RE.lastIndex = 0;
+  while ((m = HAS_PERMISSION_RE.exec(content)) !== null) {
+    const args = m[1];
+    let c: RegExpExecArray | null;
+    PERMISSION_CONST_RE.lastIndex = 0;
+    let matchedConst = false;
+    while ((c = PERMISSION_CONST_RE.exec(args)) !== null) {
+      roles.add(c[1]);
+      matchedConst = true;
+    }
+    if (!matchedConst) {
+      PERMISSION_STRING_RE.lastIndex = 0;
+      let s: RegExpExecArray | null;
+      while ((s = PERMISSION_STRING_RE.exec(args)) !== null) roles.add(s[1]);
+    }
+  }
+  if (IS_AUTHENTICATED_RE.test(content)) roles.add("AUTHENTICATED");
+  return Array.from(roles);
 }
 
 /**
@@ -192,6 +238,10 @@ export function augmentGraphWithWsV1(
           lineNumber: ep.lineNumber,
           synthetic: true,
           convention: ep.origin,
+          // Surfaced so graph-connector (meta.requiredRoles) and the manifest
+          // endpoint inherit the WsV1 permission guard. Empty when the file has
+          // neither @HasPermission nor @IsAuthenticated (public/internal).
+          requiredRoles: ep.requiredRoles,
         }),
       );
       added++;

@@ -19,6 +19,7 @@ import assert from "node:assert/strict";
 
 import {
   extractWsV1Endpoints,
+  extractWsV1Roles,
   extractGatewayPrefixes,
   augmentGraphWithWsV1,
   isCoveredByGatewayPrefix,
@@ -88,6 +89,55 @@ describe("extractWsV1Endpoints (B)", () => {
       javaFile("src/main/java/easynup/services/web/y/findContract/v1/FindContractWsV1.java"),
     ]);
     assert.equal(eps.length, 1);
+  });
+
+  it("extrai a permissão do guard @HasPermission + @IsAuthenticated no endpoint", () => {
+    const content =
+      "@Ws\n@IsAuthenticated\n@HasPermission(P.UPDATE_CONTRACT)\n@PostMapping\npublic class UpdateContractWsV1 extends BaseWs {}";
+    const eps = extractWsV1Endpoints([
+      javaFile("src/main/java/easynup/services/web/contracts/updateContract/v1/UpdateContractWsV1.java", content),
+    ]);
+    assert.equal(eps.length, 1);
+    assert.deepEqual(eps[0].requiredRoles.sort(), ["AUTHENTICATED", "UPDATE_CONTRACT"]);
+  });
+});
+
+describe("extractWsV1Roles — guards cloudsupport (não-@PreAuthorize)", () => {
+  it("@HasPermission(P.X) → constante sem o prefixo P.", () => {
+    assert.deepEqual(extractWsV1Roles("@HasPermission(P.DELETE_SLA)"), ["DELETE_SLA"]);
+  });
+  it("múltiplas permissões @HasPermission(P.A, P.B)", () => {
+    assert.deepEqual(extractWsV1Roles("@HasPermission(P.A, P.B)").sort(), ["A", "B"]);
+  });
+  it("forma com string literal @HasPermission(\"custom.perm\")", () => {
+    assert.deepEqual(extractWsV1Roles('@HasPermission("custom.perm")'), ["custom.perm"]);
+  });
+  it("@IsAuthenticated sozinho → AUTHENTICATED", () => {
+    assert.deepEqual(extractWsV1Roles("@IsAuthenticated\npublic class X {}"), ["AUTHENTICATED"]);
+  });
+  it("sem guard → [] (endpoint público/interno, não inventa)", () => {
+    assert.deepEqual(extractWsV1Roles("@Ws\npublic class X {}"), []);
+  });
+  it("dedup quando a mesma permissão aparece 2x", () => {
+    assert.deepEqual(extractWsV1Roles("@HasPermission(P.X)\n@HasPermission(P.X)"), ["X"]);
+  });
+});
+
+describe("augmentGraphWithWsV1 — propaga a permissão pro nó do endpoint", () => {
+  it("o nó CONTROLLER sintético carrega meta.requiredRoles (flui pro manifesto via graph-connector)", () => {
+    const graph = new ApplicationGraph();
+    augmentGraphWithWsV1(graph, [
+      javaFile(
+        "src/main/java/easynup/services/web/contracts/updateContract/v1/UpdateContractWsV1.java",
+        "@Ws\n@IsAuthenticated\n@HasPermission(P.UPDATE_CONTRACT)\npublic class UpdateContractWsV1 {}",
+      ),
+    ]);
+    const node = graph.getNode("wsv1:POST:/easynup/updateContract.v1");
+    assert.ok(node, "nó do endpoint criado");
+    assert.deepEqual(
+      (node!.metadata.requiredRoles as string[]).sort(),
+      ["AUTHENTICATED", "UPDATE_CONTRACT"],
+    );
   });
 });
 
