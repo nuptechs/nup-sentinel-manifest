@@ -1534,6 +1534,38 @@ export async function registerRoutes(
     }
   });
 
+  // Consulta de governança: quais endpoints estão sem proteção e quais exigem
+  // cada permissão — possível depois que a extração de @HasPermission passou a
+  // popular requiredRoles. Advisory; vazio≠falhou (sem endpoints → zerado).
+  app.get("/api/projects/:projectId/permission-governance", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const { detectPermissionGovernance, renderPermissionGovernanceMarkdown } = await import("./analyzers/permission-governance");
+      const report = detectPermissionGovernance(manifest);
+      // Filtro opcional: ?permission=UPDATE_CONTRACT → só os endpoints dessa permissão.
+      const wanted = typeof req.query.permission === "string" ? req.query.permission : null;
+      if (wanted) {
+        const hit = report.byPermission.find((p) => p.permission === wanted);
+        return res.json({ projectId, permission: wanted, endpoints: hit?.endpoints ?? [] });
+      }
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        res.type("text/markdown; charset=utf-8").send(renderPermissionGovernanceMarkdown(report, { projectName: project?.name }));
+        return;
+      }
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing permission governance:", error);
+      res.status(500).json({ message: "Failed to compute permission governance" });
+    }
+  });
+
   // ADR-070 — dossiê de avaliação do sistema: superfície + sobreposição +
   // incompletude + ADRs num relatório único, pronto pra documentação. Advisory.
   app.get("/api/projects/:projectId/assessment", async (req, res) => {
