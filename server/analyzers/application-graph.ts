@@ -1,6 +1,20 @@
 export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY";
 export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY";
 
+/**
+ * True when an endpoint path is malformed and should NOT be reported as a real
+ * endpoint — protects precision. Catches the false positives seen in the
+ * easynup run: `{param}{param}` (two unresolved URL fragments concatenated) and
+ * a `{param}` glued directly to alphanumerics. Conservative: a single
+ * well-formed `/seg/{param}/seg` path is NOT flagged.
+ */
+export function isMalformedEndpointPath(path: string | null | undefined): boolean {
+  if (!path) return true;
+  if (path.includes("{param}{param}")) return true;
+  if (/[A-Za-z0-9]\{param\}/.test(path) || /\{param\}[A-Za-z0-9]/.test(path)) return true;
+  return false;
+}
+
 export class GraphNode {
   readonly id: string;
   readonly type: NodeType;
@@ -242,6 +256,9 @@ export function analyzeEndpoints(graph: ApplicationGraph): EndpointImpact[] {
       }
     };
     measureDepth(node.id, 0);
+
+    // Precisão: não reporta endpoint com path malformado (ex. {param}{param}).
+    if (isMalformedEndpointPath(meta.fullPath)) continue;
 
     impacts.push({
       endpoint: meta.fullPath,

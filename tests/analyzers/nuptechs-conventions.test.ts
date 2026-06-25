@@ -24,8 +24,11 @@ import {
   augmentGraphWithWsV1,
   isCoveredByGatewayPrefix,
   mapInteractionsToGatewayPrefixes,
+  toSnakeCase,
+  parseEntityColumns,
+  enrichEntityColumns,
 } from "../../server/analyzers/nuptechs-conventions.ts";
-import { ApplicationGraph, analyzeEndpoints, GraphNode } from "../../server/analyzers/application-graph.ts";
+import { ApplicationGraph, analyzeEndpoints, GraphNode, isMalformedEndpointPath } from "../../server/analyzers/application-graph.ts";
 import { matchUrlToEndpoint } from "../../server/analyzers/frontend/utils.ts";
 import { detectFrontendBackendInconsistencies } from "../../server/analyzers/frontend-backend-consistency.ts";
 import type { FrontendInteraction } from "../../server/analyzers/frontend-analyzer.ts";
@@ -320,5 +323,85 @@ describe("augmentGraphWithWsV1 — conexão WsV1→entidade (profundidade de imp
     augmentGraphWithWsV1(graph, [java("src/main/java/easynup/services/web/x/feelEvaluate/v1/FeelEvaluateWsV1.java")]);
     const ep = analyzeEndpoints(graph).find((e) => e.endpoint === "/easynup/feelEvaluate.v1")!;
     assert.deepEqual(ep.entitiesTouched, []);
+  });
+});
+
+describe("toSnakeCase — fallback de nome de coluna", () => {
+  it("camelCase → snake_case", () => {
+    assert.equal(toSnakeCase("monthlyValue"), "monthly_value");
+    assert.equal(toSnakeCase("maxDurationMonths"), "max_duration_months");
+    assert.equal(toSnakeCase("pfValue"), "pf_value");
+    assert.equal(toSnakeCase("name"), "name");
+  });
+});
+
+describe("parseEntityColumns — @Column(name) explícito", () => {
+  it("mapeia o campo pro nome de coluna (inclui @jakarta.persistence.Column)", () => {
+    const src =
+      '@jakarta.persistence.Column(name = "monthly_value")\nprivate BigDecimal monthlyValue;\n@Column(name = "payment_terms", length = 2000)\nprivate String paymentTerms;';
+    const m = parseEntityColumns(src);
+    assert.equal(m.get("monthlyValue"), "monthly_value");
+    assert.equal(m.get("paymentTerms"), "payment_terms");
+  });
+  it("não confunde @Size(max=10) com um campo (anotação intermediária)", () => {
+    const src = '@Column(name = "foo_col")\n@Size(max = 10)\nprivate String foo;';
+    const m = parseEntityColumns(src);
+    assert.equal(m.get("foo"), "foo_col");
+    assert.equal(m.has("max"), false);
+  });
+  it("campo sem @Column não entra no mapa (caller aplica snake_case)", () => {
+    const m = parseEntityColumns("private String createdBy;");
+    assert.equal(m.has("createdBy"), false);
+  });
+});
+
+describe("enrichEntityColumns — coluna real no nó da entidade", () => {
+  it("explícito do @Column + fallback snake_case, mutando enrichedFields", () => {
+    const graph = new ApplicationGraph();
+    graph.addNode(
+      new GraphNode("ent:Contract", "ENTITY", "Contract", null, null, {
+        enrichedFields: [
+          { name: "monthlyValue", type: "BigDecimal", isId: false, isSensitive: false },
+          { name: "createdBy", type: "String", isId: false, isSensitive: false },
+        ],
+      }),
+    );
+    const n = enrichEntityColumns(graph, [
+      {
+        filePath: "src/main/java/easynup/persistence/entities/Contract.java",
+        content: '@Column(name = "monthly_value")\nprivate BigDecimal monthlyValue;\nprivate String createdBy;',
+      },
+    ]);
+    assert.equal(n, 2);
+    const fields = graph.getNode("ent:Contract")!.metadata.enrichedFields as { name: string; column: string }[];
+    assert.equal(fields.find((f) => f.name === "monthlyValue")!.column, "monthly_value"); // explícito
+    assert.equal(fields.find((f) => f.name === "createdBy")!.column, "created_by"); // fallback
+  });
+  it("entidade sem fonte → fallback snake_case em todos os campos (não quebra)", () => {
+    const graph = new ApplicationGraph();
+    graph.addNode(
+      new GraphNode("ent:X", "ENTITY", "X", null, null, {
+        enrichedFields: [{ name: "fooBar", type: "String", isId: false, isSensitive: false }],
+      }),
+    );
+    enrichEntityColumns(graph, []);
+    const fields = graph.getNode("ent:X")!.metadata.enrichedFields as { name: string; column: string }[];
+    assert.equal(fields[0].column, "foo_bar");
+  });
+});
+
+describe("isMalformedEndpointPath — precisão (corta endpoints-lixo)", () => {
+  it("{param}{param} e param colado em alfanumérico → malformado", () => {
+    assert.equal(isMalformedEndpointPath("/api/audit360/{param}{param}"), true);
+    assert.equal(isMalformedEndpointPath("/api/x/foo{param}"), true);
+    assert.equal(isMalformedEndpointPath("/api/x/{param}bar"), true);
+  });
+  it("path bem-formado com {param} isolado NÃO é cortado", () => {
+    assert.equal(isMalformedEndpointPath("/easynup/findContract.v1"), false);
+    assert.equal(isMalformedEndpointPath("/api/users/{param}/orders"), false);
+  });
+  it("vazio/null → malformado", () => {
+    assert.equal(isMalformedEndpointPath(""), true);
+    assert.equal(isMalformedEndpointPath(null), true);
   });
 });

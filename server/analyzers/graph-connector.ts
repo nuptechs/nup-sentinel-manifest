@@ -5,7 +5,7 @@ import type { ArchitectureType } from "./architecture-detector";
 
 interface EntityFieldMeta {
   entity: string;
-  fields: { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[];
+  fields: { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[]; column?: string }[];
 }
 
 interface SecurityAnnotationMeta {
@@ -71,7 +71,7 @@ function walkCallChain(
     if (n.type === "ENTITY") {
       entityNames.add(n.className);
       if (meta.enrichedFields && Array.isArray(meta.enrichedFields)) {
-        const fields = meta.enrichedFields as { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[];
+        const fields = meta.enrichedFields as { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[]; column?: string }[];
         entityFieldsMeta.push({ entity: n.className, fields });
         for (const f of fields) {
           if (f.isSensitive) sensitiveFields.add(`${n.className}.${f.name}`);
@@ -95,7 +95,7 @@ function walkCallChain(
           persistenceOps.add(specificOp);
           const targetMeta = targetNode.metadata as Record<string, unknown>;
           if (targetMeta.enrichedFields && Array.isArray(targetMeta.enrichedFields)) {
-            const fields = targetMeta.enrichedFields as { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[];
+            const fields = targetMeta.enrichedFields as { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[]; column?: string }[];
             entityFieldsMeta.push({ entity: targetNode.className, fields });
             for (const f of fields) {
               if (f.isSensitive) sensitiveFields.add(`${targetNode.className}.${f.name}`);

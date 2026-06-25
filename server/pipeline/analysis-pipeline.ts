@@ -15,6 +15,7 @@ import { detectFrontendBackendInconsistencies } from "../analyzers/frontend-back
 import { enrichCatalogEntriesWithInference } from "../analyzers/frontend-inference-engine";
 import {
   augmentGraphWithWsV1,
+  enrichEntityColumns,
   extractGatewayPrefixes,
   mapInteractionsToGatewayPrefixes,
 } from "../analyzers/nuptechs-conventions";
@@ -342,6 +343,14 @@ export class AnalysisPipeline {
     const wsV1Added = augmentGraphWithWsV1(appGraph, fileData);
     if (wsV1Added > 0) {
       this.progress("Step 1/4", `Augmented with ${wsV1Added} WsV1 convention endpoints (/easynup/*.v<N>)`);
+    }
+
+    // Enriquece os campos das entidades com o nome real da coluna no banco
+    // (@Column(name="...") + fallback snake_case) — completa a jornada
+    // tela→endpoint→entidade→COLUNA. Aditivo: muta enrichedFields in-place.
+    const colsEnriched = enrichEntityColumns(appGraph, fileData);
+    if (colsEnriched > 0) {
+      this.progress("Step 1/4", `Enriched ${colsEnriched} entity fields with DB column names`);
     }
 
     const archResult = detectArchitecture(appGraph, fileData);

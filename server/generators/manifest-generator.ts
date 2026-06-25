@@ -1,4 +1,5 @@
 import type { CatalogEntry, Project } from "@shared/schema";
+import { isMalformedEndpointPath } from "../analyzers/application-graph";
 
 interface ManifestEndpoint {
   path: string;
@@ -45,7 +46,7 @@ interface ManifestEntity {
   operations: string[];
   accessedBy: { controller: string; method: string; endpoint: string }[];
   sensitiveFields: string[];
-  fieldMetadata: { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[] }[];
+  fieldMetadata: { name: string; type: string; isId: boolean; isSensitive: boolean; validations?: string[]; column?: string }[];
 }
 
 export interface ManifestData {
@@ -108,7 +109,7 @@ export function generateManifest(project: Project, entries: CatalogEntry[]): Man
   const entityMap = new Map<string, ManifestEntity>();
 
   for (const entry of entries) {
-    if (entry.endpoint && entry.httpMethod) {
+    if (entry.endpoint && entry.httpMethod && !isMalformedEndpointPath(entry.endpoint as string)) {
       const key = `${entry.httpMethod}:${entry.endpoint}`;
       if (!endpointMap.has(key)) {
         endpointMap.set(key, {
