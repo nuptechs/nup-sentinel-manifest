@@ -1566,6 +1566,38 @@ export async function registerRoutes(
     }
   });
 
+  // Consulta de acesso: "onde a entidade X é lida/escrita" — quais endpoints
+  // leem e quais escrevem cada entidade (granularidade entidade, não coluna).
+  // Não duplica /completeness (lifecycle); é lookup. vazio≠falhou.
+  app.get("/api/projects/:projectId/entity-access", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const { detectEntityAccess, renderEntityAccessMarkdown } = await import("./analyzers/entity-access");
+      const report = detectEntityAccess(manifest);
+      // Filtro opcional: ?entity=Contract → só essa entidade.
+      const wanted = typeof req.query.entity === "string" ? req.query.entity : null;
+      if (wanted) {
+        const hit = report.entities.find((e) => e.entity === wanted);
+        return res.json({ projectId, entity: wanted, readBy: hit?.readBy ?? [], writtenBy: hit?.writtenBy ?? [] });
+      }
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        res.type("text/markdown; charset=utf-8").send(renderEntityAccessMarkdown(report, { projectName: project?.name }));
+        return;
+      }
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing entity access:", error);
+      res.status(500).json({ message: "Failed to compute entity access" });
+    }
+  });
+
   // ADR-070 — dossiê de avaliação do sistema: superfície + sobreposição +
   // incompletude + ADRs num relatório único, pronto pra documentação. Advisory.
   app.get("/api/projects/:projectId/assessment", async (req, res) => {
