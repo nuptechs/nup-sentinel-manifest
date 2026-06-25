@@ -40,11 +40,11 @@ Totais: **1330 endpoints · 214 entidades · 3540 catalog entries · 4626 nós /
 | Inventário de campos por entidade | **118/118 entidades com `fieldMetadata`** (Contract: 117 campos, nome+tipo+isSensitive) | 🟢 **já funciona** |
 | Cadeias de chamada (com classpath completo) | profundidade até 5 | 🟢 ok (rasura no recorte era artefato de classpath) |
 | **Permissão por endpoint** | **12/696 (1.7%)** — `@HasPermission(P.X)` não lido | 🔴 gap (este PR fecha) |
-| Nome da coluna no banco (`monthlyValue`→`monthly_value`) | ausente em `fieldMetadata` | 🟡 gap (precisa do engine Java) |
+| Nome da coluna no banco (`monthlyValue`→`monthly_value`) | **2119/2119 campos (100%)** via `@Column`+snake_case | 🟢 **fechado (Fase 1)** |
 | Lineage **por-escrita** (endpoint→coluna específica) | entitiesTouched é nível-entidade | 🔴 gap (precisa de data-flow) |
 | Dispatch dinâmico (regra→executor) | 0/1330 cadeias mencionam executor | 🔴 arquitetural (→ agente/runtime) |
 | Cadeia de evento (aprovação→glosa) | 0/1330 cadeias mencionam listener | 🔴 arquitetural (→ agente/runtime) |
-| Endpoints falsos (`/api/audit360/{param}{param}`) | 2 presentes | 🟡 precisão |
+| Endpoints falsos (`/api/audit360/{param}{param}`) | **0** (sanitizados) | 🟢 **fechado (Fase 1)** |
 
 ### Correção honesta de medição (registrada para não se repetir)
 
@@ -78,7 +78,7 @@ Os ~3.4% restantes são endpoints genuinamente sem guard (público/interno) — 
 
 ## Roadmap medido contra esta régua (DoD = número moveu aqui)
 
-- **Fase 1** (este PR): permissão 1.7%→96.6% ✅ · sanitizar endpoints falsos · (coluna-nome/lineage-por-escrita pendentes).
+- **Fase 1**: permissão 1.7%→96.6% ✅ · **nome de coluna 0→100% (2119 campos)** ✅ · **endpoints falsos 1→0** ✅ · (lineage-por-escrita pendente, precisa de data-flow → Fase 5).
 - **Fase 2**: grafo consultável.
 - **Fase 3**: agente-resolvedor sobre o grafo (fecha dispatch + evento, com citação).
 - **Fase 4**: confirmação por runtime (ADR-073) — selo "verificado".

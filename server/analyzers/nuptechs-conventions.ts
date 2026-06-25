@@ -156,6 +156,72 @@ export function extractWsV1Roles(content: string): string[] {
   return Array.from(roles);
 }
 
+/** snake_case de um nome de campo Java (fallback quando não há @Column(name)). */
+export function toSnakeCase(name: string): string {
+  return (name || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase();
+}
+
+const COLUMN_NAME_RE = /@(?:[\w.]*\.)?Column\b[^)]*\bname\s*=\s*"([^"]+)"/;
+
+/**
+ * Mapa campo→nome de coluna EXPLÍCITO a partir de `@Column(name="...")` no fonte
+ * da entidade (cobre `@jakarta.persistence.Column`). Só registra o nome explícito;
+ * o caller aplica snake_case como fallback. Line-oriented e conservador: ignora
+ * linhas de anotação e de método para não casar `@Size(max=10)` como campo. Puro.
+ */
+export function parseEntityColumns(content: string): Map<string, string> {
+  const map = new Map<string, string>();
+  let pending: string | null = null;
+  for (const raw of content.split("\n")) {
+    const line = raw.trim();
+    const cm = line.match(COLUMN_NAME_RE);
+    if (cm) { pending = cm[1]; continue; }
+    if (!pending) continue;
+    if (line === "" || line.startsWith("@")) continue; // outras anotações: mantém pending
+    if (line.includes("(")) { pending = null; continue; } // método/ctor: abandona
+    const fm = line.match(/(\w+)\s*[;=]/);
+    if (fm) map.set(fm[1], pending);
+    pending = null;
+  }
+  return map;
+}
+
+/**
+ * Enriquece os campos de cada ENTITY com o nome real da coluna no banco, lendo
+ * `@Column(name="...")` do fonte Java (fallback snake_case do nome do campo).
+ * Muta `node.metadata.enrichedFields[].column` — flui pro manifesto via
+ * graph-connector. Aditivo: entidade sem fonte/campos é ignorada. Retorna o
+ * número de campos enriquecidos.
+ */
+export function enrichEntityColumns(
+  graph: ApplicationGraph,
+  fileData: { filePath: string; content: string }[],
+): number {
+  const byClass = new Map<string, string>();
+  for (const f of fileData) {
+    if (!f.filePath.endsWith(".java")) continue;
+    const cls = f.filePath.split("/").pop()?.replace(/\.java$/, "");
+    if (cls && !byClass.has(cls)) byClass.set(cls, f.content);
+  }
+  let enriched = 0;
+  for (const node of graph.getNodesByType("ENTITY")) {
+    const meta = node.metadata as Record<string, unknown>;
+    const fields = meta.enrichedFields;
+    if (!Array.isArray(fields)) continue;
+    const content = byClass.get(node.className);
+    const explicit = content ? parseEntityColumns(content) : new Map<string, string>();
+    for (const fld of fields as { name?: string; column?: string }[]) {
+      if (!fld || typeof fld.name !== "string") continue;
+      fld.column = explicit.get(fld.name) ?? toSnakeCase(fld.name);
+      enriched++;
+    }
+  }
+  return enriched;
+}
+
 /**
  * Extract the Node gateway mount prefixes (A) from Express source files.
  * Returns the set of mount prefixes that count as "covered" — excluding
