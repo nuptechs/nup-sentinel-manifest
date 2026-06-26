@@ -1598,6 +1598,36 @@ export async function registerRoutes(
     }
   });
 
+  // Consulta de governança/LGPD: endpoints que tocam dado sensível e seu nível
+  // de proteção (sem proteção / só-auth / com permissão). Risco primeiro. Advisory.
+  app.get("/api/projects/:projectId/sensitive-exposure", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const { detectSensitiveExposure, renderSensitiveExposureMarkdown } = await import("./analyzers/sensitive-exposure");
+      const report = detectSensitiveExposure(manifest);
+      // Filtro opcional: ?guard=none|auth-only|permission → só esse nível.
+      const guard = typeof req.query.guard === "string" ? req.query.guard : null;
+      if (guard) {
+        return res.json({ projectId, guard, exposures: report.exposures.filter((e) => e.guard === guard) });
+      }
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        res.type("text/markdown; charset=utf-8").send(renderSensitiveExposureMarkdown(report, { projectName: project?.name }));
+        return;
+      }
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing sensitive exposure:", error);
+      res.status(500).json({ message: "Failed to compute sensitive exposure" });
+    }
+  });
+
   // ADR-070 — dossiê de avaliação do sistema: superfície + sobreposição +
   // incompletude + ADRs num relatório único, pronto pra documentação. Advisory.
   app.get("/api/projects/:projectId/assessment", async (req, res) => {
