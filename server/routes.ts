@@ -1628,6 +1628,34 @@ export async function registerRoutes(
     }
   });
 
+  // Resolve o dispatch do motor de regras (RuleActionType → executor concreto),
+  // o ponto cego que análise de chamada não enxerga. Determinístico (lê
+  // getActionType do fonte). Lê os arquivos-fonte do projeto, não o snapshot.
+  app.get("/api/projects/:projectId/rule-dispatch", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      const files = await storage.getSourceFiles(projectId);
+      const { resolveRuleDispatch, renderRuleDispatchMarkdown } = await import("./analyzers/rule-dispatch");
+      const report = resolveRuleDispatch(files.map((f) => ({ filePath: f.filePath, content: f.content })));
+      // Filtro opcional: ?actionType=SEND_PDF → só esse mapeamento.
+      const wanted = typeof req.query.actionType === "string" ? req.query.actionType : null;
+      if (wanted) {
+        return res.json({ projectId, actionType: wanted, executor: report.dispatch.find((d) => d.actionType === wanted) ?? null });
+      }
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        res.type("text/markdown; charset=utf-8").send(renderRuleDispatchMarkdown(report, { projectName: project.name }));
+        return;
+      }
+      res.json({ projectId, ...report });
+    } catch (error) {
+      console.error("Error resolving rule dispatch:", error);
+      res.status(500).json({ message: "Failed to resolve rule dispatch" });
+    }
+  });
+
   // ADR-070 — dossiê de avaliação do sistema: superfície + sobreposição +
   // incompletude + ADRs num relatório único, pronto pra documentação. Advisory.
   app.get("/api/projects/:projectId/assessment", async (req, res) => {
