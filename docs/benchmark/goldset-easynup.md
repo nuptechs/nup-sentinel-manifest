@@ -81,6 +81,7 @@ Os ~3.4% restantes são endpoints genuinamente sem guard (público/interno) — 
 - **Fase 1**: permissão 1.7%→96.6% ✅ · **nome de coluna 0→100% (2119 campos)** ✅ · **endpoints falsos 1→0** ✅ · (lineage-por-escrita pendente, precisa de data-flow → Fase 5).
 - **Fase 2** (iniciada): grafo consultável — `GET /permission-governance` (endpoints sem proteção · por permissão), provado no easynup (671/695 protegidos, 24 expostos visíveis).
 - **Fase 2** (cont.): `GET /entity-access` — onde a entidade é lida/escrita (118 entidades, 420 endpoints no easynup; `?entity=Contract` → 3 escrita, 2 leitura). Granularidade entidade; coluna = Fase 5.
+- **Fase 2** (cont.): `GET /sensitive-exposure` — endpoints que tocam dado sensível × proteção (none/auth-only/permission). easynup: 188 endpoints sensíveis, 188 protegidos, 0 expostos (auditoria limpa).
 - **Fase 3**: agente-resolvedor sobre o grafo (fecha dispatch + evento, com citação).
 - **Fase 4**: confirmação por runtime (ADR-073) — selo "verificado".
 - **Fase 5** (sob demanda): frontend type-resolved + data-flow (Joern) para lineage-por-escrita.
