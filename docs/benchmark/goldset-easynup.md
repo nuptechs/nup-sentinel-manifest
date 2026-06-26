@@ -43,7 +43,7 @@ Totais: **1330 endpoints · 214 entidades · 3540 catalog entries · 4626 nós /
 | Nome da coluna no banco (`monthlyValue`→`monthly_value`) | **2119/2119 campos (100%)** via `@Column`+snake_case | 🟢 **fechado (Fase 1)** |
 | Lineage **por-escrita** (endpoint→coluna específica) | entitiesTouched é nível-entidade | 🔴 gap (precisa de data-flow) |
 | Dispatch (regra→executor), mapa de código | **22/23 resolvido** via getActionType (det.) + 1 órfão flagado | 🟢 **mapa fechado (Fase 3)** · runtime real = Fase 4 |
-| Cadeia de evento (aprovação→glosa) | 0/1330 cadeias mencionam listener | 🔴 arquitetural (→ agente/runtime) |
+| Wiring de evento (publish→listener) | **7 listeners, 11 triggerTypes** mapeados (det.); 4 catch-all flagados | 🟢 **mapa fechado (Fase 3)** · routing dinâmico = runtime/DB |
 | Endpoints falsos (`/api/audit360/{param}{param}`) | **0** (sanitizados) | 🟢 **fechado (Fase 1)** |
 
 ### Correção honesta de medição (registrada para não se repetir)
@@ -82,6 +82,6 @@ Os ~3.4% restantes são endpoints genuinamente sem guard (público/interno) — 
 - **Fase 2** (iniciada): grafo consultável — `GET /permission-governance` (endpoints sem proteção · por permissão), provado no easynup (671/695 protegidos, 24 expostos visíveis).
 - **Fase 2** (cont.): `GET /entity-access` — onde a entidade é lida/escrita (118 entidades, 420 endpoints no easynup; `?entity=Contract` → 3 escrita, 2 leitura). Granularidade entidade; coluna = Fase 5.
 - **Fase 2** (cont.): `GET /sensitive-exposure` — endpoints que tocam dado sensível × proteção (none/auth-only/permission). easynup: 188 endpoints sensíveis, 188 protegidos, 0 expostos (auditoria limpa).
-- **Fase 3** (iniciada): dispatch regra→executor resolvido DETERMINISTICAMENTE (`GET /rule-dispatch`, 22/23 no easynup + flag de órfão `CREATE_DIVERGENCE`; sem LLM — `getActionType` é parseável). Eventos e casos genuinamente não-parseáveis = agente-LLM, fatias seguintes.
+- **Fase 3** (em curso, sem LLM até aqui): dispatch regra→executor (`GET /rule-dispatch`, 22/23 + flag órfão `CREATE_DIVERGENCE`) **e** wiring de evento (`GET /event-wiring`, 7 listeners/11 triggerTypes, guarded mapeado + catch-all flagado) resolvidos DETERMINISTICAMENTE. Achado: os gaps "duros" eram mais parseáveis que o previsto. Agente-LLM fica só pro genuinamente não-parseável (routing por motor de regras / JSONB no banco) — provável Fase 4 (runtime) em vez de LLM.
 - **Fase 4**: confirmação por runtime (ADR-073) — selo "verificado".
 - **Fase 5** (sob demanda): frontend type-resolved + data-flow (Joern) para lineage-por-escrita.
