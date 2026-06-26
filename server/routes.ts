@@ -1656,6 +1656,39 @@ export async function registerRoutes(
     }
   });
 
+  // Resolve o wiring de eventos Spring (publishEvent → @EventListener), o elo
+  // que análise de chamada não enxerga. Determinístico (lê guards + triggerType
+  // do fonte); listener sem guard estático fica routing:"dynamic" (não inventa).
+  app.get("/api/projects/:projectId/event-wiring", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      const files = await storage.getSourceFiles(projectId);
+      const { resolveEventWiring, renderEventWiringMarkdown } = await import("./analyzers/event-wiring");
+      const report = resolveEventWiring(files.map((f) => ({ filePath: f.filePath, content: f.content })));
+      // Filtro opcional: ?triggerType=MEASUREMENT_APPROVED → publishers + listeners desse trigger.
+      const wanted = typeof req.query.triggerType === "string" ? req.query.triggerType : null;
+      if (wanted) {
+        return res.json({
+          projectId,
+          triggerType: wanted,
+          publishers: report.publishers.filter((p) => p.triggerType === wanted),
+          listeners: report.listeners.filter((l) => l.triggerType === wanted || l.routing === "dynamic"),
+        });
+      }
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        res.type("text/markdown; charset=utf-8").send(renderEventWiringMarkdown(report, { projectName: project.name }));
+        return;
+      }
+      res.json({ projectId, ...report });
+    } catch (error) {
+      console.error("Error resolving event wiring:", error);
+      res.status(500).json({ message: "Failed to resolve event wiring" });
+    }
+  });
+
   // ADR-070 — dossiê de avaliação do sistema: superfície + sobreposição +
   // incompletude + ADRs num relatório único, pronto pra documentação. Advisory.
   app.get("/api/projects/:projectId/assessment", async (req, res) => {
