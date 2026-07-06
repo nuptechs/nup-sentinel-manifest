@@ -1,0 +1,32 @@
+name: CI
+
+# ADR-0014 D8d — sem CI, os 276 testes só rodavam se alguém rodasse local.
+# Gate: instala e roda a suíte (tsx --test, sem build/JVM). O typecheck
+# (`npm run check`) NÃO entra no gate por ter erros pré-existentes de
+# tipos em módulos legados; adicionar quando forem zerados.
+#
+# Usa `npm install` (não `npm ci`): o package-lock tem um drift pré-existente
+# com bufferutil@4.1.0 (optional native addon do `ws`) que npm 10/11 tratam
+# de forma diferente — `npm ci` estrito falha no runner. `npm install` é
+# resiliente a isso e não commita o lock (CI é efêmero). Trocar por `npm ci`
+# quando o lock for regenerado com a mesma major do runner.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Test
+        run: npm test
