@@ -1,0 +1,26 @@
+name: CI
+
+# ADR-0014 D8d — sem CI, os 260+ testes só rodavam se alguém rodasse local.
+# Gate: instala e roda a suíte (tsx --test, sem build/JVM). O typecheck
+# (`npm run check`) NÃO entra no gate por ter erros pré-existentes de
+# tipos em módulos legados; adicionar quando forem zerados.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Test
+        run: npm test
