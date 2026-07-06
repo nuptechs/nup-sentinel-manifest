@@ -18,6 +18,7 @@ import { generateComplianceReport } from "./generators/compliance-report-generat
 import { generateNupidentityBundle, generateNupidentityRunnerScript } from "./generators/nupidentity-generator";
 import { AnalysisPipeline } from "./pipeline/analysis-pipeline";
 import { apiAuthMiddleware, generateApiKey, hashApiKey } from "./middleware/api-auth";
+import { analysisConcurrencyGuard } from "./middleware/analysis-guard";
 import {
   codelensExtractionSchema,
   ingestCodelensExtraction,
@@ -94,6 +95,18 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+
+  // ─── Liveness/readiness (unauthenticated by design) ──────────────
+  // Registered BEFORE the auth guard so platform healthchecks never
+  // need a credential. These expose no project data.
+  app.get(["/health", "/healthz"], (_req, res) => {
+    res.json({ status: "ok" });
+  });
+  app.get("/ready", (_req, res) => {
+    res.json({ status: "ready" });
+  });
+
+  const analysisGuard = analysisConcurrencyGuard();
 
   app.use("/api", apiAuthMiddleware);
 
@@ -180,7 +193,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/analyze", async (req, res) => {
+  app.post("/api/analyze", analysisGuard, async (req, res) => {
     try {
       const { files, options } = req.body;
       if (!files || !Array.isArray(files) || files.length === 0) {
@@ -277,7 +290,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/analyze-zip", upload.single("file"), async (req, res) => {
+  app.post("/api/analyze-zip", upload.single("file"), analysisGuard, async (req, res) => {
     try {
       const file = req.file;
       if (!file) return res.status(400).json({ message: "ZIP file is required" });
@@ -515,9 +528,9 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/projects/:id/analyze", async (req, res) => {
+  app.post("/api/projects/:id/analyze", analysisGuard, async (req, res) => {
     try {
-      const projectId = parseInt(req.params.id);
+      const projectId = parseInt(req.params.id as string);
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
 
       const project = await storage.getProject(projectId);
@@ -1902,9 +1915,9 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/projects/:projectId/analyze-branch", async (req, res) => {
+  app.post("/api/projects/:projectId/analyze-branch", analysisGuard, async (req, res) => {
     try {
-      const projectId = parseInt(req.params.projectId);
+      const projectId = parseInt(req.params.projectId as string);
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
 
       const project = await storage.getProject(projectId);
@@ -1976,9 +1989,9 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/projects/:projectId/analyze-pr", async (req, res) => {
+  app.post("/api/projects/:projectId/analyze-pr", analysisGuard, async (req, res) => {
     try {
-      const projectId = parseInt(req.params.projectId);
+      const projectId = parseInt(req.params.projectId as string);
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
 
       const project = await storage.getProject(projectId);
@@ -2232,15 +2245,19 @@ export async function registerRoutes(
         return res.status(200).json({ message: "No matching project or webhook disabled" });
       }
 
-      if (project.webhookSecret && signature) {
-        const rawBody = JSON.stringify(req.body);
-        const hmac = crypto.createHmac("sha256", project.webhookSecret).update(rawBody).digest("hex");
-        const expected = `sha256=${hmac}`;
-        if (signature !== expected) {
-          return res.status(401).json({ message: "Invalid signature" });
-        }
-      } else if (project.webhookSecret && !signature) {
+      // Secret is MANDATORY (ADR-0014 D0): a webhook without a configured
+      // secret would be an anonymous trigger of a 2 GB analysis. Refuse.
+      if (!project.webhookSecret) {
+        return res.status(200).json({ message: "Webhook secret not configured; ignoring (set a secret to enable)." });
+      }
+      if (!signature) {
         return res.status(401).json({ message: "Missing signature" });
+      }
+      const rawBody = JSON.stringify(req.body);
+      const hmac = crypto.createHmac("sha256", project.webhookSecret).update(rawBody).digest("hex");
+      const expected = `sha256=${hmac}`;
+      if (signature !== expected) {
+        return res.status(401).json({ message: "Invalid signature" });
       }
 
       res.status(200).json({ message: "Webhook received, analysis triggered" });
@@ -2286,10 +2303,12 @@ export async function registerRoutes(
         return res.status(200).json({ message: "No matching project or webhook disabled" });
       }
 
-      if (project.webhookSecret) {
-        if (!token || token !== project.webhookSecret) {
-          return res.status(401).json({ message: "Invalid token" });
-        }
+      // Secret is MANDATORY (ADR-0014 D0): no anonymous analysis triggers.
+      if (!project.webhookSecret) {
+        return res.status(200).json({ message: "Webhook secret not configured; ignoring (set a secret to enable)." });
+      }
+      if (!token || token !== project.webhookSecret) {
+        return res.status(401).json({ message: "Invalid token" });
       }
 
       res.status(200).json({ message: "Webhook received, analysis triggered" });
