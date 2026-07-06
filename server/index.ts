@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { isAuthRequired } from "./middleware/api-auth";
 
 process.on("uncaughtException", (err) => {
   console.error("[FATAL] Uncaught exception:", err.message, err.stack);
@@ -106,14 +107,29 @@ app.use((req, res, next) => {
   httpServer.timeout = 25 * 60 * 1000;
 
   const port = parseInt(process.env.PORT || "5000", 10);
+
+  // Fail-closed boot (ADR-0014 D0): if no auth is configured, the API
+  // would serve source code and trigger JVM analyses anonymously. Refuse
+  // to expose it publicly — bind loopback-only so an unconfigured box is
+  // never reachable from the network. A configured box (OIDC/API-key)
+  // binds all interfaces because /api/* is default-deny.
+  const host = isAuthRequired() ? "0.0.0.0" : "127.0.0.1";
+  if (host === "127.0.0.1") {
+    log(
+      "AUTH NOT CONFIGURED — binding to 127.0.0.1 only (loopback). " +
+        "Set OIDC_ISSUER_URL (or MANIFEST_REQUIRE_AUTH=true) to serve on the network.",
+      "security",
+    );
+  }
+
   httpServer.listen(
     {
       port,
-      host: "0.0.0.0",
+      host,
       reusePort: true,
     },
     () => {
-      log(`serving on port ${port}`);
+      log(`serving on ${host}:${port}`);
     },
   );
 })();
