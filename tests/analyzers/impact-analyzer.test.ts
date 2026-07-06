@@ -75,6 +75,70 @@ describe("computeImpact — símbolo de entidade", () => {
   });
 });
 
+// ── ADR-0014 D2d — matching por nó (não inflar por substring) ──────────
+describe("computeImpact — D2d matching por nó", () => {
+  // Grafo com DUAS entidades onde uma é prefixo da outra: o bug clássico.
+  const GRAPH = {
+    endpoints: [
+      {
+        path: "/api/contracts/{id}", method: "GET",
+        controller: "ContractController", controllerMethod: "get",
+        serviceMethods: ["ContractService.get"], repositoryMethods: ["ContractRepository.find"],
+        entitiesTouched: ["Contract"], fullCallChain: ["ContractController.get"],
+        sourceFile: "ContractController.java",
+      },
+      {
+        path: "/api/contract-guarantees/{id}", method: "GET",
+        controller: "ContractGuaranteeController", controllerMethod: "get",
+        serviceMethods: ["ContractGuaranteeService.get"], repositoryMethods: ["ContractGuaranteeRepository.find"],
+        entitiesTouched: ["ContractGuarantee"], fullCallChain: ["ContractGuaranteeController.get"],
+        sourceFile: "ContractGuaranteeController.java",
+      },
+    ],
+    screens: [],
+    entities: [
+      { name: "Contract", accessedBy: [], sensitiveFields: [] },
+      { name: "ContractGuarantee", accessedBy: [], sensitiveFields: [] },
+    ],
+  };
+
+  it("Contract (nó exato) NÃO puxa ContractGuarantee — raio preciso", () => {
+    const r = computeImpact(GRAPH, "Contract");
+    assert.equal(r.matchMode, "exact");
+    assert.equal(r.imprecise, false);
+    assert.equal(r.summary.endpoints, 1);
+    assert.equal(r.impactedEndpoints[0].path, "/api/contracts/{id}");
+    assert.deepEqual(r.entitiesTouched, ["Contract"]);
+    // A entidade prefixada NÃO entra.
+    assert.ok(!r.entitiesTouched.includes("ContractGuarantee"));
+    assert.ok(!r.impactedEndpoints.some((e) => e.path.includes("guarantee")));
+  });
+
+  it("ContractGuarantee (nó exato) resolve só o seu próprio endpoint", () => {
+    const r = computeImpact(GRAPH, "ContractGuarantee");
+    assert.equal(r.matchMode, "exact");
+    assert.equal(r.summary.endpoints, 1);
+    assert.equal(r.impactedEndpoints[0].path, "/api/contract-guarantees/{id}");
+  });
+
+  it("ContractService (classe exata) casa via segmento de Classe.metodo", () => {
+    const r = computeImpact(GRAPH, "ContractService");
+    assert.equal(r.matchMode, "exact");
+    assert.equal(r.summary.endpoints, 1);
+    assert.ok(r.impactedEndpoints[0].matchedVia.startsWith("service:"));
+    assert.equal(r.impactedEndpoints[0].path, "/api/contracts/{id}");
+  });
+
+  it("símbolo NÃO-resolvível cai no fallback por substring e marca imprecise", () => {
+    // "contrac" não é entidade/classe/tela conhecida → substring.
+    const r = computeImpact(GRAPH, "contrac");
+    assert.equal(r.matchMode, "substring");
+    assert.equal(r.imprecise, true);
+    // No fallback, ambos entram (o consumidor sabe que é aproximado).
+    assert.ok(r.summary.endpoints >= 2);
+  });
+});
+
 describe("computeImpact — prefere o espelho RICO (impactEndpoints) sobre o curado", () => {
   it("usa impactEndpoints (746 do grafo) quando o catálogo curado é raso", () => {
     // Cenário real: o `endpoints` curado perde a profundidade de backend (só os
