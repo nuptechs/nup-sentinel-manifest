@@ -29,6 +29,15 @@ export interface ImpactedScreen {
 export interface ImpactReport {
   symbol: string;
   found: boolean;
+  // ADR-0014 D2d — como o símbolo casou contra o grafo:
+  //   'exact'     → o símbolo resolveu para um NÓ conhecido (entidade/classe/
+  //                 tela) e o raio usa igualdade de token — sem inflar por
+  //                 substring (ex.: "Contract" NÃO puxa "ContractGuarantee").
+  //   'substring' → o símbolo não resolveu; usa fallback por substring.
+  matchMode: "exact" | "substring";
+  // true quando matchMode === 'substring' e houve match — o raio pode estar
+  // inflado (o consumidor deve tratar como aproximado).
+  imprecise: boolean;
   summary: {
     endpoints: number;
     screens: number;
@@ -45,30 +54,73 @@ function lc(s: unknown): string {
   return typeof s === "string" ? s.toLowerCase() : "";
 }
 
-/** True + a label quando `sym` (lowercased) aparece em algum campo do endpoint. */
-function endpointMatch(ep: any, sym: string): string | null {
-  const ctrl = lc(ep?.controller);
+/**
+ * Casa um token do grafo contra o símbolo.
+ *   exact=true  → igualdade: o token INTEIRO === sym, OU algum segmento
+ *                 separado por '.' === sym (cobre "Classe.metodo" — "Classe"
+ *                 e "metodo" casam exato, mas "Contract" NÃO casa
+ *                 "ContractGuarantee").
+ *   exact=false → substring (comportamento legado, fallback).
+ */
+function matchesToken(value: unknown, sym: string, exact: boolean): boolean {
+  const v = lc(value);
+  if (!v) return false;
+  if (!exact) return v.includes(sym);
+  if (v === sym) return true;
+  return v.split(".").some((part) => part === sym);
+}
+
+/** Label quando `sym` casa algum campo do endpoint (modo exato ou substring). */
+function endpointMatch(ep: any, sym: string, exact: boolean): string | null {
+  if (matchesToken(ep?.controller, sym, exact)) return "controller";
   const ctrlMethod = `${lc(ep?.controller)}.${lc(ep?.controllerMethod)}`;
-  if (ctrl && ctrl.includes(sym)) return "controller";
-  if (ep?.controllerMethod && ctrlMethod.includes(sym)) return `controller:${ep.controller}.${ep.controllerMethod}`;
+  if (ep?.controllerMethod && matchesToken(ctrlMethod, sym, exact)) return `controller:${ep.controller}.${ep.controllerMethod}`;
   for (const m of ep?.serviceMethods || []) {
-    if (lc(m).includes(sym)) return `service:${m}`;
+    if (matchesToken(m, sym, exact)) return `service:${m}`;
   }
   for (const m of ep?.repositoryMethods || []) {
-    if (lc(m).includes(sym)) return `repository:${m}`;
+    if (matchesToken(m, sym, exact)) return `repository:${m}`;
   }
   for (const c of ep?.fullCallChain || []) {
-    if (lc(c).includes(sym)) return `callChain:${c}`;
+    if (matchesToken(c, sym, exact)) return `callChain:${c}`;
   }
   for (const e of ep?.entitiesTouched || []) {
-    if (lc(e) === sym || lc(e).includes(sym)) return `entity:${e}`;
+    if (matchesToken(e, sym, exact)) return `entity:${e}`;
   }
-  if (ep?.sourceFile && lc(ep.sourceFile).includes(sym)) return "sourceFile";
-  // Match por path/rota: cobre o caso em que o manifest só tem o lado frontend
-  // resolvido (controller/service vazios) — ainda assim responde "quem chama esta
-  // rota". Também permite consultar diretamente por endpoint (ex: "findContract.v1").
-  if (ep?.path && lc(ep.path).includes(sym)) return `path:${ep.path}`;
+  // sourceFile e path são heurísticas de arquivo/rota — só no fallback por
+  // substring (consulta direta por endpoint, ex. "findContract.v1"). No modo
+  // exato o raio vem só dos nós tipados (evita casar por pedaço de caminho).
+  if (!exact) {
+    if (ep?.sourceFile && lc(ep.sourceFile).includes(sym)) return "sourceFile";
+    if (ep?.path && lc(ep.path).includes(sym)) return `path:${ep.path}`;
+  }
   return null;
+}
+
+/**
+ * O símbolo resolve para um NÓ conhecido do grafo? (entidade, classe de
+ * controller/service/repo, ou tela). Se sim, o raio usa igualdade exata;
+ * senão cai no fallback por substring (impreciso). ADR-0014 D2d.
+ */
+function resolvesExactly(manifest: any, sym: string): boolean {
+  const endpoints: any[] = Array.isArray(manifest?.impactEndpoints) && manifest.impactEndpoints.length
+    ? manifest.impactEndpoints
+    : Array.isArray(manifest?.endpoints) ? manifest.endpoints : [];
+  for (const ent of manifest?.entities || []) {
+    if (lc(ent?.name) === sym) return true;
+  }
+  for (const sc of manifest?.screens || []) {
+    if (lc(sc?.name) === sym) return true;
+  }
+  for (const ep of endpoints) {
+    if (matchesToken(ep?.controller, sym, true)) return true;
+    if (matchesToken(`${lc(ep?.controller)}.${lc(ep?.controllerMethod)}`, sym, true)) return true;
+    for (const m of ep?.serviceMethods || []) if (matchesToken(m, sym, true)) return true;
+    for (const m of ep?.repositoryMethods || []) if (matchesToken(m, sym, true)) return true;
+    for (const c of ep?.fullCallChain || []) if (matchesToken(c, sym, true)) return true;
+    for (const e of ep?.entitiesTouched || []) if (matchesToken(e, sym, true)) return true;
+  }
+  return false;
 }
 
 /**
@@ -81,12 +133,20 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
   const empty: ImpactReport = {
     symbol,
     found: false,
+    matchMode: "exact",
+    imprecise: false,
     summary: { endpoints: 0, screens: 0, entities: 0 },
     impactedEndpoints: [],
     impactedScreens: [],
     entitiesTouched: [],
   };
   if (sym.length < MIN_SYMBOL_LEN || !manifest) return empty;
+
+  // ADR-0014 D2d — resolve o símbolo pra um NÓ do grafo ANTES de computar o
+  // raio. Se resolve (entidade/classe/tela conhecida), casa por igualdade de
+  // token (sem inflar: "Contract" não puxa "ContractGuarantee"). Se não
+  // resolve, cai no fallback por substring e marca o relatório como impreciso.
+  const exact = resolvesExactly(manifest, sym);
 
   // Prefere o espelho RICO de endpoints (todos os endpoints do grafo, com
   // `entitiesTouched`/`fullCallChain` por endpoint) quando presente — o
@@ -103,7 +163,7 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
   const entities = new Set<string>();
 
   for (const ep of endpoints) {
-    const via = endpointMatch(ep, sym);
+    const via = endpointMatch(ep, sym, exact);
     if (!via) continue;
     const path = String(ep.path ?? "");
     const method = String(ep.method ?? "ANY").toUpperCase();
@@ -166,7 +226,9 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
   for (const sc of screens) {
     const name = lc(sc?.name);
     const route = lc(sc?.route);
-    const matchedName = (name && (name === sym || name.includes(sym))) || (route && route.includes(sym));
+    const matchedName = exact
+      ? name === sym
+      : (name && (name === sym || name.includes(sym))) || (route && route.includes(sym));
     if (!matchedName || screenNamed.has(String(sc.name ?? ""))) continue;
     const own: string[] = [];
     for (const it of sc.interactions || []) {
@@ -183,6 +245,8 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
   return {
     symbol,
     found,
+    matchMode: exact ? "exact" : "substring",
+    imprecise: !exact && found,
     summary: { endpoints: impactedEndpoints.length, screens: impactedScreens.length, entities: entities.size },
     impactedEndpoints,
     impactedScreens,
