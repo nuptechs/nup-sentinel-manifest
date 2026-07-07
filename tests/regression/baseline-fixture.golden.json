@@ -1,0 +1,62 @@
+{
+  "architecture": {
+    "type": "WS_OPERATION_BASED",
+    "confidence": 0.5
+  },
+  "gatewayPrefixes": [
+    "/webhooks"
+  ],
+  "graph": {
+    "nodes": 3,
+    "edges": 2,
+    "entities": [
+      "Contract"
+    ]
+  },
+  "endpoints": [
+    {
+      "endpoint": "/easynup/updateContract.v1",
+      "httpMethod": "POST",
+      "controllerClass": "UpdateContractWsV1",
+      "technicalOperation": "UPDATE",
+      "requiredRoles": [
+        "UPDATE_CONTRACT"
+      ],
+      "entitiesTouched": [
+        "Contract"
+      ],
+      "criticalityScore": 50
+    }
+  ],
+  "screens": [
+    {
+      "screen": "Contracts",
+      "interaction": "loadContracts",
+      "endpoint": "/easynup/findContracts.v1",
+      "httpMethod": "GET",
+      "resolved": true
+    },
+    {
+      "screen": "Contracts",
+      "interaction": "pingWebhook",
+      "endpoint": "/webhooks/inbound/test",
+      "httpMethod": "POST",
+      "resolved": true
+    },
+    {
+      "screen": "Contracts",
+      "interaction": "saveNote",
+      "endpoint": "/easynup/createContractNote.v1",
+      "httpMethod": "POST",
+      "resolved": true
+    }
+  ],
+  "inconsistencies": [],
+  "totals": {
+    "catalogEntries": 4,
+    "endpointEntries": 1,
+    "screenEntries": 3,
+    "interactions": 3,
+    "coveredByGatewayPrefix": 1
+  }
+}

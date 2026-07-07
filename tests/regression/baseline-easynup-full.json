@@ -1,0 +1,16 @@
+{
+  "$comment": "ADR-0015 G1 — baseline CONGELADO da medição full-repo do easynup (docs/benchmark/goldset-easynup.md, 5021 arquivos, ~46s). Pisos: a medição atual deve ser >= cada floor; fakeEndpoints é teto (<=). Uso: npx tsx script/check-goldset-baseline.ts <metricas-medidas.json>. Subir um piso = melhorou e quer travar o ganho (bem-vindo, no mesmo PR da melhoria); baixar um piso = REGRESSÃO, proibido sem ADR.",
+  "floors": {
+    "totalEndpoints": 1330,
+    "totalEntities": 214,
+    "catalogEntries": 3540,
+    "graphNodes": 4626,
+    "graphEdges": 4127,
+    "entitiesWithFieldMetadata": 118,
+    "columnNamesResolved": 2119,
+    "endpointsWithPermission": 672
+  },
+  "ceilings": {
+    "fakeEndpoints": 0
+  }
+}

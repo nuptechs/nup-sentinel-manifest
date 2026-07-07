@@ -231,6 +231,35 @@ Todas montadas em `server/routes.ts`. Status do efeito segue as seções acima.
 
 ---
 
+## 10. Cobertura por stack & harness anti-regressão (ADR-0015)
+
+> Governança: `nup-sentinel/docs/adr/0015-cobertura-multi-stack-manifest-paridade-qualidade.md`.
+> Régua P1: **nenhuma stack vira ✅ sem goldset medido em CI** ("compila e produz output" não é suporte).
+> Gates G1–G3: baseline easynup congelado (nenhum PR mergeia com métrica abaixo do piso) ·
+> flags `MANIFEST_MULTISTACK_*` OFF = byte-a-byte · ON = superset estrito.
+
+### Matriz por stack (portfólio NuPtechs, inventário 2026-07-06)
+
+| Stack / template | Status | Situação |
+|---|---|---|
+| **easynup** (Vue 3 + Spring/JPA + WsV1 + gateway Express por prefixo) | ✅ | Goldset full-repo medido ([goldset-easynup.md](benchmark/goldset-easynup.md)) + golden de fixture em CI (Onda 0) |
+| **rest-express** (React + wouter + Express ESM + Drizzle; ~14 repos) | ⚪ | Onda 1 (D1–D7): balde node-backend aditivo · rotas Express · middleware→`securityAnnotations` · Drizzle `pgTable` · call-chain · captura queryKey/`apiRequest` · **goldset kan + NuP-School como gate de ✅** |
+| Variantes Node (`pg` cru · Fastify · `architectureType: NODE_API` · shape Node na ingestão Codelens) | ⚪ | Onda 2 (D8a–d) |
+| Next.js · Python (Flask/FastAPI) | ⚪ | Onda 3 (D9) — decisão explícita: parser com goldset OU fora-de-escopo declarado (e `.py`/`.cs` saem do scanner) |
+| React Native · Kotlin Android · JS arbitrário fora de convenção | fora de escopo | D10 — declarado com razão; sem promessa |
+
+### Harness anti-regressão (Onda 0 — entregue)
+
+| Capacidade | Status | Evidência |
+|---|---|---|
+| Golden do fixture mini-easynup comparado **byte-a-byte** em todo `npm test`/CI (G1-fixture) | ✅ | `tests/regression/goldset-baseline.test.ts` + `tests/regression/baseline-fixture.golden.json` (regenerar SÓ deliberadamente, no mesmo PR, com justificativa) |
+| Testes de **sensibilidade** do harness (derrubar 1 endpoint ou 1 permissão ⇒ CI vermelho — 1º teste do DoD) | ✅ | `tests/regression/goldset-baseline.test.ts` §"sensibilidade do harness" |
+| Flags `MANIFEST_MULTISTACK_NODE` / `MANIFEST_MULTISTACK_HTTP_TEMPLATE`, **default OFF** (G2) | ✅ | `server/config/multistack.ts` (nada as consome ainda; teste trava que setá-las não muda o snapshot) |
+| Canários da Onda 1 no fixture (C1 rota Express `router.get` invisível hoje · C2 GET via `queryKey` invisível hoje) — viram prova de **superset** (G3) quando a Onda 1 ligar | ✅ | `tests/regression/mini-easynup.fixture.ts` + testes C1/C2 |
+| Gate **executável** do baseline full-repo (pisos 1330 endpoints · 214 entidades · 2119 colunas · 672 permissões · teto 0 endpoints falsos; fail-closed em métrica ausente) | 🟡 | `script/check-goldset-baseline.ts` + `tests/regression/baseline-easynup-full.json` — 🟡 porque a medição full exige a receita do goldset (Postgres + JVM), fora do CI; o comparador em si é ✅ testado |
+
+---
+
 ## Resumo honesto
 
 - A **análise estática** (grafo Java AST, frontend incl. grafos de call/evento/estado/camadas,
