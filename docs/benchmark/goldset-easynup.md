@@ -19,6 +19,13 @@ esse ground truth: 5 fluxos reais do easynup, rastreados com `arquivo:linha`, es
    `services/gateway/src/**`), `options.projectName="easynup-FULL"`, `format="manifest"`.
 3. Medir a resposta com os critérios abaixo. ⚠️ As chaves do shape importam: campos de entidade
    estão em **`fieldMetadata`** (não `fields`); permissão de endpoint em **`requiredRoles`**.
+4. **Gate anti-regressão (ADR-0015 G1):** despeje os totais medidos num JSON plano
+   (`{"totalEndpoints":…,"totalEntities":…,…,"fakeEndpoints":0}`) e rode
+   `npx tsx script/check-goldset-baseline.ts <metricas.json>` — compara contra os **pisos
+   congelados** em `tests/regression/baseline-easynup-full.json` (exit 1 em qualquer queda;
+   fail-closed em métrica ausente). Piso só sobe (melhoria travada no mesmo PR); baixar piso =
+   regressão, proibido sem ADR. Complemento contínuo que roda em TODO `npm test`/CI: o golden
+   de fixture (`tests/regression/goldset-baseline.test.ts`).
 
 ## Os 5 fluxos (ground truth)
 
