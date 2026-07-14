@@ -7,6 +7,8 @@ import { ScriptSymbolTable } from "./frontend/symbol-table";
 import { buildComponentEventGraph, lookupEventGraph } from "./frontend/event-graph";
 import { extractVueScript, parseTypeScript, getLineNumber } from "./frontend/parsers";
 import { buildStateFlowGraph, lookupStateFlowGraph } from "./frontend/state-flow-graph";
+import { readMultistackFlags } from "../config/multistack";
+import { extractRestExpressInteractions } from "./frontend/rest-express-template";
 import {
   getComponentName,
   extractUrlFromNode,
@@ -410,6 +412,17 @@ export function analyzeFrontend(
   }
   if (authEnriched > 0) {
     console.log(`[frontend-analyzer] Auth enrichment: ${authEnriched}/${interactions.length} interactions with detected auth patterns`);
+  }
+
+  // Multistack (ADR-0015 Onda 1 D6): captura HTTP do template rest-express
+  // (queryKey-como-URL + apiRequest). Atrás de MANIFEST_MULTISTACK_HTTP_TEMPLATE
+  // — OFF ⇒ nada muda (byte-a-byte, G2); ON ⇒ superset estrito de interações (G3).
+  if (readMultistackFlags().frontendHttpTemplate) {
+    const templateInteractions = extractRestExpressInteractions(files, graph);
+    if (templateInteractions.length > 0) {
+      interactions.push(...templateInteractions);
+      console.log(`[frontend-analyzer] rest-express template (D6): +${templateInteractions.length} interactions (queryKey/apiRequest)`);
+    }
   }
 
   const withUrls = interactions.filter(i => i.url);
