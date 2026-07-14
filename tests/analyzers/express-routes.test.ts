@@ -155,3 +155,78 @@ r.get("/health", (req, res) => res.send("ok"));
     assert.equal(entry.dataSource.requiredRoles, undefined);
   });
 });
+
+describe("extractExpressRoutes — call-chain multi-hop (ADR-0015 Onda 2 D8)", () => {
+  const schema = {
+    filePath: "srv/db/schema.ts",
+    content: `import { pgTable, integer } from "drizzle-orm/pg-core";
+export const webhookEvents = pgTable("webhook_event", { id: integer("id").primaryKey() });
+`,
+  };
+  const service = {
+    filePath: "srv/services/webhook-service.ts",
+    content: `import { insertEvent } from "../repos/webhook-repo";
+export const webhookService = {
+  async processInbound(payload: unknown) { return insertEvent(payload); },
+};
+`,
+  };
+  const repo = {
+    filePath: "srv/repos/webhook-repo.ts",
+    content: `import { db } from "../db/client";
+import { webhookEvents } from "../db/schema";
+export async function insertEvent(p: unknown) { await db.insert(webhookEvents).values(p); }
+`,
+  };
+  const app = {
+    filePath: "srv/app.ts",
+    content: `import express from "express";
+import { webhookService } from "./services/webhook-service";
+const r = express.Router();
+r.post("/inbound", async (req, res) => {
+  await webhookService.processInbound(req.body);
+  res.status(202).end();
+});
+`,
+  };
+
+  it("handler que delega (service → repo em outros arquivos) resolve entidade e operação write", () => {
+    const [route] = extractExpressRoutes([schema, service, repo, app]);
+    assert.equal(route.path, "/inbound");
+    assert.deepEqual(route.entitiesTouched, ["webhook_event"]);
+    assert.deepEqual(route.persistenceOperations, ["write"]);
+  });
+
+  it("cadeia quebrada (service não importa o repo) ⇒ não liga (regra de ouro)", () => {
+    const brokenService = {
+      filePath: "srv/services/webhook-service.ts",
+      content: `export const webhookService = {
+  async processInbound(payload: unknown) { return dispatch("insert", payload); },
+};
+`,
+    };
+    const [route] = extractExpressRoutes([schema, brokenService, repo, app]);
+    assert.deepEqual(route.entitiesTouched, []);
+    assert.deepEqual(route.persistenceOperations, []);
+  });
+
+  it("same-file (C1) e multi-hop coexistem: união determinística por rota", () => {
+    const both = {
+      filePath: "srv/app.ts",
+      content: `import express from "express";
+import { db } from "./db/client";
+import { webhookEvents } from "./db/schema";
+import { webhookService } from "./services/webhook-service";
+const r = express.Router();
+r.get("/all", async (req, res) => {
+  const rows = await db.select().from(webhookEvents);
+  await webhookService.processInbound(rows);
+  res.json(rows);
+});
+`,
+    };
+    const [route] = extractExpressRoutes([schema, service, repo, both]);
+    assert.deepEqual(route.entitiesTouched, ["webhook_event"]);
+    assert.deepEqual(route.persistenceOperations, ["read", "write"]);
+  });
+});

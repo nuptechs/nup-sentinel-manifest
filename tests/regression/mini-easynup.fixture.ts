@@ -179,6 +179,7 @@ export async function insertEvent(payload: unknown) {
 import { requirePermission } from "./middleware/auth";
 import { db } from "./db/client";
 import { webhookEvents } from "./db/schema";
+import { webhookService } from "./services/webhook-service";
 
 const app = express();
 const webhookRouter = express.Router();
@@ -191,6 +192,15 @@ const webhookRouter = express.Router();
 webhookRouter.get("/inbound/:id", requirePermission("webhooks.read"), async (req, res) => {
   const rows = await db.select().from(webhookEvents);
   res.json(rows);
+});
+
+// CANÁRIO 4 (Onda 2 D8): o handler DELEGA — o acesso Drizzle está a dois
+// arquivos de distância (service → repo → db.insert). Flag OFF: invisível.
+// Flag ON: endpoint POST /webhooks/inbound com entitiesTouched=["webhook_event"]
+// e persistenceOperations=["write"] via call-chain multi-hop.
+webhookRouter.post("/inbound", requirePermission("webhooks.write"), async (req, res) => {
+  await webhookService.processInbound(req.body);
+  res.status(202).end();
 });
 
 app.use("/webhooks", webhookRouter);

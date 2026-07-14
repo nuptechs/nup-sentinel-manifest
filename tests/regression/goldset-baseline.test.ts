@@ -238,14 +238,49 @@ describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda
         "C1/C3: rota Express deixou de ligar à entidade Drizzle que o handler lê",
       );
 
-      // Superset estrito: exatamente +1 endpoint / +1 catalog entry, o canário C1.
+      // Superset estrito: exatamente +2 endpoints (canários C1 e C4).
       assert.equal(
         snap.endpoints.length,
-        golden.endpoints.length + 1,
-        "esperado exatamente 1 endpoint novo (o canário C1)",
+        golden.endpoints.length + 2,
+        "esperado exatamente 2 endpoints novos (canários C1 e C4)",
       );
-      assert.equal(snap.totals.endpointEntries, golden.totals.endpointEntries + 1);
-      assert.equal(snap.totals.catalogEntries, golden.totals.catalogEntries + 1);
+      assert.equal(snap.totals.endpointEntries, golden.totals.endpointEntries + 2);
+      assert.equal(snap.totals.catalogEntries, golden.totals.catalogEntries + 2);
+    } finally {
+      delete process.env.MANIFEST_MULTISTACK_NODE;
+    }
+  });
+
+  it("C4 (Onda 2 D8): call-chain multi-hop — handler que DELEGA liga à entidade a 2 arquivos de distância", () => {
+    process.env.MANIFEST_MULTISTACK_NODE = "1";
+    try {
+      const snap = runPipelineSlice(MINI_EASYNUP);
+
+      // A rota POST /webhooks/inbound não toca Drizzle no call-site: o handler
+      // chama webhookService.processInbound (arquivo 2), que chama insertEvent
+      // (arquivo 3), que faz db.insert(webhookEvents). O resolver de call-chain
+      // tem que atravessar a corrente inteira.
+      const c4 = snap.endpoints.find(
+        (e) => e.endpoint === "/webhooks/inbound" && e.httpMethod === "POST",
+      );
+      assert.ok(c4, "C4: rota Express POST /webhooks/inbound NÃO virou endpoint com a flag ON");
+      assert.deepEqual(
+        c4!.requiredRoles,
+        ["webhooks.write"],
+        "C4: permissão do middleware se perdeu",
+      );
+      assert.equal(c4!.technicalOperation, "CREATE", "C4: operação técnica derivada do verbo mudou");
+      assert.deepEqual(
+        c4!.entitiesTouched,
+        ["webhook_event"],
+        "C4: call-chain multi-hop (handler → service → repo → db.insert) não resolveu a entidade",
+      );
+
+      // O multi-hop não pode ter contaminado o C1 (caminho same-file intacto).
+      const c1 = snap.endpoints.find((e) => e.endpoint === "/webhooks/inbound/:id");
+      assert.ok(c1);
+      assert.deepEqual(c1!.entitiesTouched, ["webhook_event"]);
+      assert.deepEqual(c1!.requiredRoles, ["webhooks.read"]);
     } finally {
       delete process.env.MANIFEST_MULTISTACK_NODE;
     }

@@ -401,17 +401,31 @@ function walkFnBody(
   return { touches, candidates };
 }
 
-/**
- * Constrói o call graph do backend Node. `entryFiles` (recomendado) restringe a
- * indexação ao fecho de imports dos arquivos com rotas — sem ele, indexa todos
- * os candidatos (até MAX_FILES). Determinístico: ordem dos arquivos de entrada,
- * AST em ordem de código.
- */
-export function buildBackendCallGraph(
+export interface BackendCallChain {
+  graph: BackendCallGraph;
+  /**
+   * Resolve os nomes CHAMADOS num trecho de código (`fn(...)`, `obj.method(...)`)
+   * do arquivo dado para chaves existentes no grafo — as seeds da travessia.
+   * Mesmas regras de resolução do grafo (imports/locais/instâncias); nome que
+   * não resolve não vira seed. Uso: args da rota Express (trecho regex, sem AST).
+   */
+  seedsFor(filePath: string, snippet: string): string[];
+}
+
+// `ident(` ou `obj.method(` num trecho de código.
+const SNIPPET_CALL_RE =
+  /\b([A-Za-z_$][\w$]*)(?:\s*\.\s*([A-Za-z_$][\w$]*))?\s*\(/g;
+
+const JS_KEYWORDS = new Set([
+  "if", "for", "while", "switch", "catch", "return", "await", "async",
+  "function", "new", "typeof", "delete", "void", "throw", "do", "else",
+]);
+
+function buildInternal(
   files: { filePath: string; content: string }[],
   drizzle: Map<string, DrizzleEntity>,
   opts?: { entryFiles?: string[] },
-): BackendCallGraph {
+): { graph: BackendCallGraph; fileIndexes: Map<string, FileIndex> } {
   const graph: BackendCallGraph = new Map();
 
   const candidates = files.filter(isCandidateFile);
@@ -491,7 +505,75 @@ export function buildBackendCallGraph(
     }
   }
 
-  return graph;
+  return { graph, fileIndexes };
+}
+
+/** Só o grafo (API dos testes unitários e de quem não precisa de seeds). */
+export function buildBackendCallGraph(
+  files: { filePath: string; content: string }[],
+  drizzle: Map<string, DrizzleEntity>,
+  opts?: { entryFiles?: string[] },
+): BackendCallGraph {
+  return buildInternal(files, drizzle, opts).graph;
+}
+
+/** Grafo + resolvedor de seeds para trechos de código (args de rota Express). */
+export function buildBackendCallChain(
+  files: { filePath: string; content: string }[],
+  drizzle: Map<string, DrizzleEntity>,
+  opts?: { entryFiles?: string[] },
+): BackendCallChain {
+  const { graph, fileIndexes } = buildInternal(files, drizzle, opts);
+
+  const seedsFor = (filePath: string, snippet: string): string[] => {
+    const fileIdx = fileIndexes.get(filePath);
+    if (!fileIdx) return [];
+    const seeds: string[] = [];
+
+    const tryPush = (targetFile: string, names: string[]) => {
+      const idx = fileIndexes.get(targetFile);
+      if (!idx) return;
+      for (const name of names) {
+        const canonical = idx.names.get(name);
+        if (canonical) {
+          const key = makeBackendKey(targetFile, canonical);
+          if (graph.has(key) && !seeds.includes(key)) seeds.push(key);
+          return;
+        }
+      }
+    };
+
+    SNIPPET_CALL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = SNIPPET_CALL_RE.exec(snippet)) !== null) {
+      const [, first, second] = m;
+      if (JS_KEYWORDS.has(first) || (second && JS_KEYWORDS.has(second))) continue;
+
+      if (second) {
+        const imported = fileIdx.imports.get(first);
+        if (imported) {
+          tryPush(
+            imported.sourcePath,
+            imported.originalName === "*" ? [second] : [`${imported.originalName}.${second}`],
+          );
+        } else if (fileIdx.instanceTypes.has(first)) {
+          const className = fileIdx.instanceTypes.get(first)!;
+          const classImport = fileIdx.imports.get(className);
+          if (classImport) tryPush(classImport.sourcePath, [`${classImport.originalName}.${second}`]);
+          else tryPush(filePath, [`${className}.${second}`]);
+        } else {
+          tryPush(filePath, [`${first}.${second}`]);
+        }
+      } else {
+        const imported = fileIdx.imports.get(first);
+        if (imported) tryPush(imported.sourcePath, [imported.originalName]);
+        else tryPush(filePath, [first]);
+      }
+    }
+    return seeds;
+  };
+
+  return { graph, seedsFor };
 }
 
 export interface CallChainResolution {

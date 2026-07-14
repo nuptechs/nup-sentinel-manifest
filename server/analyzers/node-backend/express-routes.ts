@@ -26,6 +26,7 @@ import {
   drizzleSymbolIndex,
   type DrizzleEntity,
 } from "./drizzle-schema";
+import { buildBackendCallChain, resolveTouches } from "./call-chain";
 
 export interface ExpressRoute {
   /** Verbo HTTP em maiúsculas: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, ALL. */
@@ -207,11 +208,25 @@ export function extractExpressRoutes(
   // Índice de entidades Drizzle do backend inteiro (resolve refs de handler).
   const drizzle = drizzleSymbolIndex(extractDrizzleEntities(files));
 
+  const EXPRESS_GUARD = /\bexpress\s*\(|\bexpress\s*\.\s*Router\s*\(|\bRouter\s*\(/;
+
+  // Call-chain multi-hop (Onda 2 D8): grafo de chamadas do backend restrito ao
+  // fecho de imports dos arquivos com rotas. Resolve handler → service → repo →
+  // tabela quando o acesso Drizzle NÃO está no call-site (o scan same-file do
+  // D4 continua cobrindo o caso local — os dois resultados são unidos).
+  const routeFiles = files
+    .filter((f) => !f.filePath.endsWith(".java") && EXPRESS_GUARD.test(f.content))
+    .map((f) => f.filePath);
+  const callChain =
+    routeFiles.length > 0
+      ? buildBackendCallChain(files, drizzle, { entryFiles: routeFiles })
+      : null;
+
   for (const file of files) {
     if (file.filePath.endsWith(".java")) continue;
     const content = file.content;
     // Guarda barata: só arquivos que criam router/app entram no parser caro.
-    if (!/\bexpress\s*\(|\bexpress\s*\.\s*Router\s*\(|\bRouter\s*\(/.test(content)) {
+    if (!EXPRESS_GUARD.test(content)) {
       continue;
     }
 
@@ -243,6 +258,21 @@ export function extractExpressRoutes(
       const args = openParenIdx >= 0 ? readCallArgs(content, openParenIdx) : "";
       const { roles, expression } = extractPermission(args);
       const { entities, operations } = resolveHandlerEntities(args, drizzle);
+
+      // Multi-hop (D8): funções chamadas nos args viram seeds da travessia;
+      // toques a N arquivos de distância se unem ao scan same-file acima.
+      if (callChain) {
+        const seeds = callChain.seedsFor(file.filePath, args);
+        if (seeds.length > 0) {
+          const resolved = resolveTouches(seeds, callChain.graph);
+          for (const touch of resolved.touches) {
+            if (!entities.includes(touch.entity)) entities.push(touch.entity);
+            if (!operations.includes(touch.op)) operations.push(touch.op);
+          }
+          entities.sort();
+          operations.sort();
+        }
+      }
 
       const prefix = mountPrefix.get(varName) || "";
       routes.push({
