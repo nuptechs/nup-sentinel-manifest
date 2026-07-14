@@ -222,9 +222,10 @@ describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda
     try {
       const snap = runPipelineSlice(MINI_EASYNUP);
 
-      const c1 = snap.endpoints.find((e) => e.endpoint === "/webhooks/inbound/:id");
-      assert.ok(c1, "C1: rota Express /webhooks/inbound/:id NÃO virou endpoint com a flag ON");
-      assert.equal(c1!.httpMethod, "GET", "C1: método HTTP errado (esperado GET)");
+      const c1 = snap.endpoints.find(
+        (e) => e.endpoint === "/webhooks/inbound/:id" && e.httpMethod === "GET",
+      );
+      assert.ok(c1, "C1: rota Express GET /webhooks/inbound/:id NÃO virou endpoint com a flag ON");
       assert.deepEqual(
         c1!.requiredRoles,
         ["webhooks.read"],
@@ -238,14 +239,14 @@ describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda
         "C1/C3: rota Express deixou de ligar à entidade Drizzle que o handler lê",
       );
 
-      // Superset estrito: exatamente +2 endpoints (canários C1 e C4).
+      // Superset estrito: exatamente +3 endpoints (canários C1, C4 e C5).
       assert.equal(
         snap.endpoints.length,
-        golden.endpoints.length + 2,
-        "esperado exatamente 2 endpoints novos (canários C1 e C4)",
+        golden.endpoints.length + 3,
+        "esperado exatamente 3 endpoints novos (canários C1, C4 e C5)",
       );
-      assert.equal(snap.totals.endpointEntries, golden.totals.endpointEntries + 2);
-      assert.equal(snap.totals.catalogEntries, golden.totals.catalogEntries + 2);
+      assert.equal(snap.totals.endpointEntries, golden.totals.endpointEntries + 3);
+      assert.equal(snap.totals.catalogEntries, golden.totals.catalogEntries + 3);
     } finally {
       delete process.env.MANIFEST_MULTISTACK_NODE;
     }
@@ -277,10 +278,35 @@ describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda
       );
 
       // O multi-hop não pode ter contaminado o C1 (caminho same-file intacto).
-      const c1 = snap.endpoints.find((e) => e.endpoint === "/webhooks/inbound/:id");
+      const c1 = snap.endpoints.find(
+        (e) => e.endpoint === "/webhooks/inbound/:id" && e.httpMethod === "GET",
+      );
       assert.ok(c1);
       assert.deepEqual(c1!.entitiesTouched, ["webhook_event"]);
       assert.deepEqual(c1!.requiredRoles, ["webhooks.read"]);
+    } finally {
+      delete process.env.MANIFEST_MULTISTACK_NODE;
+    }
+  });
+
+  it("C5 (Onda 2 D9): handler passado por REFERÊNCIA (importado) resolve a cadeia até o delete", () => {
+    process.env.MANIFEST_MULTISTACK_NODE = "1";
+    try {
+      const snap = runPipelineSlice(MINI_EASYNUP);
+
+      // A rota DELETE recebe deleteWebhookHandler (importado de outro arquivo),
+      // que chama removeEvent (repo), que faz db.delete(webhookEvents).
+      const c5 = snap.endpoints.find(
+        (e) => e.endpoint === "/webhooks/inbound/:id" && e.httpMethod === "DELETE",
+      );
+      assert.ok(c5, "C5: rota com handler por referência NÃO virou endpoint com a flag ON");
+      assert.deepEqual(c5!.requiredRoles, ["webhooks.delete"], "C5: permissão do middleware se perdeu");
+      assert.equal(c5!.technicalOperation, "DELETE");
+      assert.deepEqual(
+        c5!.entitiesTouched,
+        ["webhook_event"],
+        "C5: call-chain via handler importado não resolveu a entidade",
+      );
     } finally {
       delete process.env.MANIFEST_MULTISTACK_NODE;
     }

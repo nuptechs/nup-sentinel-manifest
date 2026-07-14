@@ -230,3 +230,87 @@ r.get("/all", async (req, res) => {
     assert.deepEqual(route.persistenceOperations, ["read", "write"]);
   });
 });
+
+describe("extractExpressRoutes — handler por referência + telemetria (ADR-0015 Onda 2 D9)", () => {
+  const schema = {
+    filePath: "srv/db/schema.ts",
+    content: `import { pgTable, integer } from "drizzle-orm/pg-core";
+export const webhookEvents = pgTable("webhook_event", { id: integer("id").primaryKey() });
+`,
+  };
+  const repo = {
+    filePath: "srv/repos/webhook-repo.ts",
+    content: `import { db } from "../db/client";
+import { webhookEvents } from "../db/schema";
+export async function removeEvent(id: number) { await db.delete(webhookEvents); }
+`,
+  };
+  const controller = {
+    filePath: "srv/controllers/webhook-controller.ts",
+    content: `import { removeEvent } from "../repos/webhook-repo";
+export async function deleteHandler(req: any, res: any) { await removeEvent(Number(req.params.id)); res.end(); }
+`,
+  };
+  const app = {
+    filePath: "srv/app.ts",
+    content: `import express from "express";
+import { deleteHandler } from "./controllers/webhook-controller";
+const r = express.Router();
+r.delete("/inbound/:id", deleteHandler);
+`,
+  };
+
+  it("identificador nu importado vira seed; entidade, operação e cadeia resolvem", () => {
+    const [route] = extractExpressRoutes([schema, repo, controller, app]);
+    assert.deepEqual(route.entitiesTouched, ["webhook_event"]);
+    assert.deepEqual(route.persistenceOperations, ["delete"]);
+    assert.deepEqual(route.callChain, [
+      "srv/app.ts::handler",
+      "srv/controllers/webhook-controller.ts::deleteHandler",
+      "srv/repos/webhook-repo.ts::removeEvent",
+    ]);
+  });
+
+  it("telemetria na catalog entry: fullCallChain, service/repository methods e resolutionPath", () => {
+    const routes = extractExpressRoutes([schema, repo, controller, app]);
+    const [entry] = expressRoutesToCatalogEntries(routes, 1, 1);
+    assert.deepEqual(entry.fullCallChain, routes[0].callChain);
+    assert.deepEqual(entry.serviceMethods, ["deleteHandler"]);
+    assert.deepEqual(entry.repositoryMethods, ["removeEvent"]);
+    assert.equal(entry.resolutionPath.length, 2);
+    assert.equal(entry.resolutionPath[1].tier, "call_chain");
+    assert.equal(entry.resolutionPath[1].function, "removeEvent");
+  });
+
+  it("same-file (sem cadeia) mantém telemetria vazia — C1 não muda de shape", () => {
+    const local = {
+      filePath: "srv/app.ts",
+      content: `import express from "express";
+import { db } from "./db/client";
+import { webhookEvents } from "./db/schema";
+const r = express.Router();
+r.get("/all", async (req, res) => res.json(await db.select().from(webhookEvents)));
+`,
+    };
+    const routes = extractExpressRoutes([schema, local]);
+    const [entry] = expressRoutesToCatalogEntries(routes, 1, 1);
+    assert.deepEqual(entry.fullCallChain, []);
+    assert.deepEqual(entry.serviceMethods, []);
+    assert.deepEqual(entry.repositoryMethods, []);
+    assert.equal(entry.resolutionPath.length, 1);
+  });
+
+  it("identificador que não resolve (handler de pacote npm) não vira seed", () => {
+    const npmHandler = {
+      filePath: "srv/app.ts",
+      content: `import express from "express";
+import { serveStatic } from "some-npm-package";
+const r = express.Router();
+r.get("/assets", serveStatic);
+`,
+    };
+    const [route] = extractExpressRoutes([schema, npmHandler]);
+    assert.deepEqual(route.entitiesTouched, []);
+    assert.deepEqual(route.callChain, []);
+  });
+});

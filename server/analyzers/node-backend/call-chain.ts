@@ -410,6 +410,11 @@ export interface BackendCallChain {
    * não resolve não vira seed. Uso: args da rota Express (trecho regex, sem AST).
    */
   seedsFor(filePath: string, snippet: string): string[];
+  /**
+   * Resolve um IDENTIFICADOR nu do arquivo dado (handler passado por referência:
+   * `router.delete('/x', deleteHandler)`) para uma chave do grafo, ou null.
+   */
+  seedForName(filePath: string, name: string): string | null;
 }
 
 // `ident(` ou `obj.method(` num trecho de código.
@@ -573,7 +578,19 @@ export function buildBackendCallChain(
     return seeds;
   };
 
-  return { graph, seedsFor };
+  const seedForName = (filePath: string, name: string): string | null => {
+    const fileIdx = fileIndexes.get(filePath);
+    if (!fileIdx) return null;
+    const imported = fileIdx.imports.get(name);
+    const targetFile = imported ? imported.sourcePath : filePath;
+    const targetName = imported ? imported.originalName : name;
+    const canonical = fileIndexes.get(targetFile)?.names.get(targetName);
+    if (!canonical) return null;
+    const key = makeBackendKey(targetFile, canonical);
+    return graph.has(key) ? key : null;
+  };
+
+  return { graph, seedsFor, seedForName };
 }
 
 export interface CallChainResolution {

@@ -169,6 +169,22 @@ import { webhookEvents } from "../db/schema";
 export async function insertEvent(payload: unknown) {
   await db.insert(webhookEvents).values({ payload });
 }
+
+export async function removeEvent(id: number) {
+  await db.delete(webhookEvents);
+}
+`,
+  },
+  // Handler por REFERÊNCIA (canário C5, Onda 2 D9): a rota recebe o
+  // identificador importado, não uma arrow inline.
+  {
+    filePath: "services/gateway/src/controllers/webhook-controller.ts",
+    content: `import { removeEvent } from "../repos/webhook-repo";
+
+export async function deleteWebhookHandler(req: any, res: any) {
+  await removeEvent(Number(req.params.id));
+  res.status(204).end();
+}
 `,
   },
 
@@ -180,6 +196,7 @@ import { requirePermission } from "./middleware/auth";
 import { db } from "./db/client";
 import { webhookEvents } from "./db/schema";
 import { webhookService } from "./services/webhook-service";
+import { deleteWebhookHandler } from "./controllers/webhook-controller";
 
 const app = express();
 const webhookRouter = express.Router();
@@ -202,6 +219,11 @@ webhookRouter.post("/inbound", requirePermission("webhooks.write"), async (req, 
   await webhookService.processInbound(req.body);
   res.status(202).end();
 });
+
+// CANÁRIO 5 (Onda 2 D9): handler passado por REFERÊNCIA (importado de outro
+// arquivo), que deleta via repo. Flag ON: DELETE /webhooks/inbound/:id com
+// entitiesTouched=["webhook_event"] e a cadeia handler → removeEvent.
+webhookRouter.delete("/inbound/:id", requirePermission("webhooks.delete"), deleteWebhookHandler);
 
 app.use("/webhooks", webhookRouter);
 
