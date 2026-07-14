@@ -62,14 +62,16 @@ describe("ADR-0015 G1 — golden do fixture mini-easynup (baseline congelado)", 
   });
 });
 
-describe("ADR-0015 — canários da Onda 1 (estado ATUAL: invisíveis; Onda 1 vira superset G3)", () => {
-  it("C1: rota Express /webhooks/inbound/:id NÃO é endpoint hoje (só o prefixo existe)", () => {
+describe("ADR-0015 — canários da Onda 1 com as flags OFF (invisíveis; ON = superset G3)", () => {
+  it("C1: rota Express /webhooks/inbound/:id NÃO é endpoint com nodeBackend OFF (só o prefixo existe)", () => {
+    // Sem env ⇒ flag OFF ⇒ o parser de rotas Express não roda. O gate G3 abaixo
+    // prova o outro lado (flag ON ⇒ vira endpoint como superset estrito).
     const snap = runPipelineSlice(MINI_EASYNUP);
     const expressRoute = snap.endpoints.find((e) => e.endpoint?.includes("/webhooks/inbound"));
     assert.equal(
       expressRoute,
       undefined,
-      "Rota Express virou endpoint — isso é a Onda 1 (D2). Atualize este teste DELIBERADAMENTE para asserção de superset (G3), junto com o golden.",
+      "Rota Express virou endpoint com a flag OFF — isso viola o contrato G2 (OFF = byte-a-byte). O superset é só com MANIFEST_MULTISTACK_NODE ligado (ver G3).",
     );
   });
 
@@ -131,19 +133,80 @@ describe("ADR-0015 G2 — flags multistack (default OFF, byte-a-byte)", () => {
     );
   });
 
-  it("flags setadas HOJE não mudam o snapshot (nada as consome ainda — contrato G2/G3)", () => {
-    process.env.MANIFEST_MULTISTACK_NODE = "1";
+  it("frontendHttpTemplate ainda não consumido ⇒ ligá-lo sozinho não muda o snapshot (byte-a-byte)", () => {
+    // D6 (captura queryKey/apiRequest) é entrega posterior; enquanto nada consome
+    // esta flag, ligá-la isolada mantém o baseline intacto — contrato G2 por flag.
     process.env.MANIFEST_MULTISTACK_HTTP_TEMPLATE = "1";
     try {
       const snap = runPipelineSlice(MINI_EASYNUP);
       assert.deepEqual(
         snap,
         golden,
-        "Flag multistack mudou o pipeline SEM atualização deliberada deste contrato. Onda 1: substitua esta asserção por superset (G3) explícito.",
+        "MANIFEST_MULTISTACK_HTTP_TEMPLATE mudou o pipeline sem D6 implementado — se D6 ligou, troque por asserção de superset (G3).",
+      );
+    } finally {
+      delete process.env.MANIFEST_MULTISTACK_HTTP_TEMPLATE;
+    }
+  });
+});
+
+describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda 1 D1: rotas Express)", () => {
+  it("nada do baseline some com a flag ON; só ENTRA endpoint novo", () => {
+    process.env.MANIFEST_MULTISTACK_NODE = "1";
+    try {
+      const snap = runPipelineSlice(MINI_EASYNUP);
+
+      // (a) todo endpoint do golden continua presente e IDÊNTICO (superset, não mutação).
+      for (const g of golden.endpoints) {
+        const still = snap.endpoints.find(
+          (e) => e.endpoint === g.endpoint && e.httpMethod === g.httpMethod,
+        );
+        assert.ok(still, `endpoint do baseline sumiu com a flag ON: ${g.httpMethod} ${g.endpoint}`);
+        assert.deepEqual(still, g, `endpoint do baseline mudou com a flag ON (deveria ser superset): ${g.endpoint}`);
+      }
+
+      // (b) telas, entidades, arquitetura, inconsistências e cobertura de gateway
+      //     inalteradas — o balde node-backend só ADICIONA superfície de API.
+      assert.deepEqual(snap.screens, golden.screens, "flag node-backend mexeu nas telas (não é superset limpo)");
+      assert.deepEqual(snap.graph, golden.graph, "flag node-backend mexeu no grafo Java");
+      assert.deepEqual(snap.architecture, golden.architecture, "flag node-backend mudou a detecção de arquitetura");
+      assert.deepEqual(snap.inconsistencies, golden.inconsistencies, "flag node-backend introduziu inconsistência");
+      assert.equal(
+        snap.totals.coveredByGatewayPrefix,
+        golden.totals.coveredByGatewayPrefix,
+        "auto-supressão por prefixo de gateway mudou",
       );
     } finally {
       delete process.env.MANIFEST_MULTISTACK_NODE;
-      delete process.env.MANIFEST_MULTISTACK_HTTP_TEMPLATE;
+    }
+  });
+
+  it("C1 vira endpoint GET /webhooks/inbound/:id com a permissão do middleware (requiredRoles)", () => {
+    process.env.MANIFEST_MULTISTACK_NODE = "1";
+    try {
+      const snap = runPipelineSlice(MINI_EASYNUP);
+
+      const c1 = snap.endpoints.find((e) => e.endpoint === "/webhooks/inbound/:id");
+      assert.ok(c1, "C1: rota Express /webhooks/inbound/:id NÃO virou endpoint com a flag ON");
+      assert.equal(c1!.httpMethod, "GET", "C1: método HTTP errado (esperado GET)");
+      assert.deepEqual(
+        c1!.requiredRoles,
+        ["webhooks.read"],
+        "C1: permissão do middleware requirePermission('webhooks.read') se perdeu",
+      );
+      assert.equal(c1!.technicalOperation, "READ", "C1: operação técnica derivada do verbo mudou");
+      assert.deepEqual(c1!.entitiesTouched, [], "C1: D1 ainda não liga rota→entidade (Drizzle é D4/D5)");
+
+      // Superset estrito: exatamente +1 endpoint / +1 catalog entry, o canário C1.
+      assert.equal(
+        snap.endpoints.length,
+        golden.endpoints.length + 1,
+        "esperado exatamente 1 endpoint novo (o canário C1)",
+      );
+      assert.equal(snap.totals.endpointEntries, golden.totals.endpointEntries + 1);
+      assert.equal(snap.totals.catalogEntries, golden.totals.catalogEntries + 1);
+    } finally {
+      delete process.env.MANIFEST_MULTISTACK_NODE;
     }
   });
 });

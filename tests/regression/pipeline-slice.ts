@@ -39,6 +39,11 @@ import {
 import { detectArchitecture } from "../../server/analyzers/architecture-detector.ts";
 import { classifyEntriesDeterministic } from "../../server/analyzers/deterministic-classifier.ts";
 import { detectFrontendBackendInconsistencies } from "../../server/analyzers/frontend-backend-consistency.ts";
+import { readMultistackFlags } from "../../server/config/multistack.ts";
+import {
+  extractExpressRoutes,
+  expressRoutesToCatalogEntries,
+} from "../../server/analyzers/node-backend/express-routes.ts";
 
 export interface SliceFile {
   filePath: string;
@@ -110,6 +115,26 @@ export function runPipelineSlice(files: SliceFile[]): SliceSnapshot {
       seen.add(key);
     }
   }
+
+  // Multistack (ADR-0015 Onda 1 D1): com MANIFEST_MULTISTACK_NODE ligado, as
+  // rotas Express do balde node-backend entram como endpoints. Flag OFF ⇒ este
+  // bloco não roda ⇒ snapshot byte-a-byte idêntico ao golden (G2). Flag ON ⇒
+  // superset estrito, dedup por (método, endpoint) igual ao WsV1 (G3).
+  if (readMultistackFlags().nodeBackend) {
+    const expressEntries = expressRoutesToCatalogEntries(
+      extractExpressRoutes(frontendFiles),
+      1,
+      1,
+    );
+    for (const e of expressEntries) {
+      const key = `${e.httpMethod || ""} ${e.endpoint || ""}`;
+      if (!seen.has(key)) {
+        entriesRaw.push(e);
+        seen.add(key);
+      }
+    }
+  }
+
   const entries = classifyEntriesDeterministic(entriesRaw);
 
   const inconsistencies = detectFrontendBackendInconsistencies(interactions);
