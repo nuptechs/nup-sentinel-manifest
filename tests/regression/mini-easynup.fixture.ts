@@ -146,6 +146,32 @@ export const webhookEvents = pgTable("webhook_event", {
 `,
   },
 
+  // ── Camadas service/repo do gateway (canário C4, Onda 2 D7/D8) ──
+  // Cadeia multi-hop: rota → webhookService.processInbound (este arquivo) →
+  // insertEvent (repo, outro arquivo) → db.insert(webhookEvents). Enquanto
+  // nenhuma rota os chama (D7), são INERTES — o golden não pode mudar.
+  {
+    filePath: "services/gateway/src/services/webhook-service.ts",
+    content: `import { insertEvent } from "../repos/webhook-repo";
+
+export const webhookService = {
+  async processInbound(payload: unknown) {
+    return insertEvent(payload);
+  },
+};
+`,
+  },
+  {
+    filePath: "services/gateway/src/repos/webhook-repo.ts",
+    content: `import { db } from "../db/client";
+import { webhookEvents } from "../db/schema";
+
+export async function insertEvent(payload: unknown) {
+  await db.insert(webhookEvents).values({ payload });
+}
+`,
+  },
+
   // ── Gateway Express (hoje: só prefixo; rotas invisíveis) ──
   {
     filePath: "services/gateway/src/app.ts",
