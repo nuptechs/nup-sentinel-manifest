@@ -88,6 +88,45 @@ service.get("/not-a-route");
   });
 });
 
+describe("extractExpressRoutes — liga rota → entidade Drizzle pelo handler (D4/D5)", () => {
+  const SCHEMA = {
+    filePath: "src/db/schema.ts",
+    content: `import { pgTable, integer } from "drizzle-orm/pg-core";
+export const orders = pgTable("order", { id: integer("id").primaryKey() });
+export const invoices = pgTable("invoice", { id: integer("id").primaryKey() });
+`,
+  };
+  const API = {
+    filePath: "src/api.ts",
+    content: `import express from "express";
+import { orders, invoices } from "./db/schema";
+const router = express.Router();
+router.get("/orders", async (req, res) => { res.json(await db.select().from(orders)); });
+router.post("/orders", async (req, res) => { await db.insert(orders).values(req.body); res.sendStatus(201); });
+router.delete("/invoices/:id", async (req, res) => { await db.delete(invoices); res.sendStatus(204); });
+`,
+  };
+
+  it("select().from(x) ⇒ read; insert(x) ⇒ write; delete(x) ⇒ delete", () => {
+    const routes = extractExpressRoutes([SCHEMA, API]);
+    const get = routes.find((r) => r.method === "GET")!;
+    const post = routes.find((r) => r.method === "POST")!;
+    const del = routes.find((r) => r.method === "DELETE")!;
+    assert.deepEqual(get.entitiesTouched, ["order"]);
+    assert.deepEqual(get.persistenceOperations, ["read"]);
+    assert.deepEqual(post.persistenceOperations, ["write"]);
+    assert.deepEqual(del.entitiesTouched, ["invoice"]);
+    assert.deepEqual(del.persistenceOperations, ["delete"]);
+  });
+
+  it("rota sem acesso a tabela ⇒ entitiesTouched vazio", () => {
+    const routes = extractExpressRoutes([GATEWAY_APP]);
+    // GATEWAY_APP não importa/usa nenhuma tabela Drizzle.
+    assert.deepEqual(routes[0].entitiesTouched, []);
+    assert.deepEqual(routes[0].persistenceOperations, []);
+  });
+});
+
 describe("expressRoutesToCatalogEntries — formato de endpoint do catálogo", () => {
   it("materializa entry 'API: <router>' com operação derivada do verbo", () => {
     const routes = extractExpressRoutes([GATEWAY_APP]);

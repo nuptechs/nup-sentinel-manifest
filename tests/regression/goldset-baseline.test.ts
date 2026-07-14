@@ -195,7 +195,12 @@ describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda
         "C1: permissão do middleware requirePermission('webhooks.read') se perdeu",
       );
       assert.equal(c1!.technicalOperation, "READ", "C1: operação técnica derivada do verbo mudou");
-      assert.deepEqual(c1!.entitiesTouched, [], "C1: D1 ainda não liga rota→entidade (Drizzle é D4/D5)");
+      // D4/D5: o handler faz db.select().from(webhookEvents) ⇒ liga à tabela Drizzle.
+      assert.deepEqual(
+        c1!.entitiesTouched,
+        ["webhook_event"],
+        "C1/C3: rota Express deixou de ligar à entidade Drizzle que o handler lê",
+      );
 
       // Superset estrito: exatamente +1 endpoint / +1 catalog entry, o canário C1.
       assert.equal(
