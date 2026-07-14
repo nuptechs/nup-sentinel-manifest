@@ -2,6 +2,8 @@ import { storage } from "../storage";
 import { analyzeFrontend } from "../analyzers/frontend-analyzer";
 import { buildApplicationGraph, analyzeGraphEndpoints, reconstructGraph } from "../analyzers/backend-java-client";
 import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries, wsv1NodesToCatalogEntries } from "../analyzers/graph-connector";
+import { readMultistackFlags } from "../config/multistack";
+import { extractExpressRoutes, expressRoutesToCatalogEntries } from "../analyzers/node-backend/express-routes";
 import { classifyEntriesDeterministic } from "../analyzers/deterministic-classifier";
 import { detectArchitecture } from "../analyzers/architecture-detector";
 import { generateManifest } from "../generators/manifest-generator";
@@ -186,7 +188,7 @@ export class AnalysisPipeline {
       }
 
       let catalogEntryData = this.connectGraph(
-        frontendInteractions, endpointImpacts, appGraph, analysisRun.id, projectId, archType
+        frontendInteractions, endpointImpacts, appGraph, analysisRun.id, projectId, archType, frontendFiles
       );
       catalogEntryData = this.classify(catalogEntryData);
 
@@ -377,7 +379,8 @@ export class AnalysisPipeline {
 
   private connectGraph(
     frontendInteractions: any[], endpointImpacts: any[],
-    appGraph: any, analysisRunId: number, projectId: number, archType: string
+    appGraph: any, analysisRunId: number, projectId: number, archType: string,
+    frontendFiles: FileData[] = []
   ): InsertCatalogEntry[] {
     let catalogEntryData = interactionsToCatalogEntries(
       frontendInteractions, appGraph, analysisRunId, projectId, archType as any
@@ -389,21 +392,31 @@ export class AnalysisPipeline {
       );
     }
 
-    // A SUPERFÍCIE DE API WsV1 (@Ws → /easynup/<op>.v<N>) não aparece como
-    // @*Mapping nem como interação frontend, então o path-frontend acima a perde
-    // (catálogo vinha com endpoint:"/"). `augmentGraphWithWsV1` já criou os nós
-    // CONTROLLER sintéticos com fullPath + edge pra entidade; aqui materializamos
-    // cada um como entry com o path REAL. Dedup por (httpMethod, endpoint).
-    const wsv1Entries = wsv1NodesToCatalogEntries(appGraph, analysisRunId, projectId);
-    if (wsv1Entries.length > 0) {
-      const seen = new Set(catalogEntryData.map((e) => `${e.httpMethod || ""} ${e.endpoint || ""}`));
-      for (const e of wsv1Entries) {
+    const seen = new Set(catalogEntryData.map((e) => `${e.httpMethod || ""} ${e.endpoint || ""}`));
+    const addUnseen = (candidates: InsertCatalogEntry[]) => {
+      for (const e of candidates) {
         const key = `${e.httpMethod || ""} ${e.endpoint || ""}`;
         if (!seen.has(key)) {
           catalogEntryData.push(e);
           seen.add(key);
         }
       }
+    };
+
+    // A SUPERFÍCIE DE API WsV1 (@Ws → /easynup/<op>.v<N>) não aparece como
+    // @*Mapping nem como interação frontend, então o path-frontend acima a perde
+    // (catálogo vinha com endpoint:"/"). `augmentGraphWithWsV1` já criou os nós
+    // CONTROLLER sintéticos com fullPath + edge pra entidade; aqui materializamos
+    // cada um como entry com o path REAL. Dedup por (httpMethod, endpoint).
+    addUnseen(wsv1NodesToCatalogEntries(appGraph, analysisRunId, projectId));
+
+    // Multistack (ADR-0015 Onda 1 D1): rotas Express do balde node-backend.
+    // Atrás da flag MANIFEST_MULTISTACK_NODE — OFF ⇒ nada muda (byte-a-byte, G2);
+    // ON ⇒ superset estrito, mesmo dedup por (método, endpoint) do WsV1 (G3).
+    if (readMultistackFlags().nodeBackend && frontendFiles.length > 0) {
+      addUnseen(
+        expressRoutesToCatalogEntries(extractExpressRoutes(frontendFiles), analysisRunId, projectId)
+      );
     }
 
     return catalogEntryData;
