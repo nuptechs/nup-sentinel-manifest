@@ -75,13 +75,14 @@ describe("ADR-0015 — canários da Onda 1 com as flags OFF (invisíveis; ON = s
     );
   });
 
-  it("C2: GET via queryKey (rest-express) NÃO é interação hoje", () => {
+  it("C2: GET via queryKey (rest-express) NÃO é interação com frontendHttpTemplate OFF", () => {
+    // Sem env ⇒ flag OFF ⇒ a useQuery({queryKey:[...]}) segue invisível; as 3
+    // interações vêm dos fetch(). O gate G3 abaixo prova o lado ON (vira interação).
     const snap = runPipelineSlice(MINI_EASYNUP);
-    // As 3 interações vêm dos fetch(); a useQuery({queryKey:[...]}) é invisível.
     assert.equal(
       snap.totals.interactions,
       3,
-      "Contagem de interações mudou — se a captura queryKey ligou (Onda 1 D6), atualize para asserção de superset (G3).",
+      "queryKey virou interação com a flag OFF — viola o contrato G2. O superset é só com MANIFEST_MULTISTACK_HTTP_TEMPLATE ligado (ver G3).",
     );
   });
 });
@@ -133,17 +134,52 @@ describe("ADR-0015 G2 — flags multistack (default OFF, byte-a-byte)", () => {
     );
   });
 
-  it("frontendHttpTemplate ainda não consumido ⇒ ligá-lo sozinho não muda o snapshot (byte-a-byte)", () => {
-    // D6 (captura queryKey/apiRequest) é entrega posterior; enquanto nada consome
-    // esta flag, ligá-la isolada mantém o baseline intacto — contrato G2 por flag.
+  it("cada flag é independente: nodeBackend OFF + só HTTP_TEMPLATE ON não mexe nos endpoints", () => {
+    // Isola o efeito do D6: com só a flag de frontend ligada, a superfície de
+    // ENDPOINTS (lado backend) segue idêntica ao baseline — o D6 só toca telas.
     process.env.MANIFEST_MULTISTACK_HTTP_TEMPLATE = "1";
     try {
       const snap = runPipelineSlice(MINI_EASYNUP);
-      assert.deepEqual(
-        snap,
-        golden,
-        "MANIFEST_MULTISTACK_HTTP_TEMPLATE mudou o pipeline sem D6 implementado — se D6 ligou, troque por asserção de superset (G3).",
+      assert.deepEqual(snap.endpoints, golden.endpoints, "D6 (frontend) não deveria alterar endpoints");
+      assert.deepEqual(snap.graph, golden.graph);
+      assert.deepEqual(snap.architecture, golden.architecture);
+    } finally {
+      delete process.env.MANIFEST_MULTISTACK_HTTP_TEMPLATE;
+    }
+  });
+});
+
+describe("ADR-0015 G3 — MANIFEST_MULTISTACK_HTTP_TEMPLATE ON ⇒ superset estrito (Onda 1 D6: rest-express)", () => {
+  it("C2: useQuery({queryKey:['/easynup/findContracts.v1']}) vira interação GET resolvida", () => {
+    process.env.MANIFEST_MULTISTACK_HTTP_TEMPLATE = "1";
+    try {
+      const snap = runPipelineSlice(MINI_EASYNUP);
+
+      // Superset estrito de interações: +1 (a queryKey), nada some.
+      assert.equal(
+        snap.totals.interactions,
+        golden.totals.interactions + 1,
+        "esperado exatamente 1 interação nova (o canário C2 via queryKey)",
       );
+      for (const g of golden.screens) {
+        const still = snap.screens.find(
+          (s) => s.screen === g.screen && s.interaction === g.interaction && s.endpoint === g.endpoint,
+        );
+        assert.ok(still, `interação do baseline sumiu com a flag ON: ${g.interaction}`);
+        assert.deepEqual(still, g, `interação do baseline mudou com a flag ON: ${g.interaction}`);
+      }
+
+      // O canário C2 entrou como HTTP resolvida pro WsV1 de findContracts.
+      const c2 = snap.screens.find((s) => s.interaction === "contractsQuery");
+      assert.ok(c2, "C2: useQuery(queryKey) NÃO virou interação com a flag ON");
+      assert.equal(c2!.endpoint, "/easynup/findContracts.v1", "C2: URL do queryKey se perdeu");
+      assert.equal(c2!.httpMethod, "GET", "C2: queryKey deveria ser GET (leitura)");
+      assert.equal(c2!.resolved, true, "C2: interação do queryKey não resolveu pro backend WsV1");
+
+      // Superset limpo: endpoints/entidades/arquitetura intactos (D6 só toca telas).
+      assert.deepEqual(snap.endpoints, golden.endpoints, "D6 não deveria alterar endpoints");
+      assert.deepEqual(snap.graph, golden.graph, "D6 não deveria alterar o grafo");
+      assert.deepEqual(snap.architecture, golden.architecture, "D6 não deveria alterar a arquitetura");
     } finally {
       delete process.env.MANIFEST_MULTISTACK_HTTP_TEMPLATE;
     }
@@ -195,7 +231,12 @@ describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda
         "C1: permissão do middleware requirePermission('webhooks.read') se perdeu",
       );
       assert.equal(c1!.technicalOperation, "READ", "C1: operação técnica derivada do verbo mudou");
-      assert.deepEqual(c1!.entitiesTouched, [], "C1: D1 ainda não liga rota→entidade (Drizzle é D4/D5)");
+      // D4/D5: o handler faz db.select().from(webhookEvents) ⇒ liga à tabela Drizzle.
+      assert.deepEqual(
+        c1!.entitiesTouched,
+        ["webhook_event"],
+        "C1/C3: rota Express deixou de ligar à entidade Drizzle que o handler lê",
+      );
 
       // Superset estrito: exatamente +1 endpoint / +1 catalog entry, o canário C1.
       assert.equal(

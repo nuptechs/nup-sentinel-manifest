@@ -15,6 +15,11 @@
 //  2. `Contracts.vue` tem um GET via useQuery({ queryKey: ['/easynup/...'] })
 //     — HOJE invisível (URL vive no queryKey; padrão rest-express).
 //     Quando MANIFEST_MULTISTACK_HTTP_TEMPLATE ligar, DEVE virar interação.
+//  3. O handler da rota Express (canário 1) lê a tabela Drizzle `webhook_event`
+//     (`services/gateway/src/db/schema.ts`). HOJE invisível (flag OFF: nem a
+//     rota nem a entidade Node existem no catálogo). Com MANIFEST_MULTISTACK_NODE,
+//     o endpoint C1 DEVE carregar entitiesTouched=["webhook_event"] (D4/D5) —
+//     superset; o schema Drizzle é inerte com a flag OFF.
 // ─────────────────────────────────────────────
 
 export interface FixtureFile {
@@ -126,21 +131,40 @@ async function pingWebhook() {
 `,
   },
 
+  // ── Schema Drizzle do gateway (hoje: inerte; entidade Node invisível) ──
+  {
+    filePath: "services/gateway/src/db/schema.ts",
+    content: `import { pgTable, integer, text } from "drizzle-orm/pg-core";
+
+// CANÁRIO 3 (Onda 1 D4/D5): entidade persistente do backend Node.
+// Flag OFF: nenhum analisador lê Drizzle — inerte. Flag ON: o handler que
+// faz db.select().from(webhookEvents) liga o endpoint C1 a "webhook_event".
+export const webhookEvents = pgTable("webhook_event", {
+  id: integer("id").primaryKey(),
+  payload: text("payload"),
+});
+`,
+  },
+
   // ── Gateway Express (hoje: só prefixo; rotas invisíveis) ──
   {
     filePath: "services/gateway/src/app.ts",
     content: `import express from "express";
 import { requirePermission } from "./middleware/auth";
+import { db } from "./db/client";
+import { webhookEvents } from "./db/schema";
 
 const app = express();
 const webhookRouter = express.Router();
 
-// CANÁRIO 1 (Onda 1 D2/D3): rota Express com middleware de permissão.
+// CANÁRIO 1 (Onda 1 D1): rota Express com middleware de permissão.
 // Hoje o Manifest NÃO a enxerga como endpoint (só extrai o prefixo do
 // app.use abaixo). Com MANIFEST_MULTISTACK_NODE, deve virar endpoint
-// POST/GET real com requiredRoles=["webhooks.read"] — SUPERSET (G3).
-webhookRouter.get("/inbound/:id", requirePermission("webhooks.read"), (req, res) => {
-  res.json({ ok: true });
+// GET real com requiredRoles=["webhooks.read"] — SUPERSET (G3).
+// CANÁRIO 3: o handler lê a tabela Drizzle ⇒ entitiesTouched=["webhook_event"].
+webhookRouter.get("/inbound/:id", requirePermission("webhooks.read"), async (req, res) => {
+  const rows = await db.select().from(webhookEvents);
+  res.json(rows);
 });
 
 app.use("/webhooks", webhookRouter);

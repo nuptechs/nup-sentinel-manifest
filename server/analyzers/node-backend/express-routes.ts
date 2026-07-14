@@ -21,6 +21,11 @@
 // ─────────────────────────────────────────────
 
 import type { InsertCatalogEntry } from "@shared/schema";
+import {
+  extractDrizzleEntities,
+  drizzleSymbolIndex,
+  type DrizzleEntity,
+} from "./drizzle-schema";
 
 export interface ExpressRoute {
   /** Verbo HTTP em maiúsculas: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, ALL. */
@@ -33,6 +38,10 @@ export interface ExpressRoute {
   requiredRoles: string[];
   /** Texto do middleware de permissão reconhecido (para securityAnnotations). */
   permissionExpression: string | null;
+  /** Entidades Drizzle tocadas pelo handler (nome de tabela), ordenadas. */
+  entitiesTouched: string[];
+  /** Operações de persistência do handler: read/write/delete, ordenadas. */
+  persistenceOperations: string[];
   sourceFile: string;
   lineNumber: number;
 }
@@ -128,6 +137,45 @@ function readCallArgs(content: string, openParenIdx: number): string {
   return content.slice(start, i);
 }
 
+/**
+ * Resolve as entidades Drizzle tocadas pelo handler (dentro dos args da rota) e
+ * a operação de persistência de cada uma. Reconhece os padrões do query-builder:
+ *   .from(sym) / db.query.sym         → read
+ *   insert(sym) / update(sym)          → write
+ *   delete(sym)                        → delete
+ *   referência nua a um símbolo conhecido → read (fallback)
+ * Símbolos casados por nome (assume nomes únicos no backend Node — limite do D4).
+ */
+function resolveHandlerEntities(
+  args: string,
+  drizzle: Map<string, DrizzleEntity>,
+): { entities: string[]; operations: string[] } {
+  const entities = new Set<string>();
+  const operations = new Set<string>();
+
+  for (const [symbol, ent] of Array.from(drizzle.entries())) {
+    const wordRe = new RegExp(`\\b${symbol}\\b`);
+    if (!wordRe.test(args)) continue;
+
+    let op: string;
+    if (new RegExp(`\\bdelete\\s*\\(\\s*${symbol}\\b`).test(args)) {
+      op = "delete";
+    } else if (new RegExp(`\\b(?:insert|update)\\s*\\(\\s*${symbol}\\b`).test(args)) {
+      op = "write";
+    } else {
+      // .from(sym), db.query.sym, ou referência nua ⇒ leitura.
+      op = "read";
+    }
+    entities.add(ent.entity);
+    operations.add(op);
+  }
+
+  return {
+    entities: Array.from(entities).sort(),
+    operations: Array.from(operations).sort(),
+  };
+}
+
 /** Extrai (roles, expressão) do 1º middleware de permissão reconhecido nos args. */
 function extractPermission(args: string): { roles: string[]; expression: string | null } {
   for (const fn of PERMISSION_FNS) {
@@ -156,6 +204,8 @@ export function extractExpressRoutes(
   files: { filePath: string; content: string }[],
 ): ExpressRoute[] {
   const routes: ExpressRoute[] = [];
+  // Índice de entidades Drizzle do backend inteiro (resolve refs de handler).
+  const drizzle = drizzleSymbolIndex(extractDrizzleEntities(files));
 
   for (const file of files) {
     if (file.filePath.endsWith(".java")) continue;
@@ -192,6 +242,7 @@ export function extractExpressRoutes(
       const openParenIdx = content.indexOf("(", r.index);
       const args = openParenIdx >= 0 ? readCallArgs(content, openParenIdx) : "";
       const { roles, expression } = extractPermission(args);
+      const { entities, operations } = resolveHandlerEntities(args, drizzle);
 
       const prefix = mountPrefix.get(varName) || "";
       routes.push({
@@ -200,6 +251,8 @@ export function extractExpressRoutes(
         routerVar: varName,
         requiredRoles: roles,
         permissionExpression: expression,
+        entitiesTouched: entities,
+        persistenceOperations: operations,
         sourceFile: file.filePath,
         lineNumber: lineAt(content, r.index),
       });
@@ -266,9 +319,9 @@ export function expressRoutesToCatalogEntries(
       controllerMethod: null,
       serviceMethods: [],
       repositoryMethods: [],
-      entitiesTouched: [],
+      entitiesTouched: route.entitiesTouched,
       fullCallChain: [],
-      persistenceOperations: [],
+      persistenceOperations: route.persistenceOperations,
       technicalOperation: operationOf(route.method),
       criticalityScore: null,
       suggestedMeaning: null,
@@ -298,6 +351,7 @@ export function expressRoutesToCatalogEntries(
         endpoint: "extracted" as const,
         httpMethod: "extracted" as const,
         controllerClass: "extracted" as const,
+        ...(route.entitiesTouched.length > 0 ? { entitiesTouched: "extracted" as const } : {}),
         ...(hasRoles
           ? { requiredRoles: "extracted" as const, securityAnnotations: "extracted" as const }
           : {}),
