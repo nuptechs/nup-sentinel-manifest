@@ -14,7 +14,8 @@
  * via `changed-symbols`), não o NOME do arquivo — com fallback pro basename
  * (`symbolsForFile`), então nunca fica pior que o `computeImpactForFiles` atual.
  */
-import { changedSymbolsFromDiff } from "./changed-symbols";
+import { parseUnifiedDiff, extractChangedSymbols } from "./changed-symbols";
+import { breakingReportForDiff, type BreakingReport } from "./breaking-changes";
 
 export interface ImpactedEndpoint {
   path: string;
@@ -283,6 +284,12 @@ export interface DiffImpactReport {
     entitiesTouched: string[];
   };
   perFile: FileImpact[];
+  /**
+   * ADR-0018 Onda 2 — quebras de contrato do diff × alcance no grafo
+   * (breaking-AND-reachable). Só presente no caminho `diff` (o caminho `files`
+   * não vê conteúdo, logo não pode classificar quebra). Aditivo.
+   */
+  breaking?: BreakingReport;
 }
 
 const STRIP_SUFFIX = /(WsV\d+|Ws|ServiceV\d+|Service|RepositoryImpl|Repository|Controller|Resource|Endpoint|\.routes|\.route|\.spec|\.test|\.vue|\.component)$/i;
@@ -392,23 +399,28 @@ export function computeImpactForFiles(manifest: any, files: string[]): DiffImpac
  * `symbolSource` por arquivo diz de onde veio ('diff' vs 'filename').
  */
 export function computeImpactForDiff(manifest: any, diffText: string): DiffImpactReport {
-  const changed = changedSymbolsFromDiff(diffText);
+  // parse ÚNICO do diff — alimenta o blast radius (Onda 1) e a classificação de
+  // quebra × alcance (Onda 2) sem re-parsear.
+  const parsedFiles = parseUnifiedDiff(diffText);
   const perFile: FileImpact[] = [];
   const impacts: ReturnType<typeof collectImpactForSymbols>[] = [];
-  for (const cf of changed) {
-    const fromDiff = cf.symbols.filter((s) => typeof s === "string" && s.trim());
+  for (const pf of parsedFiles) {
+    const fromDiff = extractChangedSymbols(pf).filter((s) => typeof s === "string" && s.trim());
     const usedFilename = fromDiff.length === 0;
-    const symbols = usedFilename ? symbolsForFile(cf.path) : fromDiff;
+    const symbols = usedFilename ? symbolsForFile(pf.path) : fromDiff;
     const imp = collectImpactForSymbols(manifest, symbols);
     impacts.push(imp);
     perFile.push({
-      file: cf.path,
+      file: pf.path,
       symbols,
       symbolSource: usedFilename ? "filename" : "diff",
       summary: { endpoints: imp.eps.size, screens: imp.screens.size, entities: imp.ents.size },
     });
   }
-  return aggregateFileImpacts(changed.length, perFile, impacts);
+  const report = aggregateFileImpacts(parsedFiles.length, perFile, impacts);
+  // ADR-0018 Onda 2 — aditivo: os campos da Onda 1 ficam byte-a-byte.
+  report.breaking = breakingReportForDiff(manifest, parsedFiles);
+  return report;
 }
 
 // ─────────────────────────────────────────────
@@ -445,6 +457,48 @@ export function renderImpactDiffMarkdown(
   L.push(`- **Telas a revalidar:** ${agg.summary.screens}`);
   L.push(`- **Entidades tocadas:** ${agg.summary.entities}${agg.entitiesTouched.length ? ` (${agg.entitiesTouched.join(", ")})` : ""}`);
   L.push("");
+
+  // ADR-0018 Onda 2 — quebras de contrato × alcance. Renderiza ANTES do early
+  // return de blast vazio: quebra-morta (contada) importa mesmo sem blast.
+  const brk = report.breaking;
+  if (brk && (brk.summary.candidates > 0 || brk.summary.refactors > 0 || brk.summary.inconclusive > 0)) {
+    L.push("## Quebras de contrato (breaking × alcance)");
+    L.push("");
+    if (brk.alerts.length) {
+      L.push(`⚠️ **${brk.alerts.length} quebra(s) COM consumidor conhecido no grafo — atenção:**`);
+      L.push("");
+      for (const a of brk.alerts) {
+        const label = a.change === "removed" ? "removido" : "assinatura mudou";
+        L.push(`- **\`${a.symbol}\`** (${a.kind}, ${label}) — ${a.consumers.endpoints.length} endpoint(s) dependente(s), ${a.consumers.screens.length} tela(s)`);
+        if (a.surfaceEndpoints.length) {
+          for (const s of a.surfaceEndpoints.slice(0, 3)) L.push(`  - superfície quebrada: \`${s.method} ${s.path}\``);
+        }
+        for (const e of a.consumers.endpoints.slice(0, 5)) L.push(`  - dependente: \`${e.method} ${e.path}\` (${e.controller})`);
+        if (a.consumers.endpoints.length > 5) L.push(`  - … +${a.consumers.endpoints.length - 5} endpoint(s)`);
+        for (const s of a.consumers.screens.slice(0, 5)) L.push(`  - tela: **${s.name}**${s.route ? ` — \`${s.route}\`` : ""}`);
+        if (a.consumers.screens.length > 5) L.push(`  - … +${a.consumers.screens.length - 5} tela(s)`);
+      }
+      L.push("");
+    }
+    if (brk.suppressedDead.length) {
+      L.push(`> ${brk.suppressedDead.length} quebra(s) **sem consumidor no grafo conhecido** — suprimida(s) do alerta (breaking-but-dead, Ochoa EMSE'22) e contada(s): ${brk.suppressedDead.map((d) => `\`${d.symbol}\``).join(", ")}.`);
+      L.push("");
+    }
+    if (brk.refactors.length) {
+      L.push(`> ${brk.refactors.length} rename(s) puro(s) — refatoração, não alarma: ${brk.refactors.map((r) => `\`${r.from} → ${r.to}\``).join(", ")}.`);
+      L.push("");
+    }
+    if (brk.inconclusive.length) {
+      L.push(`> ${brk.inconclusive.length} remoção(ões) inconclusiva(s) (declaração pode existir fora do hunk) — não alarmada(s) por precaução.`);
+      L.push("");
+    }
+    L.push("<details><summary>Limites desta análise (declarados)</summary>");
+    L.push("");
+    for (const b of brk.blindSpots) L.push(`- ${b}`);
+    L.push("");
+    L.push("</details>");
+    L.push("");
+  }
 
   if (report.matchedFiles === 0) {
     L.push("> Nenhum dos arquivos entregues casou com o sistema analisado — entrega sem impacto mapeável (arquivo novo, fora do escopo, ou nome divergente). Revise manualmente.");

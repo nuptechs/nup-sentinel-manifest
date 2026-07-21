@@ -372,3 +372,63 @@ describe("computeImpactForDiff (ADR-0018 Onda 1)", () => {
     assert.equal(r.perFile[0].symbolSource, undefined);
   });
 });
+
+// ── ADR-0018 Onda 2: breaking × reachable integrado no impact-diff ──
+
+describe("computeImpactForDiff.breaking (ADR-0018 Onda 2)", () => {
+  it("chave `breaking` é ADITIVA: campos da Onda 1 idênticos + relatório de quebra presente", () => {
+    const r = computeImpactForDiff(MANIFEST, CONTRACT_DIFF);
+    // Onda 1 byte-a-byte (mesmos asserts do bloco acima)
+    assert.equal(r.matchedFiles, 1);
+    assert.ok(r.aggregate.impactedEndpoints.some((e) => e.path === "/api/contracts/{id}"));
+    // Onda 2 aditiva
+    assert.ok(r.breaking, "breaking presente no caminho diff");
+    assert.ok(Array.isArray(r.breaking!.alerts));
+    assert.ok(Array.isArray(r.breaking!.blindSpots) && r.breaking!.blindSpots.length >= 3);
+    // o CONTRACT_DIFF só MODIFICA o corpo de update (não remove decl) → 0 quebra
+    assert.equal(r.breaking!.summary.candidates, 0, JSON.stringify(r.breaking!.summary));
+  });
+
+  it("OFF: computeImpactForFiles NUNCA carrega `breaking` (sem conteúdo não há classificação)", () => {
+    const r = computeImpactForFiles(MANIFEST, ["src/main/java/ContractService.java"]);
+    assert.equal((r as any).breaking, undefined);
+  });
+
+  it("remoção ALCANÇADA no diff → alerta com consumidores; markdown ganha a seção de quebras", () => {
+    const removalDiff = `diff --git a/src/main/java/ContractService.java b/src/main/java/ContractService.java
+--- a/src/main/java/ContractService.java
++++ b/src/main/java/ContractService.java
+@@ -40,3 +40,1 @@ public class ContractService {
+-    public Contract update(Long id, ContractDto dto) {
+-    }
+`;
+    const r = computeImpactForDiff(MANIFEST, removalDiff);
+    assert.equal(r.breaking!.alerts.length, 1);
+    assert.equal(r.breaking!.alerts[0].symbol, "ContractService.update");
+    const md = renderImpactDiffMarkdown(r, { projectName: "fixture" });
+    assert.match(md, /Quebras de contrato \(breaking × alcance\)/);
+    assert.match(md, /ContractService\.update/);
+    assert.match(md, /Limites desta análise/);
+  });
+
+  it("quebra MORTA no diff → 0 alerta, contada, e o markdown a lista como suprimida", () => {
+    const deadDiff = `diff --git a/src/main/java/OrphanService.java b/src/main/java/OrphanService.java
+--- a/src/main/java/OrphanService.java
++++ b/src/main/java/OrphanService.java
+@@ -8,2 +8,0 @@ public class OrphanService {
+-    public void unusedHelper(String x) {
+-    }
+`;
+    const r = computeImpactForDiff(MANIFEST, deadDiff);
+    assert.equal(r.breaking!.alerts.length, 0);
+    assert.equal(r.breaking!.suppressedDead.length, 1);
+    const md = renderImpactDiffMarkdown(r);
+    assert.match(md, /sem consumidor no grafo conhecido/);
+    assert.match(md, /OrphanService\.unusedHelper/);
+  });
+
+  it("diff SEM quebra → markdown NÃO ganha a seção (relatório limpo)", () => {
+    const md = renderImpactDiffMarkdown(computeImpactForDiff(MANIFEST, CONTRACT_DIFF));
+    assert.ok(!/Quebras de contrato/.test(md), md.slice(0, 300));
+  });
+});

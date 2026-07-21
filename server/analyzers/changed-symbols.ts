@@ -126,40 +126,65 @@ function stripAB(p: string): string {
 
 // ── extração de símbolo por linguagem (conservadora) ──
 
+/**
+ * Declaração TIPADA extraída de uma linha alterada — ADR-0018 Onda 2. O `kind`
+ * separa método×campo×classe (a classificação de breaking depende disso: campo
+ * removido de ENTIDADE cruza por entitiesTouched; método removido cruza por
+ * fullCallChain). `line` é a linha da declaração (pós corte de comentário) —
+ * usada pra comparar assinatura (mudou? cosmético? rename?).
+ */
+export interface Decl {
+  name: string;
+  kind: "class" | "method" | "field" | "const" | "component";
+  line: string;
+}
+
 /** declarações Java/Kotlin: método, campo, classe/interface/enum/record. */
-function javaKotlinSymbols(line: string): string[] {
-  const out: string[] = [];
+function javaKotlinDecls(line: string): Decl[] {
+  const out: Decl[] = [];
   // classe/interface/enum/record/ (Java) e class/object/interface (Kotlin)
   const cls = line.match(/\b(?:class|interface|enum|record|object)\s+([A-Z][A-Za-z0-9_]*)/);
-  if (cls) out.push(cls[1]);
+  if (cls) out.push({ name: cls[1], kind: "class", line });
   // método Java: `... Tipo nome(` ; Kotlin: `fun nome(`
   const kfun = line.match(/\bfun\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
-  if (kfun) out.push(kfun[1]);
+  if (kfun) out.push({ name: kfun[1], kind: "method", line });
   const jm = line.match(/\b(?:public|private|protected|static|final|abstract|synchronized|\s)+[A-Za-z_][A-Za-z0-9_<>\[\],\s.]*?\s+([a-z][A-Za-z0-9_]*)\s*\(/);
-  if (jm) out.push(jm[1]);
-  // campo Java: `... Tipo nome;` ou `= ...`
-  const jf = line.match(/\b(?:private|protected|public|static|final|\s)+[A-Z][A-Za-z0-9_<>\[\],\s.]*?\s+([a-z][A-Za-z0-9_]*)\s*[;=]/);
-  if (jf) out.push(jf[1]);
+  if (jm) out.push({ name: jm[1], kind: "method", line });
+  // campo Java: `private Tipo nome;` / `= ...` — exige MODIFICADOR explícito
+  // (private/protected/public/static/final). Sem isso, variável LOCAL
+  // (`Contract existing = repo.findById(id)`) viraria "campo removido" e
+  // poluiria a lista de quebras-mortas da Onda 2. Campo sem modificador
+  // (package-private) fica de fora — conservador, precisão > recall.
+  const jf = line.match(/\b(?:private|protected|public|static|final)\b[^;=()"']*?\s([a-z][A-Za-z0-9_]*)\s*[;=]/);
+  if (jf) out.push({ name: jf[1], kind: "field", line });
   return out;
 }
 
+function javaKotlinSymbols(line: string): string[] {
+  return javaKotlinDecls(line).map((d) => d.name);
+}
+
 /** declarações TS/JS/Vue-script. */
-function tsJsSymbols(line: string): string[] {
-  const out: string[] = [];
+function tsJsDecls(line: string): Decl[] {
+  const out: Decl[] = [];
   const fn = line.match(/\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)/);
-  if (fn) out.push(fn[1]);
+  if (fn) out.push({ name: fn[1], kind: "method", line });
   const cls = line.match(/\bclass\s+([A-Za-z_][A-Za-z0-9_]*)/);
-  if (cls) out.push(cls[1]);
+  if (cls) out.push({ name: cls[1], kind: "class", line });
   // const/let/var nome = ...  (inclui arrow functions e composables)
   const decl = line.match(/\b(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*[=:]/);
-  if (decl) out.push(decl[1]);
+  if (decl) out.push({ name: decl[1], kind: "const", line });
   // export function/const/class nome
   const exp = line.match(/\bexport\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|interface|type|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/);
-  if (exp) out.push(exp[1]);
+  if (exp) out.push({ name: exp[1], kind: "const", line });
   // método de classe/objeto: `nome(args) {` ou `nome(args):`
   const method = line.match(/^\s*(?:public|private|protected|async|static|\s)*([a-z][A-Za-z0-9_]*)\s*\([^)]*\)\s*[:{]/);
-  if (method) out.push(method[1]);
+  if (method) out.push({ name: method[1], kind: "method", line });
   return out;
+}
+
+function tsJsSymbols(line: string): string[] {
+  return tsJsDecls(line).map((d) => d.name);
 }
 
 /**
@@ -265,4 +290,66 @@ export function changedSymbolsFromDiff(diffText: string): ChangedSymbols[] {
     status: f.status,
     symbols: extractChangedSymbols(f),
   }));
+}
+
+// ── ADR-0018 Onda 2: declarações tipadas por lado (+/-) do diff ──
+
+/**
+ * Declarações tipadas de UMA linha (com os mesmos guardas anti-superalarme de
+ * `symbolsFromLine`: comentário/inline-comment/string-mask). Fonte ÚNICA do
+ * conhecimento de linguagem — o classificador de breaking (breaking-changes.ts)
+ * consome daqui, nunca re-declara regex própria (D8: fonte da verdade única).
+ */
+export function declsFromLine(path: string, line: string): Decl[] {
+  if (isCommentLine(line)) return [];
+  const code = stripInlineComment(line);
+  const masked = maskStrings(code);
+  const p = path.toLowerCase();
+  let out: Decl[];
+  if (/\.(java|kt)$/.test(p)) out = javaKotlinDecls(masked);
+  else if (/\.(ts|tsx|js|jsx|vue|mjs|cjs)$/.test(p)) {
+    out = [...tsJsDecls(masked), ...vueComponentName(code).map((n): Decl => ({ name: n, kind: "component", line: code }))];
+  } else {
+    out = [
+      ...javaKotlinDecls(masked),
+      ...tsJsDecls(masked),
+      ...vueComponentName(code).map((n): Decl => ({ name: n, kind: "component", line: code })),
+    ];
+  }
+  return out.filter((d) => isUsefulIdent(d.name));
+}
+
+export interface FileDeclarations {
+  /** declarações presentes nas linhas ADICIONADAS (`+`) */
+  added: Decl[];
+  /** declarações presentes nas linhas REMOVIDAS (`-`) */
+  removed: Decl[];
+}
+
+/**
+ * Separa as declarações de um arquivo do diff por LADO: o que foi declarado nas
+ * linhas `-` (candidato a remoção/mudança de assinatura) vs nas linhas `+`
+ * (redeclaração/rename/adição). O CONTEXTO de hunk fica de fora de propósito —
+ * a função que CONTÉM a mudança não teve a própria declaração alterada
+ * (importa pro blast radius da Onda 1, não pra classificação de breaking).
+ * Dedupe por (name, kind): a mesma declaração movida entre hunks conta 1×.
+ */
+export function declarationsFromDiffFile(file: DiffFile): FileDeclarations {
+  const seen = { added: new Set<string>(), removed: new Set<string>() };
+  const out: FileDeclarations = { added: [], removed: [] };
+  for (const h of file.hunks) {
+    for (const line of h.removedLines) {
+      for (const d of declsFromLine(file.path, line)) {
+        const k = `${d.kind}:${d.name}`;
+        if (!seen.removed.has(k)) { seen.removed.add(k); out.removed.push(d); }
+      }
+    }
+    for (const line of h.addedLines) {
+      for (const d of declsFromLine(file.path, line)) {
+        const k = `${d.kind}:${d.name}`;
+        if (!seen.added.has(k)) { seen.added.add(k); out.added.push(d); }
+      }
+    }
+  }
+  return out;
 }
