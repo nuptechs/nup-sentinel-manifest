@@ -1464,22 +1464,29 @@ export async function registerRoutes(
     try {
       const projectId = parseInt(req.params.projectId);
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      // ADR-0018 Onda 1: aceita `diff` (git diff unificado) — lê o SÍMBOLO
+      // alterado, não o nome do arquivo. `files` (nomes) segue aceito e byte-a-
+      // byte. Um dos dois é obrigatório.
+      const diff = typeof req.body?.diff === "string" && req.body.diff.trim() ? req.body.diff : null;
       const files = Array.isArray(req.body?.files) ? req.body.files : null;
-      if (!files || files.length === 0) {
-        return res.status(400).json({ message: "body.files (string[]) is required — os arquivos mudados na entrega" });
+      if (!diff && (!files || files.length === 0)) {
+        return res.status(400).json({ message: "body.diff (git diff unificado) OU body.files (string[]) é obrigatório — a entrega mudada" });
       }
-      if (files.length > 5000) return res.status(400).json({ message: "too many files (max 5000)" });
+      if (diff && diff.length > 5_000_000) return res.status(400).json({ message: "diff too large (max 5MB)" });
+      if (files && files.length > 5000) return res.status(400).json({ message: "too many files (max 5000)" });
 
       const snapshots = await storage.getAnalysisSnapshots(projectId);
       if (!snapshots.length) {
         return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
       }
       const manifest = (snapshots[0].manifestJson as any) || {};
-      const { computeImpactForFiles, renderImpactDiffMarkdown } = await import("./analyzers/impact-analyzer");
+      const { computeImpactForFiles, computeImpactForDiff, renderImpactDiffMarkdown } = await import("./analyzers/impact-analyzer");
       const { retrieveAdrsForFiles, renderApplicableAdrsMarkdown } = await import("./analyzers/adr-retrieval");
-      const report = computeImpactForFiles(manifest, files);
+      const report = diff ? computeImpactForDiff(manifest, diff) : computeImpactForFiles(manifest, files);
+      // ADR retrieval é por NOME de arquivo — no modo diff, deriva dos arquivos tocados.
+      const filesForAdr: string[] = diff ? report.perFile.map((f) => f.file) : files;
       // ADR-070 Onda 1 — decisões arquiteturais que governam a entrega (advisory).
-      const applicableAdrs = retrieveAdrsForFiles(Array.isArray(manifest.adrIndex) ? manifest.adrIndex : [], files);
+      const applicableAdrs = retrieveAdrsForFiles(Array.isArray(manifest.adrIndex) ? manifest.adrIndex : [], filesForAdr);
       // ADR-070 Propósito 2 — `?format=md` devolve o relatório pronto p/
       // documentação (anexo de recebimento de entrega do fornecedor).
       if (String(req.query.format || "").toLowerCase() === "md") {
