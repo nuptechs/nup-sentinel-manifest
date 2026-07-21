@@ -7,7 +7,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { computeImpact, computeImpactForFiles, symbolsForFile, renderImpactDiffMarkdown } from "../../server/analyzers/impact-analyzer.ts";
+import { computeImpact, computeImpactForFiles, computeImpactForDiff, symbolsForFile, renderImpactDiffMarkdown } from "../../server/analyzers/impact-analyzer.ts";
 
 const MANIFEST = {
   endpoints: [
@@ -312,5 +312,63 @@ describe("computeImpact — tela casada direto pelo símbolo (arquivo de fronten
     const r = computeImpactForFiles(m, ["frontend/src/pages/ChatIa.vue"]);
     assert.equal(r.matchedFiles, 1);
     assert.ok(r.aggregate.impactedScreens.some((s) => s.name === "ChatIa"));
+  });
+});
+
+// ── ADR-0018 Onda 1: impacto a partir do DIFF REAL (símbolo, não nome) ──
+
+const CONTRACT_DIFF = `diff --git a/src/main/java/ContractService.java b/src/main/java/ContractService.java
+--- a/src/main/java/ContractService.java
++++ b/src/main/java/ContractService.java
+@@ -40,6 +40,7 @@ public Contract update(Long id, ContractDto dto) {
+         Contract existing = repo.findById(id);
++        auditLog.record(existing);
+         return repo.save(existing);
+`;
+
+describe("computeImpactForDiff (ADR-0018 Onda 1)", () => {
+  it("extrai o SÍMBOLO alterado do diff (update) → impacto, symbolSource='diff'", () => {
+    const r = computeImpactForDiff(MANIFEST, CONTRACT_DIFF);
+    assert.equal(r.matchedFiles, 1, "casou o endpoint via o símbolo 'update' do diff");
+    assert.ok(r.aggregate.impactedEndpoints.some((e) => e.path === "/api/contracts/{id}"));
+    const pf = r.perFile.find((f) => f.file.endsWith("ContractService.java"));
+    assert.ok(pf);
+    assert.equal(pf!.symbolSource, "diff");
+    assert.ok(pf!.symbols.includes("update"), JSON.stringify(pf!.symbols));
+    // a prova do salto: os símbolos NÃO são o basename cru
+    assert.ok(!pf!.symbols.includes("ContractService.java"));
+  });
+
+  it("arquivo sem símbolo no diff (.md) → CAI no basename (symbolSource='filename'), nunca pior que hoje", () => {
+    const mdDiff = `diff --git a/docs/README.md b/docs/README.md
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -1,1 +1,2 @@
+-# Título
++# Título novo
++linha
+`;
+    const r = computeImpactForDiff(MANIFEST, mdDiff);
+    const pf = r.perFile.find((f) => f.file.endsWith("README.md"));
+    assert.ok(pf);
+    assert.equal(pf!.symbolSource, "filename");
+    // fallback = exatamente o que o symbolsForFile daria (degradação honesta)
+    assert.deepEqual(pf!.symbols, symbolsForFile("docs/README.md"));
+  });
+
+  it("diff vazio → relatório vazio (não quebra)", () => {
+    const r = computeImpactForDiff(MANIFEST, "");
+    assert.equal(r.files, 0);
+    assert.equal(r.matchedFiles, 0);
+    assert.deepEqual(r.perFile, []);
+  });
+
+  it("BYTE-A-BYTE: computeImpactForFiles intocado (o caminho OFF do ADR-0018)", () => {
+    // o modo 'files' (sem diff) tem que continuar idêntico ao de antes do refactor.
+    const r = computeImpactForFiles(MANIFEST, ["src/main/java/ContractController.java"]);
+    assert.equal(r.matchedFiles, 1);
+    assert.ok(r.aggregate.impactedEndpoints.some((e) => e.path === "/api/contracts/{id}"));
+    // computeImpactForFiles NÃO carrega symbolSource (só o diff carrega)
+    assert.equal(r.perFile[0].symbolSource, undefined);
   });
 });

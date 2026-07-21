@@ -9,7 +9,12 @@
  *
  * É o gap que nenhuma ferramenta de mercado mapeia (UI→API→DB cross-stack), aqui
  * realizado por consulta sobre o grafo que o Manifest já computa. Determinístico.
+ *
+ * ADR-0018 Onda 1: `computeImpactForDiff` lê o DIFF DE VERDADE (símbolo alterado,
+ * via `changed-symbols`), não o NOME do arquivo — com fallback pro basename
+ * (`symbolsForFile`), então nunca fica pior que o `computeImpactForFiles` atual.
  */
+import { changedSymbolsFromDiff } from "./changed-symbols";
 
 export interface ImpactedEndpoint {
   path: string;
@@ -263,6 +268,8 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
 export interface FileImpact {
   file: string;
   symbols: string[]; // símbolos candidatos derivados do arquivo
+  /** ADR-0018: de onde vieram os símbolos — do DIFF real ou fallback do nome do arquivo. */
+  symbolSource?: "diff" | "filename";
   summary: { endpoints: number; screens: number; entities: number };
 }
 
@@ -305,39 +312,40 @@ function epKey(e: ImpactedEndpoint): string {
  * Para cada arquivo, deriva símbolos candidatos, roda computeImpact e une tudo.
  * Puro; sem I/O. Quanto mais completo o manifest (backend analisado), mais profundo.
  */
-export function computeImpactForFiles(manifest: any, files: string[]): DiffImpactReport {
-  const list = Array.isArray(files) ? files.filter((f) => typeof f === "string" && f.trim()) : [];
+/**
+ * Impacto de UM conjunto de símbolos (loop interno reusado por
+ * computeImpactForFiles e computeImpactForDiff). Extraído sem mudar
+ * comportamento — a saída dos dois é idêntica ao loop inline anterior.
+ */
+function collectImpactForSymbols(manifest: any, symbols: string[]): {
+  eps: Map<string, ImpactedEndpoint>;
+  screens: Map<string, ImpactedScreen>;
+  ents: Set<string>;
+} {
+  const eps = new Map<string, ImpactedEndpoint>();
+  const screens = new Map<string, ImpactedScreen>();
+  const ents = new Set<string>();
+  for (const sym of symbols) {
+    const r = computeImpact(manifest, sym);
+    if (!r.found) continue;
+    for (const e of r.impactedEndpoints) eps.set(epKey(e), e);
+    for (const s of r.impactedScreens) {
+      const prev = screens.get(s.name);
+      screens.set(s.name, prev ? { ...s, viaEndpoints: Array.from(new Set([...prev.viaEndpoints, ...s.viaEndpoints])) } : s);
+    }
+    for (const e of r.entitiesTouched) ents.add(e);
+  }
+  return { eps, screens, ents };
+}
+
+/** Agrega os impactos por-arquivo num DiffImpactReport (une endpoints/telas/entidades). */
+function aggregateFileImpacts(fileCount: number, perFile: FileImpact[], perFileImpacts: ReturnType<typeof collectImpactForSymbols>[]): DiffImpactReport {
   const aggEndpoints = new Map<string, ImpactedEndpoint>();
   const aggScreens = new Map<string, ImpactedScreen>();
   const aggEntities = new Set<string>();
-  const perFile: FileImpact[] = [];
   let matchedFiles = 0;
-
-  for (const file of list) {
-    const symbols = symbolsForFile(file);
-    const eps = new Map<string, ImpactedEndpoint>();
-    const screens = new Map<string, ImpactedScreen>();
-    const ents = new Set<string>();
-
-    for (const sym of symbols) {
-      const r = computeImpact(manifest, sym);
-      if (!r.found) continue;
-      for (const e of r.impactedEndpoints) eps.set(epKey(e), e);
-      for (const s of r.impactedScreens) {
-        const prev = screens.get(s.name);
-        screens.set(s.name, prev ? { ...s, viaEndpoints: Array.from(new Set([...prev.viaEndpoints, ...s.viaEndpoints])) } : s);
-      }
-      for (const e of r.entitiesTouched) ents.add(e);
-    }
-
+  for (const { eps, screens, ents } of perFileImpacts) {
     if (eps.size || screens.size || ents.size) matchedFiles++;
-    perFile.push({
-      file,
-      symbols,
-      summary: { endpoints: eps.size, screens: screens.size, entities: ents.size },
-    });
-
-    // une no agregado
     Array.from(eps.entries()).forEach(([k, v]) => aggEndpoints.set(k, v));
     Array.from(screens.entries()).forEach(([k, v]) => {
       const prev = aggScreens.get(k);
@@ -345,9 +353,8 @@ export function computeImpactForFiles(manifest: any, files: string[]): DiffImpac
     });
     Array.from(ents).forEach((e) => aggEntities.add(e));
   }
-
   return {
-    files: list.length,
+    files: fileCount,
     matchedFiles,
     aggregate: {
       summary: { endpoints: aggEndpoints.size, screens: aggScreens.size, entities: aggEntities.size },
@@ -357,6 +364,51 @@ export function computeImpactForFiles(manifest: any, files: string[]): DiffImpac
     },
     perFile,
   };
+}
+
+export function computeImpactForFiles(manifest: any, files: string[]): DiffImpactReport {
+  const list = Array.isArray(files) ? files.filter((f) => typeof f === "string" && f.trim()) : [];
+  const perFile: FileImpact[] = [];
+  const impacts: ReturnType<typeof collectImpactForSymbols>[] = [];
+  for (const file of list) {
+    const symbols = symbolsForFile(file);
+    const imp = collectImpactForSymbols(manifest, symbols);
+    impacts.push(imp);
+    perFile.push({
+      file,
+      symbols,
+      summary: { endpoints: imp.eps.size, screens: imp.screens.size, entities: imp.ents.size },
+    });
+  }
+  return aggregateFileImpacts(list.length, perFile, impacts);
+}
+
+/**
+ * ADR-0018 Onda 1 — impacto a partir do DIFF REAL (`git diff` unificado).
+ * Extrai os símbolos ALTERADOS do conteúdo do diff (método/campo/classe/função,
+ * via `changed-symbols`) e alimenta o mesmo grafo. Quando um arquivo não rende
+ * símbolo do diff (ex.: `.md`, `.sh`, ou hunk sem declaração reconhecida), cai
+ * no basename (`symbolsForFile`) — degradação honesta, nunca pior que hoje. O
+ * `symbolSource` por arquivo diz de onde veio ('diff' vs 'filename').
+ */
+export function computeImpactForDiff(manifest: any, diffText: string): DiffImpactReport {
+  const changed = changedSymbolsFromDiff(diffText);
+  const perFile: FileImpact[] = [];
+  const impacts: ReturnType<typeof collectImpactForSymbols>[] = [];
+  for (const cf of changed) {
+    const fromDiff = cf.symbols.filter((s) => typeof s === "string" && s.trim());
+    const usedFilename = fromDiff.length === 0;
+    const symbols = usedFilename ? symbolsForFile(cf.path) : fromDiff;
+    const imp = collectImpactForSymbols(manifest, symbols);
+    impacts.push(imp);
+    perFile.push({
+      file: cf.path,
+      symbols,
+      symbolSource: usedFilename ? "filename" : "diff",
+      summary: { endpoints: imp.eps.size, screens: imp.screens.size, entities: imp.ents.size },
+    });
+  }
+  return aggregateFileImpacts(changed.length, perFile, impacts);
 }
 
 // ─────────────────────────────────────────────
