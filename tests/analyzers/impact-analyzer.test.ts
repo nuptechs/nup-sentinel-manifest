@@ -327,16 +327,64 @@ const CONTRACT_DIFF = `diff --git a/src/main/java/ContractService.java b/src/mai
 `;
 
 describe("computeImpactForDiff (ADR-0018 Onda 1)", () => {
-  it("extrai o SÍMBOLO alterado do diff (update) → impacto, symbolSource='diff'", () => {
+  it("extrai o SÍMBOLO alterado do diff (update, QUALIFICADO pela classe) → impacto, symbolSource='diff'", () => {
     const r = computeImpactForDiff(MANIFEST, CONTRACT_DIFF);
-    assert.equal(r.matchedFiles, 1, "casou o endpoint via o símbolo 'update' do diff");
+    assert.equal(r.matchedFiles, 1, "casou o endpoint via ContractService.update do diff");
     assert.ok(r.aggregate.impactedEndpoints.some((e) => e.path === "/api/contracts/{id}"));
     const pf = r.perFile.find((f) => f.file.endsWith("ContractService.java"));
     assert.ok(pf);
     assert.equal(pf!.symbolSource, "diff");
-    assert.ok(pf!.symbols.includes("update"), JSON.stringify(pf!.symbols));
-    // a prova do salto: os símbolos NÃO são o basename cru
+    // Onda 4 anti-superalarme: símbolo de backend vem QUALIFICADO (Classe.simbolo)
+    assert.ok(pf!.symbols.includes("ContractService.update"), JSON.stringify(pf!.symbols));
+    assert.ok(pf!.symbols.includes("ContractService"));
+    // o símbolo CRU não entra mais (era o vetor do superalarme "handle")
+    assert.ok(!pf!.symbols.includes("update"));
     assert.ok(!pf!.symbols.includes("ContractService.java"));
+  });
+
+  it("ANTI-SUPERALARME universal: método 'handle' de UM WsV1 NÃO casa cadeias de OUTROS controllers", () => {
+    // fixture com 2 controllers ambos com .handle nas cadeias
+    const m = {
+      impactEndpoints: [
+        { path: "/a.v1", method: "POST", controller: "AWsV1", controllerMethod: "handle", fullCallChain: ["AWsV1.handle", "AService.run"], entitiesTouched: ["A"] },
+        { path: "/b.v1", method: "POST", controller: "BWsV1", controllerMethod: "handle", fullCallChain: ["BWsV1.handle", "BService.run"], entitiesTouched: ["B"] },
+      ],
+      screens: [],
+      entities: [],
+    };
+    const diff = `diff --git a/src/main/java/AWsV1.java b/src/main/java/AWsV1.java
+--- a/src/main/java/AWsV1.java
++++ b/src/main/java/AWsV1.java
+@@ -3,2 +3,3 @@ public class AWsV1 {
+     public AReturnV1 handle(AParamsV1 p) {
++        log.info(p);
+`;
+    const r = computeImpactForDiff(m, diff);
+    // só o endpoint do PRÓPRIO controller — o handle do B não acende
+    assert.deepEqual(r.aggregate.impactedEndpoints.map((e) => e.path), ["/a.v1"]);
+    assert.deepEqual(r.aggregate.entitiesTouched, ["A"]);
+  });
+
+  it("RECALL com cadeia RASA: qualificado não casa nada → degrada pro basename (nunca pro método cru)", () => {
+    // snapshot com cadeia truncada: só WsV1.execute, sem o hop do ServiceV1
+    const m = {
+      impactEndpoints: [
+        { path: "/easynup/applyX.v1", method: "POST", controller: "ApplyXWsV1", controllerMethod: "execute", fullCallChain: ["ApplyXWsV1.execute"], entitiesTouched: ["X"] },
+      ],
+      screens: [],
+      entities: [],
+    };
+    const diff = `diff --git a/src/main/java/applyX/v1/ApplyXServiceV1.java b/src/main/java/applyX/v1/ApplyXServiceV1.java
+--- a/src/main/java/applyX/v1/ApplyXServiceV1.java
++++ b/src/main/java/applyX/v1/ApplyXServiceV1.java
+@@ -8,2 +8,3 @@ public class ApplyXServiceV1 {
+     public XReturn handle(XParams p) {
++        log.info(p);
+`;
+    const r = computeImpactForDiff(m, diff);
+    // ApplyXServiceV1.handle não está na cadeia → fallback basename (strip
+    // ServiceV1 → "ApplyX") casa o controller ApplyXWsV1 por substring
+    assert.deepEqual(r.aggregate.impactedEndpoints.map((e) => e.path), ["/easynup/applyX.v1"]);
   });
 
   it("arquivo sem símbolo no diff (.md) → CAI no basename (symbolSource='filename'), nunca pior que hoje", () => {
