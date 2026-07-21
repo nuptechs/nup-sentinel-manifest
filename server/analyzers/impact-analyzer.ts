@@ -16,6 +16,7 @@
  */
 import { parseUnifiedDiff, extractChangedSymbols } from "./changed-symbols";
 import { breakingReportForDiff, type BreakingReport } from "./breaking-changes";
+import { computeDeliveryRisk, type DeliveryRiskReport } from "./delivery-risk";
 
 export interface ImpactedEndpoint {
   path: string;
@@ -290,6 +291,12 @@ export interface DiffImpactReport {
    * não vê conteúdo, logo não pode classificar quebra). Aditivo.
    */
   breaking?: BreakingReport;
+  /**
+   * ADR-0018 Onda 3 — risco da entrega em NATUREZAS advisory (churn/entropia/
+   * hub/quebra/área-sensível) + sinais não-computados declarados. Só no
+   * caminho `diff`. Aditivo.
+   */
+  risk?: DeliveryRiskReport;
 }
 
 const STRIP_SUFFIX = /(WsV\d+|Ws|ServiceV\d+|Service|RepositoryImpl|Repository|Controller|Resource|Endpoint|\.routes|\.route|\.spec|\.test|\.vue|\.component)$/i;
@@ -420,6 +427,8 @@ export function computeImpactForDiff(manifest: any, diffText: string): DiffImpac
   const report = aggregateFileImpacts(parsedFiles.length, perFile, impacts);
   // ADR-0018 Onda 2 — aditivo: os campos da Onda 1 ficam byte-a-byte.
   report.breaking = breakingReportForDiff(manifest, parsedFiles);
+  // ADR-0018 Onda 3 — risco advisory (usa o breaking como faceta mais forte).
+  report.risk = computeDeliveryRisk(manifest, parsedFiles, report.breaking);
   return report;
 }
 
@@ -457,6 +466,29 @@ export function renderImpactDiffMarkdown(
   L.push(`- **Telas a revalidar:** ${agg.summary.screens}`);
   L.push(`- **Entidades tocadas:** ${agg.summary.entities}${agg.entitiesTouched.length ? ` (${agg.entitiesTouched.join(", ")})` : ""}`);
   L.push("");
+
+  // ADR-0018 Onda 3 — risco da entrega em naturezas (advisory, nunca veredito).
+  const risk = report.risk;
+  if (risk) {
+    const icon = risk.level === "high" ? "🔴" : risk.level === "medium" ? "🟡" : "🟢";
+    L.push(`## Risco da entrega (naturezas — advisory) ${icon} ${risk.level.toUpperCase()}`);
+    L.push("");
+    L.push("| Natureza | Nível | Evidência |");
+    L.push("|---|---|---|");
+    for (const f of risk.facets) {
+      const fi = f.level === "high" ? "🔴" : f.level === "medium" ? "🟡" : "🟢";
+      L.push(`| ${f.name} | ${fi} ${f.level} | ${f.evidence.replace(/\|/g, "\\|")} |`);
+    }
+    L.push("");
+    if (risk.hotSymbols.length) {
+      L.push(`Símbolos de maior alcance tocados: ${risk.hotSymbols.map((h) => `\`${h.symbol}\` (${h.fanIn} eps)`).join(" · ")}`);
+      L.push("");
+    }
+    for (const nc of risk.notComputed) {
+      L.push(`> _${nc.signal}: não computado — ${nc.reason}_`);
+    }
+    L.push("");
+  }
 
   // ADR-0018 Onda 2 — quebras de contrato × alcance. Renderiza ANTES do early
   // return de blast vazio: quebra-morta (contada) importa mesmo sem blast.
