@@ -1487,16 +1487,30 @@ export async function registerRoutes(
       const filesForAdr: string[] = diff ? report.perFile.map((f) => f.file) : files;
       // ADR-070 Onda 1 — decisões arquiteturais que governam a entrega (advisory).
       const applicableAdrs = retrieveAdrsForFiles(Array.isArray(manifest.adrIndex) ? manifest.adrIndex : [], filesForAdr);
+      // ADR-0018 Onda 5 — relatório ASSINÁVEL (HMAC-SHA256 do JSON canônico).
+      // SÓ quando MANIFEST_REPORT_HMAC_KEY existe; sem a chave o response é
+      // byte-a-byte o de antes (OFF honesto — nunca assinatura fake).
+      const hmacKey = process.env.MANIFEST_REPORT_HMAC_KEY;
+      const payload = { projectId, analysisRunId: snapshots[0].analysisRunId, ...report, applicableAdrs };
+      let signature: import("./analyzers/report-signature").ReportSignature | undefined;
+      if (hmacKey) {
+        const { signReport } = await import("./analyzers/report-signature");
+        signature = signReport(payload, hmacKey);
+      }
       // ADR-070 Propósito 2 — `?format=md` devolve o relatório pronto p/
       // documentação (anexo de recebimento de entrega do fornecedor).
       if (String(req.query.format || "").toLowerCase() === "md") {
         const project = await storage.getProject(projectId);
-        const md = renderImpactDiffMarkdown(report, { projectName: project?.name })
+        let md = renderImpactDiffMarkdown(report, { projectName: project?.name })
           + (applicableAdrs.length ? "\n" + renderApplicableAdrsMarkdown(applicableAdrs) : "");
+        if (signature) {
+          const { renderSignatureFooter } = await import("./analyzers/report-signature");
+          md += "\n" + renderSignatureFooter(signature);
+        }
         res.type("text/markdown; charset=utf-8").send(md);
         return;
       }
-      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report, applicableAdrs });
+      res.json(signature ? { ...payload, signature } : payload);
     } catch (error) {
       console.error("Error computing diff impact:", error);
       res.status(500).json({ message: "Failed to compute diff impact" });
