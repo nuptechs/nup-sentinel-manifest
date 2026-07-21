@@ -17,6 +17,7 @@
 import { parseUnifiedDiff, extractChangedSymbols } from "./changed-symbols";
 import { breakingReportForDiff, type BreakingReport } from "./breaking-changes";
 import { computeDeliveryRisk, type DeliveryRiskReport } from "./delivery-risk";
+import { computeFunctionalImpact, type FunctionalImpactReport } from "./functional-impact";
 
 export interface ImpactedEndpoint {
   path: string;
@@ -297,6 +298,12 @@ export interface DiffImpactReport {
    * caminho `diff`. Aditivo.
    */
   risk?: DeliveryRiskReport;
+  /**
+   * ADR-0018 Onda 4 — face FUNCIONAL: caixas de negócio acesas pelo diff
+   * (Reflexion determinístico sobre a ontologia do domínio, grounding forçado).
+   * Só no caminho `diff`. Aditivo.
+   */
+  functional?: FunctionalImpactReport;
 }
 
 const STRIP_SUFFIX = /(WsV\d+|Ws|ServiceV\d+|Service|RepositoryImpl|Repository|Controller|Resource|Endpoint|\.routes|\.route|\.spec|\.test|\.vue|\.component)$/i;
@@ -405,6 +412,13 @@ export function computeImpactForFiles(manifest: any, files: string[]): DiffImpac
  * no basename (`symbolsForFile`) — degradação honesta, nunca pior que hoje. O
  * `symbolSource` por arquivo diz de onde veio ('diff' vs 'filename').
  */
+const BACKEND_QUALIFY = /\.(java|kt)$/i;
+
+function fileClassName(p: string): string {
+  const base = (p || "").split("/").pop() || p;
+  return base.replace(/\.(java|kt)$/i, "");
+}
+
 export function computeImpactForDiff(manifest: any, diffText: string): DiffImpactReport {
   // parse ÚNICO do diff — alimenta o blast radius (Onda 1) e a classificação de
   // quebra × alcance (Onda 2) sem re-parsear.
@@ -414,8 +428,34 @@ export function computeImpactForDiff(manifest: any, diffText: string): DiffImpac
   for (const pf of parsedFiles) {
     const fromDiff = extractChangedSymbols(pf).filter((s) => typeof s === "string" && s.trim());
     const usedFilename = fromDiff.length === 0;
-    const symbols = usedFilename ? symbolsForFile(pf.path) : fromDiff;
-    const imp = collectImpactForSymbols(manifest, symbols);
+    // ANTI-SUPERALARME (Onda 4 — achado em prova real): símbolo CRU de método
+    // universal ("handle" — todo WsV1 tem) casava por SEGMENTO com TODAS as
+    // cadeias do grafo → blast inflado (746 endpoints, todas as entidades).
+    // Em arquivo de backend, QUALIFICA pela classe do arquivo (`Classe` +
+    // `Classe.simbolo`) — mesma régua de entrada-inteira da Onda 2. Frontend
+    // segue com símbolos crus (tela casa por nome de componente).
+    let symbols: string[];
+    if (usedFilename) {
+      symbols = symbolsForFile(pf.path);
+    } else if (BACKEND_QUALIFY.test(pf.path)) {
+      const cls = fileClassName(pf.path);
+      symbols = [cls, ...fromDiff.filter((s) => s !== cls).map((s) => `${cls}.${s}`)];
+    } else {
+      symbols = fromDiff;
+    }
+    let imp = collectImpactForSymbols(manifest, symbols);
+    // RECALL sem reabrir o superalarme: quando o QUALIFICADO não casa NADA
+    // (cadeia rasa no snapshot — ex.: `WsV1.execute` sem o hop do ServiceV1),
+    // degrada pro basename do arquivo (classe-escopado, com strip de sufixo
+    // ServiceV1/WsV1 — o caminho da Onda 1), NUNCA pro método cru.
+    if (!usedFilename && BACKEND_QUALIFY.test(pf.path) && imp.eps.size === 0 && imp.screens.size === 0 && imp.ents.size === 0) {
+      const fb = symbolsForFile(pf.path);
+      const impFb = collectImpactForSymbols(manifest, fb);
+      if (impFb.eps.size || impFb.screens.size || impFb.ents.size) {
+        imp = impFb;
+        symbols = [...symbols, ...fb];
+      }
+    }
     impacts.push(imp);
     perFile.push({
       file: pf.path,
@@ -429,6 +469,16 @@ export function computeImpactForDiff(manifest: any, diffText: string): DiffImpac
   report.breaking = breakingReportForDiff(manifest, parsedFiles);
   // ADR-0018 Onda 3 — risco advisory (usa o breaking como faceta mais forte).
   report.risk = computeDeliveryRisk(manifest, parsedFiles, report.breaking);
+  // ADR-0018 Onda 4 — face funcional (caixas de negócio, grounding forçado).
+  report.functional = computeFunctionalImpact(
+    parsedFiles,
+    {
+      entitiesTouched: report.aggregate.entitiesTouched,
+      impactedEndpoints: report.aggregate.impactedEndpoints,
+      impactedScreens: report.aggregate.impactedScreens,
+    },
+    report.breaking,
+  );
   return report;
 }
 
@@ -466,6 +516,30 @@ export function renderImpactDiffMarkdown(
   L.push(`- **Telas a revalidar:** ${agg.summary.screens}`);
   L.push(`- **Entidades tocadas:** ${agg.summary.entities}${agg.entitiesTouched.length ? ` (${agg.entitiesTouched.join(", ")})` : ""}`);
   L.push("");
+
+  // ADR-0018 Onda 4 — face FUNCIONAL: as caixas de negócio que a entrega acende,
+  // cada uma com base legal citável + âncoras concretas (grounding).
+  const fn = report.functional;
+  if (fn && fn.boxes.length) {
+    L.push("## Face funcional — caixas de negócio acesas");
+    L.push("");
+    for (const b of fn.boxes) {
+      const tier = b.importance === "core" ? "🔶 core" : "▫ recomendado";
+      L.push(`- **${b.concept}** (${tier}) — _${b.legalBasis}_`);
+      for (const a of b.anchors.slice(0, 4)) L.push(`  - âncora [${a.kind}]: \`${a.value}\``);
+      if (b.anchors.length > 4) L.push(`  - … +${b.anchors.length - 4} âncora(s)`);
+    }
+    L.push("");
+    if (fn.unmapped.files.length) {
+      L.push(`> ${fn.unmapped.files.length} arquivo(s) sem caixa mapeada — ${fn.unmapped.note}`);
+      L.push("");
+    }
+  } else if (fn) {
+    L.push("## Face funcional — caixas de negócio acesas");
+    L.push("");
+    L.push(`> Nenhuma caixa do mapa de negócio acendeu para este diff (${fn.unmapped.files.length} arquivo(s) fora do mapa). ${fn.unmapped.note}`);
+    L.push("");
+  }
 
   // ADR-0018 Onda 3 — risco da entrega em naturezas (advisory, nunca veredito).
   const risk = report.risk;
