@@ -1986,6 +1986,25 @@ export async function registerRoutes(
 
   const gitTokens = new Map<string, string>();
 
+  // ADR-0019 Onda 4: resolve o token de git — memória (cache) → vault cifrado
+  // (persistido) → null. O decrypt bem-sucedido re-popula o cache.
+  async function resolveGitToken(project: { id: number; gitTokenRef?: string | null; gitTokenEncrypted?: string | null }): Promise<string | null> {
+    const ref = project.gitTokenRef;
+    if (ref) {
+      const mem = gitTokens.get(ref);
+      if (mem) return mem;
+    }
+    try {
+      const { vaultKeyFromEnv, decryptToken } = await import("./git/token-vault");
+      const plain = decryptToken((project as any).gitTokenEncrypted, vaultKeyFromEnv());
+      if (plain) {
+        if (ref) gitTokens.set(ref, plain);
+        return plain;
+      }
+    } catch {}
+    return null;
+  }
+
   app.post("/api/projects/:projectId/git/connect", async (req, res) => {
     try {
       const projectId = parseInt(req.params.projectId);
@@ -2010,6 +2029,18 @@ export async function registerRoutes(
 
       const tokenRef = `git-token-${projectId}`;
       gitTokens.set(tokenRef, token);
+
+      // ADR-0019 Onda 4: persiste o token CIFRADO (sobrevive a restart).
+      // Sem MANIFEST_TOKEN_ENCRYPTION_KEY ⇒ vault desligado, memória-only
+      // como sempre (fail-closed: nunca plaintext em disco).
+      try {
+        const { vaultKeyFromEnv, encryptToken } = await import("./git/token-vault");
+        const vKey = vaultKeyFromEnv();
+        const encrypted = encryptToken(token, vKey);
+        await storage.updateProjectGitToken(projectId, encrypted);
+      } catch (err) {
+        console.error(`[git/connect] vault fail-soft: ${err}`);
+      }
 
       await storage.updateProjectGitConfig(projectId, {
         gitProvider: provider,
@@ -2437,20 +2468,156 @@ export async function registerRoutes(
         return res.status(401).json({ message: "Invalid signature" });
       }
 
-      res.status(200).json({ message: "Webhook received, analysis triggered" });
+      res.status(200).json({ message: "Webhook received, impact bot triggered" });
 
+      // ADR-0019 Onda 4: o webhook deixa de ser re-trigger de arquivos velhos e
+      // vira BOT DE PR real — busca o diff do PR no provedor, roda o MESMO
+      // laudo do impact-diff e posta/atualiza o comentário. Requer token
+      // resolvível (memória OU vault cifrado); sem token, loga e não finge.
       const prNumber = body?.pull_request?.number;
-      if (prNumber && project.gitTokenRef) {
-        try {
-          const pipeline = new AnalysisPipeline();
-          await pipeline.runFromProject(project.id);
-          console.log(`[webhook:github] PR #${prNumber} analysis complete for project ${project.id}`);
-        } catch (err) {
-          console.error(`[webhook:github] PR #${prNumber} analysis failed:`, err);
-        }
+      if (prNumber) {
+        (async () => {
+          const token = await resolveGitToken(project as any);
+          if (!token) {
+            console.error(`[webhook:github] PR #${prNumber}: token de git indisponível (reconecte ou configure MANIFEST_TOKEN_ENCRYPTION_KEY) — sem laudo.`);
+            return;
+          }
+          const { createGitProvider } = await import("./git/git-provider");
+          const gitProvider = await createGitProvider({ provider: "github", repoUrl: project.gitRepoUrl!, token });
+          const prDiff = await gitProvider.fetchPRDiff(prNumber);
+          const { buildUnifiedDiffFromPR } = await import("./git/pr-unified-diff");
+          const unified = buildUnifiedDiffFromPR(prDiff);
+          if (!unified.trim()) {
+            console.log(`[webhook:github] PR #${prNumber}: diff vazio — nada a analisar.`);
+            return;
+          }
+          const { buildImpactForDiff } = await import("./impact-service");
+          const built = await buildImpactForDiff(project.id, unified);
+          if (!built.ok) {
+            console.error(`[webhook:github] PR #${prNumber}: laudo falhou (${built.status}): ${built.message}`);
+            return;
+          }
+          const { buildServerCommentBody, upsertGithubPrComment } = await import("./git/pr-comment");
+          const m = /github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/.exec(project.gitRepoUrl || "");
+          if (!m) {
+            console.error(`[webhook:github] PR #${prNumber}: repoUrl não parseável (${project.gitRepoUrl})`);
+            return;
+          }
+          const r = await upsertGithubPrComment(
+            { apiBase: "https://api.github.com", token, owner: m[1], repo: m[2], prNumber },
+            buildServerCommentBody(built.markdown, { projectName: project.name, ranAt: new Date().toISOString() }),
+          );
+          console.log(`[webhook:github] PR #${prNumber}: laudo ${r.action} (projeto ${project.id}).`);
+        })().catch((err) => console.error(`[webhook:github] PR #${prNumber} bot falhou:`, err));
       }
     } catch (error) {
       console.error("[webhook:github] Error:", error);
+      res.status(500).json({ message: "Webhook processing failed" });
+    }
+  });
+
+  // ─────────────────────────────────────────────
+  // ADR-0019 Onda 5 — GitHub App: o "1 clique" de verdade.
+  // O cliente instala o App na org e TODO PR passa a receber o laudo — sem
+  // escrever workflow, sem criar projeto, sem colar chave:
+  //   • auth: JWT RS256 do App → token de INSTALAÇÃO (o token nunca é nosso,
+  //     é cunhado por evento e expira em 1h — zero credencial durável);
+  //   • AUTO-ONBOARD: 1º PR de um repo sem projeto → cria o projeto, puxa a
+  //     branch default via a API com o token de instalação, roda a análise
+  //     completa (o MAPA nasce sozinho) e só então lauda o PR;
+  //   • FAIL-CLOSED: sem GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/
+  //     GITHUB_APP_WEBHOOK_SECRET, responde 503 e NADA muda.
+  // ─────────────────────────────────────────────
+  app.post("/api/webhook/github-app", async (req, res) => {
+    try {
+      const { appConfigFromEnv, verifyWebhookSignature, installationToken, isRelevantPrAction } = await import("./git/github-app");
+      const cfg = appConfigFromEnv();
+      if (!cfg) {
+        return res.status(503).json({ message: "GitHub App não configurado (GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/GITHUB_APP_WEBHOOK_SECRET)" });
+      }
+      const rawBody = JSON.stringify(req.body);
+      const sig = req.headers["x-hub-signature-256"] as string | undefined;
+      if (!verifyWebhookSignature(rawBody, sig, cfg.webhookSecret)) {
+        return res.status(401).json({ message: "Invalid signature" });
+      }
+
+      const event = req.headers["x-github-event"] as string | undefined;
+      const body = req.body;
+
+      if (event === "installation" || event === "installation_repositories" || event === "ping") {
+        return res.status(200).json({ message: `Event ${event} ack — projetos são criados no 1º PR de cada repo (auto-onboard)` });
+      }
+      if (event !== "pull_request" || !isRelevantPrAction(body?.action)) {
+        return res.status(200).json({ message: "Event ignored" });
+      }
+
+      const installationId = body?.installation?.id;
+      const repoUrl = body?.repository?.html_url;
+      const repoFullName = body?.repository?.full_name;
+      const defaultBranch = body?.repository?.default_branch || "main";
+      const prNumber = body?.pull_request?.number;
+      if (!installationId || !repoUrl || !prNumber || !repoFullName) {
+        return res.status(400).json({ message: "Payload sem installation/repository/pull_request" });
+      }
+
+      res.status(200).json({ message: "PR recebido — laudo em processamento" });
+
+      (async () => {
+        const instToken = await installationToken(cfg, installationId);
+        const { createGitProvider } = await import("./git/git-provider");
+
+        // resolve OU auto-onboarda o projeto
+        let project = await storage.getProjectByGitRepoUrl(repoUrl);
+        if (!project) {
+          console.log(`[github-app] auto-onboard: criando projeto para ${repoFullName}`);
+          project = await storage.createProject({ name: repoFullName, description: `Auto-onboard via GitHub App (PR #${prNumber})` });
+          await storage.updateProjectGitConfig(project.id, {
+            gitProvider: "github",
+            gitRepoUrl: repoUrl,
+            gitDefaultBranch: defaultBranch,
+            gitTokenRef: `github-app-${installationId}`,
+          });
+          const bootProvider = await createGitProvider({ provider: "github", repoUrl, token: instToken });
+          const files = await bootProvider.fetchFiles(defaultBranch);
+          for (const f of files) {
+            await storage.createSourceFile({
+              projectId: project.id,
+              filePath: f.filePath,
+              fileType: getFileType(f.filePath),
+              content: f.content,
+              contentHash: crypto.createHash("sha256").update(f.content).digest("hex"),
+            });
+          }
+          await storage.updateProjectStatus(project.id, "uploaded", files.length);
+          const pipeline = new AnalysisPipeline();
+          await pipeline.runFullAnalysis(project.id, files.map((f) => ({ filePath: f.filePath, content: f.content })));
+          console.log(`[github-app] auto-onboard: projeto ${project.id} indexado (${files.length} arquivos)`);
+        }
+
+        const gitProvider = await createGitProvider({ provider: "github", repoUrl, token: instToken });
+        const prDiff = await gitProvider.fetchPRDiff(prNumber);
+        const { buildUnifiedDiffFromPR } = await import("./git/pr-unified-diff");
+        const unified = buildUnifiedDiffFromPR(prDiff);
+        if (!unified.trim()) {
+          console.log(`[github-app] PR #${prNumber}: diff vazio.`);
+          return;
+        }
+        const { buildImpactForDiff } = await import("./impact-service");
+        const built = await buildImpactForDiff(project.id, unified);
+        if (!built.ok) {
+          console.error(`[github-app] PR #${prNumber}: laudo falhou (${built.status}): ${built.message}`);
+          return;
+        }
+        const { buildServerCommentBody, upsertGithubPrComment } = await import("./git/pr-comment");
+        const [owner, repo] = repoFullName.split("/");
+        const r = await upsertGithubPrComment(
+          { apiBase: cfg.apiBase, token: instToken, owner, repo, prNumber },
+          buildServerCommentBody(built.markdown, { projectName: project.name, ranAt: new Date().toISOString() }),
+        );
+        console.log(`[github-app] PR #${prNumber}: laudo ${r.action} (projeto ${project.id}).`);
+      })().catch((err) => console.error(`[github-app] PR #${prNumber} falhou:`, err));
+    } catch (error) {
+      console.error("[github-app] Error:", error);
       res.status(500).json({ message: "Webhook processing failed" });
     }
   });
@@ -2488,17 +2655,41 @@ export async function registerRoutes(
         return res.status(401).json({ message: "Invalid token" });
       }
 
-      res.status(200).json({ message: "Webhook received, analysis triggered" });
+      res.status(200).json({ message: "Webhook received, impact bot triggered" });
 
+      // ADR-0019 Onda 4: bot de MR — mesmo laudo do impact-diff, postado como
+      // note (upsert). Token via memória OU vault cifrado.
       const mrIid = body?.object_attributes?.iid;
-      if (mrIid && project.gitTokenRef) {
-        try {
-          const pipeline = new AnalysisPipeline();
-          await pipeline.runFromProject(project.id);
-          console.log(`[webhook:gitlab] MR !${mrIid} analysis complete for project ${project.id}`);
-        } catch (err) {
-          console.error(`[webhook:gitlab] MR !${mrIid} analysis failed:`, err);
-        }
+      if (mrIid) {
+        (async () => {
+          const gtoken = await resolveGitToken(project as any);
+          if (!gtoken) {
+            console.error(`[webhook:gitlab] MR !${mrIid}: token de git indisponível — sem laudo.`);
+            return;
+          }
+          const { createGitProvider } = await import("./git/git-provider");
+          const gitProvider = await createGitProvider({ provider: "gitlab", repoUrl: project.gitRepoUrl!, token: gtoken });
+          const prDiff = await gitProvider.fetchPRDiff(mrIid);
+          const { buildUnifiedDiffFromPR } = await import("./git/pr-unified-diff");
+          const unified = buildUnifiedDiffFromPR(prDiff);
+          if (!unified.trim()) return;
+          const { buildImpactForDiff } = await import("./impact-service");
+          const built = await buildImpactForDiff(project.id, unified);
+          if (!built.ok) {
+            console.error(`[webhook:gitlab] MR !${mrIid}: laudo falhou (${built.status}): ${built.message}`);
+            return;
+          }
+          const { buildServerCommentBody, upsertGitlabMrNote } = await import("./git/pr-comment");
+          // GitLab API base + project path da URL do repo
+          const u = new URL(project.gitRepoUrl!);
+          const apiBase = `${u.origin}/api/v4`;
+          const projectPath = u.pathname.replace(/^\/+/, "").replace(/\.git$/, "");
+          const r = await upsertGitlabMrNote(
+            { apiBase, token: gtoken, projectId: projectPath, mrIid },
+            buildServerCommentBody(built.markdown, { projectName: project.name, ranAt: new Date().toISOString() }),
+          );
+          console.log(`[webhook:gitlab] MR !${mrIid}: laudo ${r.action} (projeto ${project.id}).`);
+        })().catch((err) => console.error(`[webhook:gitlab] MR !${mrIid} bot falhou:`, err));
       }
     } catch (error) {
       console.error("[webhook:gitlab] Error:", error);

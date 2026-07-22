@@ -37,6 +37,7 @@ export interface IStorage {
   createProject(project: InsertProject): Promise<Project>;
   updateProjectStatus(id: number, status: string, fileCount?: number): Promise<void>;
   updateProjectGitConfig(id: number, config: { gitProvider: string; gitRepoUrl: string; gitDefaultBranch: string; gitTokenRef: string }): Promise<void>;
+  updateProjectGitToken(id: number, encrypted: string | null): Promise<void>;
   updateProjectWebhookConfig(id: number, config: { webhookSecret: string | null; webhookEnabled: boolean }): Promise<void>;
   getProjectByGitRepoUrl(repoUrl: string): Promise<Project | undefined>;
   deleteProject(id: number): Promise<void>;
@@ -116,6 +117,10 @@ export class DatabaseStorage implements IStorage {
     const updates: Partial<Project> = { status };
     if (fileCount !== undefined) updates.fileCount = fileCount;
     await db.update(projects).set(updates).where(eq(projects.id, id));
+  }
+
+  async updateProjectGitToken(id: number, encrypted: string | null): Promise<void> {
+    await db.update(projects).set({ gitTokenEncrypted: encrypted }).where(eq(projects.id, id));
   }
 
   async updateProjectGitConfig(id: number, config: { gitProvider: string; gitRepoUrl: string; gitDefaultBranch: string; gitTokenRef: string }): Promise<void> {
