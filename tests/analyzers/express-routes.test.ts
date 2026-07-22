@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  expressRoutesToImpactEndpoints,
   extractExpressRoutes,
   expressRoutesToCatalogEntries,
 } from "../../server/analyzers/node-backend/express-routes.ts";
@@ -312,5 +313,38 @@ r.get("/assets", serveStatic);
     const [route] = extractExpressRoutes([schema, npmHandler]);
     assert.deepEqual(route.entitiesTouched, []);
     assert.deepEqual(route.callChain, []);
+  });
+});
+
+
+// ── ADR-0018 (pronto-pra-cliente): rotas → espelho RICO impactEndpoints ──
+describe("expressRoutesToImpactEndpoints", () => {
+  it("normaliza a cadeia file::fn → arquivo-base.fn (convenção Classe.metodo) e leva entidades", () => {
+    const out = expressRoutesToImpactEndpoints([
+      {
+        method: "POST", path: "/api/user-flows/execute", routerVar: "router",
+        requiredRoles: [], permissionExpression: null,
+        entitiesTouched: ["user_flow_run"], persistenceOperations: ["write"],
+        callChain: [
+          "services/gateway/src/routes/user-flows.routes.js::executeHandler",
+          "services/gateway/src/services/user-flow-runner.js::runSteps",
+        ],
+      } as any,
+    ]);
+    assert.equal(out.length, 1);
+    const e = out[0];
+    assert.equal(e.runtime, "node");
+    assert.equal(e.controller, "user-flows.routes");
+    assert.equal(e.controllerMethod, "executeHandler");
+    assert.deepEqual(e.fullCallChain, ["user-flows.routes.executeHandler", "user-flow-runner.runSteps"]);
+    assert.deepEqual(e.entitiesTouched, ["user_flow_run"]);
+  });
+
+  it("rota sem cadeia → controller = routerVar, cadeia vazia (nunca inventa)", () => {
+    const out = expressRoutesToImpactEndpoints([
+      { method: "GET", path: "/health", routerVar: "app", requiredRoles: [], permissionExpression: null, entitiesTouched: [], persistenceOperations: [], callChain: [] } as any,
+    ]);
+    assert.equal(out[0].controller, "app");
+    assert.deepEqual(out[0].fullCallChain, []);
   });
 });

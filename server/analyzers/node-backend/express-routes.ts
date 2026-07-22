@@ -367,6 +367,47 @@ function operationOf(method: string): string {
  * WsV1/Java (screen "API: <router>", interactionCategory HTTP), pra fluírem pelo
  * classificador determinístico e aparecerem no catálogo como endpoints reais.
  */
+/**
+ * ADR-0018 (pronto-pra-cliente): rotas Express → entradas do espelho RICO
+ * `impactEndpoints` do snapshot — o formato que o impact-diff PREFERE. Sem
+ * isto, as cadeias Node do call-chain (Onda 2) ficavam só no catálogo curado
+ * (que o impact-diff ignora quando o espelho existe) e TODA rota Node era
+ * "rasa" na análise de impacto. Entradas de cadeia normalizadas ao formato
+ * `arquivo-base.fn` (mesma convenção Classe.metodo do Java — o casamento por
+ * ENTRADA INTEIRA da Onda 2 funciona sem mudança). Puro.
+ */
+export function expressRoutesToImpactEndpoints(routes: ExpressRoute[]): {
+  path: string;
+  method: string;
+  controller: string;
+  controllerMethod: string;
+  fullCallChain: string[];
+  entitiesTouched: string[];
+  persistenceOperations: string[];
+  runtime: "node";
+}[] {
+  const baseNoExt = (f: string) => {
+    const b = (f || "").split("/").pop() || f;
+    return b.replace(/\.(ts|js|mjs|cjs|tsx|jsx)$/i, "");
+  };
+  const fnOf = (key: string) => key.split("::")[1] ?? key;
+  const fileOf = (key: string) => key.split("::")[0] ?? key;
+  return routes.map((r) => {
+    const chain = r.callChain || [];
+    const head = chain[0] ?? "";
+    return {
+      path: r.path,
+      method: r.method,
+      controller: head ? baseNoExt(fileOf(head)) : r.routerVar,
+      controllerMethod: head ? fnOf(head) : "(handler)",
+      fullCallChain: chain.map((k) => `${baseNoExt(fileOf(k))}.${fnOf(k)}`),
+      entitiesTouched: r.entitiesTouched || [],
+      persistenceOperations: r.persistenceOperations || [],
+      runtime: "node",
+    };
+  });
+}
+
 export function expressRoutesToCatalogEntries(
   routes: ExpressRoute[],
   analysisRunId: number,

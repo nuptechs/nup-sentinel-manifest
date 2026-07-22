@@ -412,11 +412,14 @@ export function computeImpactForFiles(manifest: any, files: string[]): DiffImpac
  * no basename (`symbolsForFile`) — degradação honesta, nunca pior que hoje. O
  * `symbolSource` por arquivo diz de onde veio ('diff' vs 'filename').
  */
-const BACKEND_QUALIFY = /\.(java|kt)$/i;
+// java/kt E js/ts (ADR-0018 pronto-pra-cliente): as cadeias Node do espelho
+// usam a MESMA convenção `arquivo-base.fn` — qualificar mata o superalarme de
+// método universal também no JS (handle/run/execute existem em todo arquivo).
+const BACKEND_QUALIFY = /\.(java|kt|ts|js|mjs|cjs|tsx|jsx)$/i;
 
 function fileClassName(p: string): string {
   const base = (p || "").split("/").pop() || p;
-  return base.replace(/\.(java|kt)$/i, "");
+  return base.replace(/\.(java|kt|ts|js|mjs|cjs|tsx|jsx)$/i, "");
 }
 
 export function computeImpactForDiff(manifest: any, diffText: string): DiffImpactReport {
