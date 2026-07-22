@@ -27,6 +27,9 @@ export const projects = pgTable("projects", {
   gitRepoUrl: text("git_repo_url"),
   gitDefaultBranch: text("git_default_branch"),
   gitTokenRef: text("git_token_ref"),
+  // ADR-0019 Onda 4: token de git CIFRADO (AES-256-GCM sob
+  // MANIFEST_TOKEN_ENCRYPTION_KEY) — sobrevive a restart. Nulo = memória-only.
+  gitTokenEncrypted: text("git_token_encrypted"),
   webhookSecret: text("webhook_secret"),
   webhookEnabled: boolean("webhook_enabled").default(false),
   // ADR-0018 (fidelidade multi-projeto): mapa de negócio POR PROJETO — array de

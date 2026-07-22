@@ -1,13 +1,14 @@
 {
   "name": "@nuptechs/sentinel-manifest-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Manifest CLI - Code-to-Permission Catalog Generator",
   "bin": {
     "permacat": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "commander": "^12.0.0",
@@ -23,5 +24,17 @@
     "@types/node": "^20.0.0",
     "@types/node-fetch": "^2.6.0",
     "ts-node": "^10.9.0"
-  }
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nuptechs/nup-sentinel-manifest.git",
+    "directory": "cli"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }
