@@ -3,7 +3,7 @@ import { analyzeFrontend } from "../analyzers/frontend-analyzer";
 import { buildApplicationGraph, analyzeGraphEndpoints, reconstructGraph } from "../analyzers/backend-java-client";
 import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries, wsv1NodesToCatalogEntries } from "../analyzers/graph-connector";
 import { readMultistackFlags } from "../config/multistack";
-import { extractExpressRoutes, expressRoutesToCatalogEntries } from "../analyzers/node-backend/express-routes";
+import { extractExpressRoutes, expressRoutesToCatalogEntries, expressRoutesToImpactEndpoints } from "../analyzers/node-backend/express-routes";
 import { classifyEntriesDeterministic } from "../analyzers/deterministic-classifier";
 import { detectArchitecture } from "../analyzers/architecture-detector";
 import { generateManifest } from "../generators/manifest-generator";
@@ -507,6 +507,27 @@ export class AnalysisPipeline {
             persistenceOperations: Array.isArray(ei.persistenceOperations) ? ei.persistenceOperations : [],
           }))
         : [];
+
+      // ADR-0018 (pronto-pra-cliente): rotas EXPRESS entram no espelho RICO com a
+      // cadeia multi-hop do call-chain Node (ADR-0015 Onda 2) — sem isto o
+      // impact-diff via toda rota Node como rasa (o espelho tem precedência
+      // sobre o catálogo curado). Flag-gated (MANIFEST_MULTISTACK_NODE) — OFF ⇒
+      // byte-a-byte. Dedup por (método, path); o Java tem precedência.
+      if (readMultistackFlags().nodeBackend && Array.isArray(fileData) && fileData.length > 0) {
+        try {
+          const seen = new Set(impactEndpoints.map((e) => `${e.method} ${e.path}`));
+          const nodeMirror = expressRoutesToImpactEndpoints(extractExpressRoutes(fileData));
+          for (const ne of nodeMirror) {
+            const k = `${ne.method} ${ne.path}`;
+            if (!seen.has(k)) {
+              seen.add(k);
+              impactEndpoints.push(ne as any);
+            }
+          }
+        } catch (err) {
+          console.error(`[pipeline] node mirror falhou (fail-soft): ${err}`);
+        }
+      }
 
       // ADR-070 Onda 1 — índice de ADRs (conformidade arquitetural via retrieval).
       // Se a fatia analisada incluir os .md de ADR (docs/adr/), indexa os

@@ -69,6 +69,9 @@ export interface BreakingCandidate {
   bare: string;
   kind: Decl["kind"];
   change: BreakingChangeKind;
+  /** runtime do arquivo (ADR-0018 pronto-pra-cliente): java|js — o cruzamento
+   *  de JS exige cadeias Node no manifesto; sem elas vira inconclusive. */
+  runtime: "java" | "js";
   /** evidência: a linha de declaração normalizada (antes/depois quando houver) */
   before?: string;
   after?: string;
@@ -96,7 +99,8 @@ export interface BreakingClassification {
 }
 
 const BACKEND_FILE = /\.(java|kt)$/i;
-const FRONTEND_FILE = /\.(ts|tsx|js|jsx|vue|mjs|cjs)$/i;
+const JS_FILE = /\.(ts|tsx|js|jsx|mjs|cjs)$/i;
+const VUE_FILE = /\.vue$/i;
 
 function classBaseName(path: string): string {
   const base = (path || "").split("/").pop() || path;
@@ -134,14 +138,18 @@ export function classifyBreakingChanges(files: DiffFile[]): BreakingClassificati
   };
 
   for (const file of files) {
-    if (!BACKEND_FILE.test(file.path)) {
-      // frontend com declaração removida = fora da classificação (contado)
-      if (FRONTEND_FILE.test(file.path) && file.status !== "added") {
+    const isJava = BACKEND_FILE.test(file.path);
+    const isJs = !isJava && JS_FILE.test(file.path);
+    if (!isJava && !isJs) {
+      // componente .vue com declaração removida = fora da classificação
+      // (grafo componente→página não modelado) — contado, ponto-cego declarado
+      if (VUE_FILE.test(file.path) && file.status !== "added") {
         const { removed } = declarationsFromDiffFile(file);
         if (removed.length > 0) out.frontendFilesSkipped++;
       }
       continue;
     }
+    const runtime: "java" | "js" = isJava ? "java" : "js";
     if (file.status === "added") continue; // arquivo novo nunca quebra
 
     const cls = classBaseName(file.path);
@@ -156,6 +164,7 @@ export function classifyBreakingChanges(files: DiffFile[]): BreakingClassificati
         bare: cls,
         kind: "class",
         change: "removed",
+        runtime,
         before: `(arquivo removido: ${file.path})`,
       });
       continue;
@@ -163,6 +172,10 @@ export function classifyBreakingChanges(files: DiffFile[]): BreakingClassificati
 
     const { added, removed } = declarationsFromDiffFile(file);
     if (!removed.length) continue;
+
+    // `export function x` casa 2 regexes de declaração (method + const) —
+    // dedupe por símbolo: o primeiro kind (method, mais específico) vence.
+    const emitted = new Set<string>();
 
     const addedByKey = new Map<string, Decl>();
     for (const a of added) addedByKey.set(`${a.kind}:${a.name}`, a);
@@ -176,15 +189,19 @@ export function classifyBreakingChanges(files: DiffFile[]): BreakingClassificati
         const b = normalizeDecl(R.line);
         const a = normalizeDecl(again.line);
         if (b === a) continue; // whitespace/movido dentro do arquivo — não é quebra
-        out.candidates.push({
-          file: file.path,
-          symbol: qualify(cls, R),
-          bare: R.name,
-          kind: R.kind,
-          change: "signature-changed",
-          before: b,
-          after: a,
-        });
+        if (!emitted.has(`sig:${qualify(cls, R)}`)) {
+          emitted.add(`sig:${qualify(cls, R)}`);
+          out.candidates.push({
+            file: file.path,
+            symbol: qualify(cls, R),
+            bare: R.name,
+            kind: R.kind,
+            change: "signature-changed",
+            runtime,
+            before: b,
+            after: a,
+          });
+        }
         continue;
       }
 
@@ -212,14 +229,18 @@ export function classifyBreakingChanges(files: DiffFile[]): BreakingClassificati
         continue;
       }
 
-      out.candidates.push({
-        file: file.path,
-        symbol: qualify(cls, R),
-        bare: R.name,
-        kind: R.kind,
-        change: "removed",
-        before: normalizeDecl(R.line),
-      });
+      if (!emitted.has(`rm:${qualify(cls, R)}`)) {
+        emitted.add(`rm:${qualify(cls, R)}`);
+        out.candidates.push({
+          file: file.path,
+          symbol: qualify(cls, R),
+          bare: R.name,
+          kind: R.kind,
+          change: "removed",
+          runtime,
+          before: normalizeDecl(R.line),
+        });
+      }
     }
   }
 
@@ -307,7 +328,10 @@ const BLIND_SPOT_BEHAVIORAL =
 const BLIND_SPOT_OVERLOAD =
   "declaração fora do hunk/overload pode mascarar remoção — classificação conservadora (na dúvida vira 'inconclusive', nunca alerta)";
 const BLIND_SPOT_FRONTEND =
-  "arquivos de frontend não entram na classificação de quebra (grafo componente→página não modelado) — o blast radius da Onda 1 os cobre";
+  "componentes .vue não entram na classificação de quebra (grafo componente→página não modelado) — o blast radius da Onda 1 os cobre";
+
+const BLIND_SPOT_NODE_UNMODELED =
+  "arquivos JS/TS com remoção detectada, mas o runtime Node NÃO está modelado no manifesto — cruzamento impossível (viraram 'inconclusive'); habilite MANIFEST_MULTISTACK_NODE e reanalise";
 
 /**
  * Cruza os candidatos de quebra com o grafo do manifesto. A travessia reversa é
@@ -345,8 +369,21 @@ export function crossBreakingWithGraph(
 
   const alerts: BreakingFinding[] = [];
   const suppressedDead: BreakingFinding[] = [];
+  const extraInconclusive: InconclusiveInfo[] = [];
+  // o manifesto modela o runtime Node? (entradas do espelho com runtime:'node')
+  const hasNodeModel = endpoints.some((ep) => ep?.runtime === "node");
 
   for (const cand of cls.candidates) {
+    if (cand.runtime === "js" && !hasNodeModel) {
+      // Sem cadeias Node no manifesto NÃO dá pra saber se há consumidor —
+      // não é "morta", é "não-modelado": inconclusive com a razão (D7).
+      extraInconclusive.push({
+        file: cand.file,
+        symbol: cand.symbol,
+        reason: "runtime Node/JS não modelado no manifesto deste projeto — habilite MANIFEST_MULTISTACK_NODE e reanalise",
+      });
+      continue;
+    }
     const clsName = cand.kind === "class" ? cand.bare : cand.symbol.split(".")[0];
     const lcCls = lc(clsName);
     const lcSym = lc(cand.symbol);
@@ -414,19 +451,23 @@ export function crossBreakingWithGraph(
 
   const blindSpots = [BLIND_SPOT_EXTERNAL, BLIND_SPOT_BEHAVIORAL, BLIND_SPOT_OVERLOAD];
   if (cls.frontendFilesSkipped > 0) blindSpots.push(BLIND_SPOT_FRONTEND);
+  if (!hasNodeModel && cls.candidates.some((c) => c.runtime === "js")) {
+    blindSpots.push(BLIND_SPOT_NODE_UNMODELED);
+  }
 
+  const inconclusive = [...cls.inconclusive, ...extraInconclusive];
   return {
     alerts,
     suppressedDead,
     refactors: cls.refactors,
-    inconclusive: cls.inconclusive,
+    inconclusive,
     blindSpots,
     summary: {
       candidates: cls.candidates.length,
       alerts: alerts.length,
       suppressedDead: suppressedDead.length,
       refactors: cls.refactors.length,
-      inconclusive: cls.inconclusive.length,
+      inconclusive: inconclusive.length,
     },
   };
 }

@@ -387,6 +387,27 @@ describe("computeImpactForDiff (ADR-0018 Onda 1)", () => {
     assert.deepEqual(r.aggregate.impactedEndpoints.map((e) => e.path), ["/easynup/applyX.v1"]);
   });
 
+  it("ANTI-SUPERALARME em JS: tocar handler de UMA rota Node não acende as outras (qualificação arquivo.fn)", () => {
+    const m = {
+      impactEndpoints: [
+        { path: "/api/a", method: "POST", controller: "a.routes", controllerMethod: "handle", fullCallChain: ["a.routes.handle", "a-service.run"], entitiesTouched: ["ta"], runtime: "node" },
+        { path: "/api/b", method: "POST", controller: "b.routes", controllerMethod: "handle", fullCallChain: ["b.routes.handle", "b-service.run"], entitiesTouched: ["tb"], runtime: "node" },
+      ],
+      screens: [],
+      entities: [],
+    };
+    const diff = `diff --git a/services/gateway/src/routes/a.routes.js b/services/gateway/src/routes/a.routes.js
+--- a/services/gateway/src/routes/a.routes.js
++++ b/services/gateway/src/routes/a.routes.js
+@@ -3,2 +3,3 @@ export function handle(req, res) {
+     const x = svc.run(req);
++    log.info(x);
+`;
+    const r = computeImpactForDiff(m, diff);
+    assert.deepEqual(r.aggregate.impactedEndpoints.map((e) => e.path), ["/api/a"]);
+    assert.deepEqual(r.aggregate.entitiesTouched, ["ta"]);
+  });
+
   it("arquivo sem símbolo no diff (.md) → CAI no basename (symbolSource='filename'), nunca pior que hoje", () => {
     const mdDiff = `diff --git a/docs/README.md b/docs/README.md
 --- a/docs/README.md

@@ -175,23 +175,34 @@ deleted file mode 100644
     );
   });
 
-  it("arquivo NOVO nunca quebra; frontend com remoção é PULADO e contado (ponto-cego declarado)", () => {
+  it("arquivo NOVO nunca quebra; .vue com remoção é PULADO; JS/TS vira candidato runtime 'js'", () => {
     const files = diffOf(`diff --git a/src/main/java/NovoService.java b/src/main/java/NovoService.java
 --- /dev/null
 +++ b/src/main/java/NovoService.java
 @@ -0,0 +1,2 @@
 +public class NovoService {
 +}
-diff --git a/frontend/src/utils/helper.ts b/frontend/src/utils/helper.ts
---- a/frontend/src/utils/helper.ts
-+++ b/frontend/src/utils/helper.ts
+diff --git a/frontend/src/pages/Chat.vue b/frontend/src/pages/Chat.vue
+--- a/frontend/src/pages/Chat.vue
++++ b/frontend/src/pages/Chat.vue
 @@ -1,2 +1,1 @@
--export function fmtGlosa(v: number): string {
+-function morto(): void {
+-}
+diff --git a/services/gateway/src/services/user-flow-runner.js b/services/gateway/src/services/user-flow-runner.js
+--- a/services/gateway/src/services/user-flow-runner.js
++++ b/services/gateway/src/services/user-flow-runner.js
+@@ -10,2 +10,0 @@ export function runSteps(ctx) {
+-export function finishOrphan(runId) {
 -}
 `);
     const c = classifyBreakingChanges(files);
-    assert.equal(c.candidates.length, 0, JSON.stringify(c.candidates));
+    // .vue pulado+contado; o JS do gateway agora É candidato (runtime js)
     assert.equal(c.frontendFilesSkipped, 1);
+    assert.equal(c.candidates.length, 1, JSON.stringify(c.candidates));
+    assert.deepEqual(
+      { symbol: c.candidates[0].symbol, runtime: c.candidates[0].runtime },
+      { symbol: "user-flow-runner.finishOrphan", runtime: "js" },
+    );
   });
 });
 
@@ -319,13 +330,59 @@ deleted file mode 100644
     assert.ok(none.blindSpots.length >= 3);
     assert.ok(none.blindSpots.some((b) => /FORA do grafo/i.test(b)));
     assert.ok(none.blindSpots.some((b) => /COMPORTAMENTAL/i.test(b)));
-    const withFe = breakingReportForDiff(MANIFEST, diffOf(`diff --git a/frontend/src/x.ts b/frontend/src/x.ts
---- a/frontend/src/x.ts
-+++ b/frontend/src/x.ts
+    const withVue = breakingReportForDiff(MANIFEST, diffOf(`diff --git a/frontend/src/pages/X.vue b/frontend/src/pages/X.vue
+--- a/frontend/src/pages/X.vue
++++ b/frontend/src/pages/X.vue
 @@ -1,1 +1,0 @@
--export function morto(): void {}
+-function morto() {}
 `));
-    assert.ok(withFe.blindSpots.some((b) => /frontend/i.test(b)));
+    assert.ok(withVue.blindSpots.some((b) => /\.vue/.test(b)));
+  });
+
+  it("JS sem modelo Node no manifesto → INCONCLUSIVE com razão (nunca dead-noise) + ponto-cego", () => {
+    const files = diffOf(`diff --git a/services/gateway/src/services/user-flow-runner.js b/services/gateway/src/services/user-flow-runner.js
+--- a/services/gateway/src/services/user-flow-runner.js
++++ b/services/gateway/src/services/user-flow-runner.js
+@@ -10,2 +10,0 @@ export function runSteps(ctx) {
+-export function finishOrphan(runId) {
+-}
+`);
+    // MANIFEST (fixture Java) não tem entradas runtime:'node'
+    const r = crossBreakingWithGraph(MANIFEST, classifyBreakingChanges(files));
+    assert.equal(r.alerts.length, 0);
+    assert.equal(r.suppressedDead.length, 0, "não é morta — é não-modelado");
+    assert.ok(r.inconclusive.some((i) => /não modelado/.test(i.reason)), JSON.stringify(r.inconclusive));
+    assert.ok(r.blindSpots.some((b) => /MANIFEST_MULTISTACK_NODE/.test(b)));
+  });
+
+  it("JS COM modelo Node → cruzamento real: remoção alcançada vira ALERTA cross-stack (endpoint + tela)", () => {
+    const NODE_MANIFEST = {
+      impactEndpoints: [
+        {
+          path: "/api/user-flows/execute", method: "POST",
+          controller: "user-flows.routes", controllerMethod: "executeHandler",
+          fullCallChain: ["user-flows.routes.executeHandler", "user-flow-runner.runSteps", "user-flow-runner.finishOrphan"],
+          entitiesTouched: ["user_flow_run"], runtime: "node",
+        },
+      ],
+      screens: [
+        { name: "UserFlowsPage", route: "/minhas-funcionalidades", interactions: [{ endpoint: "/api/user-flows/execute", httpMethod: "POST" }] },
+      ],
+      entities: [],
+    };
+    const files = diffOf(`diff --git a/services/gateway/src/services/user-flow-runner.js b/services/gateway/src/services/user-flow-runner.js
+--- a/services/gateway/src/services/user-flow-runner.js
++++ b/services/gateway/src/services/user-flow-runner.js
+@@ -10,2 +10,0 @@ export function runSteps(ctx) {
+-export function finishOrphan(runId) {
+-}
+`);
+    const r = crossBreakingWithGraph(NODE_MANIFEST, classifyBreakingChanges(files));
+    assert.equal(r.alerts.length, 1, JSON.stringify(r.summary));
+    const a = r.alerts[0];
+    assert.equal(a.symbol, "user-flow-runner.finishOrphan");
+    assert.deepEqual(a.consumers.endpoints.map((e) => e.path), ["/api/user-flows/execute"]);
+    assert.deepEqual(a.consumers.screens.map((sc) => sc.name), ["UserFlowsPage"]);
   });
 });
 
