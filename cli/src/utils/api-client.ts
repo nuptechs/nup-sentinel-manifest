@@ -113,9 +113,9 @@ export class ManifestClient {
   async impactDiff(
     projectId: number,
     diff: string,
-    format?: 'md' | 'json',
+    format?: 'md' | 'json' | 'sarif',
   ): Promise<any> {
-    const qs = format === 'md' ? '?format=md' : '';
+    const qs = format === 'md' ? '?format=md' : format === 'sarif' ? '?format=sarif' : '';
     const url = `${this.serverUrl}/api/projects/${projectId}/impact-diff${qs}`;
     const opts: any = {
       method: 'POST',
@@ -130,5 +130,20 @@ export class ManifestClient {
       throw new Error(`API error ${res.status}: ${text}`);
     }
     return format === 'md' ? res.text() : res.json();
+  }
+
+  /** ADR-0019 Onda 2: refresca o mapa de um projeto existente a partir de um zip. */
+  async reindexZip(projectId: number, zipPath: string): Promise<any> {
+    const url = `${this.serverUrl}/api/projects/${projectId}/reindex-zip`;
+    const form = new FormData();
+    form.append('file', fs.createReadStream(zipPath));
+    const headers: Record<string, string> = {};
+    if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
+    const res = await fetch(url, { method: 'POST', headers, body: form });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`API error ${res.status}: ${text}`);
+    }
+    return res.json();
   }
 }

@@ -5,6 +5,7 @@ import { createDiffCommand } from './commands/diff';
 import { createManifestCommand } from './commands/manifest';
 import { createConnectCommand } from './commands/connect';
 import { createImpactPrCommand } from './commands/impact-pr';
+import { createIndexCommand } from './commands/index-map';
 
 const program = new Command();
 
@@ -21,5 +22,6 @@ program.addCommand(createDiffCommand());
 program.addCommand(createManifestCommand());
 program.addCommand(createConnectCommand());
 program.addCommand(createImpactPrCommand());
+program.addCommand(createIndexCommand());
 
 program.parse(process.argv);

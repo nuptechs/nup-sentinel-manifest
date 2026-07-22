@@ -1502,6 +1502,61 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-0019 Onda 2 — AUTO-MAP: refresca o mapa de um projeto EXISTENTE a
+  // partir de um zip (a Action roda isto no push pra main). Substitui os
+  // arquivos armazenados (mesmo padrão do analyze-branch) e roda a análise
+  // completa — o cache por hash do pipeline torna o refresh barato quando
+  // pouco mudou (incrementalidade honesta, padrão auto-indexing).
+  app.post("/api/projects/:projectId/reindex-zip", upload.single("file"), analysisGuard, async (req, res) => {
+    try {
+      const projectId = parseInt(String(req.params.projectId));
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      const file = req.file;
+      if (!file) return res.status(400).json({ message: "ZIP file is required (multipart field 'file')" });
+
+      const scannedFiles = await extractAndScanZip(file.path);
+      try { fs.unlinkSync(file.path); } catch {}
+      if (scannedFiles.length === 0) {
+        return res.status(400).json({ message: "ZIP has no supported source files" });
+      }
+
+      await storage.deleteCatalogEntriesByProject(projectId);
+      await storage.deleteSourceFilesByProject(projectId);
+      for (const f of scannedFiles) {
+        await storage.createSourceFile({
+          projectId,
+          filePath: f.filePath,
+          fileType: getFileType(f.filePath),
+          content: f.content,
+          contentHash: crypto.createHash("sha256").update(f.content).digest("hex"),
+        });
+      }
+      await storage.updateProjectStatus(projectId, "uploaded", scannedFiles.length);
+
+      const fileData = scannedFiles.map(f => ({ filePath: f.filePath, content: f.content }));
+      const pipeline = new AnalysisPipeline();
+      const result = await pipeline.runFullAnalysis(projectId, fileData);
+
+      res.json({
+        projectId,
+        reindexed: true,
+        files: scannedFiles.length,
+        analysis: {
+          analysisRunId: result.analysisRunId,
+          totalEndpoints: result.totalEndpoints,
+          totalEntities: result.totalEntities,
+          totalInteractions: result.totalInteractions,
+        },
+      });
+    } catch (error) {
+      console.error("Error reindexing project:", error);
+      const msg = error instanceof Error ? error.message : "Reindex failed";
+      res.status(500).json({ message: msg });
+    }
+  });
+
   app.post("/api/projects/:projectId/impact-diff", async (req, res) => {
     try {
       const projectId = parseInt(req.params.projectId);
@@ -1581,6 +1636,13 @@ export async function registerRoutes(
       if (hmacKey) {
         const { signReport } = await import("./analyzers/report-signature");
         signature = signReport(payload, hmacKey);
+      }
+      // ADR-0019 Onda 3 — `?format=sarif`: quebras alcançadas em SARIF 2.1.0
+      // (o GitHub renderiza inline no PR via code scanning, sem UI nossa).
+      if (String(req.query.format || "").toLowerCase() === "sarif") {
+        const { toSarif } = await import("./analyzers/sarif-report");
+        res.type("application/sarif+json").json(toSarif(report, { projectName: projectRec?.name }));
+        return;
       }
       // ADR-070 Propósito 2 — `?format=md` devolve o relatório pronto p/
       // documentação (anexo de recebimento de entrega do fornecedor).

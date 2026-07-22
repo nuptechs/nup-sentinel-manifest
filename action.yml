@@ -1,28 +1,38 @@
-# NuPtechs Sentinel — Impacto de Entrega por PR (ADR-0019 Onda 1)
+# NuPtechs Sentinel — Impacto de Entrega por PR + Auto-Map (ADR-0019 Ondas 1–3)
 #
-# Roda no CI do CLIENTE: computa o diff do PR, chama a instância Sentinel do
-# cliente, e posta o laudo de impacto 2-faces (técnico + funcional, domínio-aware,
-# assinado) como comentário do PR — atualizado a cada push. Diff-aware.
+# UM workflow, DOIS modos (auto-detectados pelo evento):
+#   • pull_request → `impact-pr`: computa o diff, chama a instância Sentinel do
+#     cliente e posta o laudo 2-faces ASSINADO como comentário (upsert). Com
+#     `sarif: 'true'`, as quebras alcançadas também viram anotações inline via
+#     GitHub code scanning.
+#   • push (branch principal) → `index`: refresca o MAPA do projeto a partir do
+#     checkout (auto-map incremental — o cache por hash torna o refresh barato).
 #
 # Uso (workflow do cliente):
 #
-#   name: Impacto Sentinel
-#   on: { pull_request: {} }
-#   permissions: { pull-requests: write, contents: read }
+#   name: Sentinel
+#   on:
+#     pull_request: {}
+#     push: { branches: [main] }
+#   permissions:
+#     pull-requests: write
+#     contents: read
+#     security-events: write        # só se sarif: 'true'
 #   jobs:
-#     impacto:
+#     sentinel:
 #       runs-on: ubuntu-latest
 #       steps:
 #         - uses: actions/checkout@v4
-#           with: { fetch-depth: 0 }        # necessário p/ o diff base...head
+#           with: { fetch-depth: 0 }
 #         - uses: nuptechs/nup-sentinel-manifest@main
 #           with:
 #             server: https://sentinel.SEU-CLIENTE.com
 #             api-key: ${{ secrets.SENTINEL_API_KEY }}
 #             project: '42'
-#             fail-on-alert: 'true'          # opcional: reprova o PR em quebra alcançada
+#             fail-on-alert: 'true'   # opcional: reprova PR em quebra alcançada
+#             sarif: 'true'           # opcional: anotações inline no PR
 name: "NuPtechs Sentinel — Impacto de Entrega"
-description: "Posta o laudo de impacto 2-faces (técnico+funcional, assinado) no PR. Diff-aware, CI-native."
+description: "Laudo de impacto 2-faces (técnico+funcional, assinado) por PR + auto-map no push. Diff-aware, CI-native."
 branding: { icon: "git-pull-request", color: "purple" }
 inputs:
   server:
@@ -34,29 +44,58 @@ inputs:
   project:
     description: "ID do projeto no Sentinel"
     required: true
+  mode:
+    description: "auto | impact-pr | index (auto: pull_request→impact-pr, push→index)"
+    required: false
+    default: "auto"
   fail-on-alert:
     description: "sai com erro se houver quebra de contrato alcançada"
+    required: false
+    default: "false"
+  sarif:
+    description: "gera SARIF e sobe pro code scanning (anotações inline no PR)"
     required: false
     default: "false"
 runs:
   using: "composite"
   steps:
-    - name: Sentinel impact-pr
+    - name: Sentinel
+      id: run
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
         SENTINEL_SERVER: ${{ inputs.server }}
         SENTINEL_KEY: ${{ inputs.api-key }}
         SENTINEL_PROJECT: ${{ inputs.project }}
+        SENTINEL_MODE: ${{ inputs.mode }}
         SENTINEL_FAIL_ON_ALERT: ${{ inputs.fail-on-alert }}
+        SENTINEL_SARIF: ${{ inputs.sarif }}
       run: |
         set -e
-        # Executa o CLI a partir da própria Action (build sob demanda até publicar no npm).
         ACTION_DIR="${{ github.action_path }}"
         cd "$ACTION_DIR/cli"
         if [ ! -f dist/index.js ]; then npm ci --silent && npm run build --silent; fi
-        FLAGS=""
-        if [ "$SENTINEL_FAIL_ON_ALERT" = "true" ]; then FLAGS="--fail-on-alert"; fi
-        node dist/index.js \
-          --server "$SENTINEL_SERVER" --key "$SENTINEL_KEY" \
-          impact-pr --project "$SENTINEL_PROJECT" $FLAGS
+
+        MODE="$SENTINEL_MODE"
+        if [ "$MODE" = "auto" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then MODE=impact-pr; else MODE=index; fi
+        fi
+        echo "modo: $MODE (evento: ${GITHUB_EVENT_NAME})"
+
+        if [ "$MODE" = "index" ]; then
+          node dist/index.js --server "$SENTINEL_SERVER" --key "$SENTINEL_KEY" \
+            index --project "$SENTINEL_PROJECT" --dir "$GITHUB_WORKSPACE"
+        else
+          FLAGS=""
+          [ "$SENTINEL_FAIL_ON_ALERT" = "true" ] && FLAGS="$FLAGS --fail-on-alert"
+          [ "$SENTINEL_SARIF" = "true" ] && FLAGS="$FLAGS --sarif-out $GITHUB_WORKSPACE/sentinel-impact.sarif"
+          cd "$GITHUB_WORKSPACE"
+          node "$ACTION_DIR/cli/dist/index.js" --server "$SENTINEL_SERVER" --key "$SENTINEL_KEY" \
+            impact-pr --project "$SENTINEL_PROJECT" $FLAGS
+        fi
+    - name: Upload SARIF (anotações inline)
+      if: ${{ inputs.sarif == 'true' && github.event_name == 'pull_request' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: sentinel-impact.sarif
+        category: nuptechs-sentinel

@@ -86,6 +86,7 @@ export function createImpactPrCommand(): Command {
     .option('--head <ref>', 'ref head (default: do ambiente de CI)')
     .option('--no-comment', 'só imprime o laudo, não posta no PR')
     .option('--fail-on-alert', 'sai com código 1 se houver quebra alcançada (gate de CI)')
+    .option('--sarif-out <path>', 'grava SARIF 2.1.0 (p/ upload no code scanning do GitHub)')
     .action(async (opts) => {
       const parent = cmd.parent?.opts() || {};
       const cfg = mergeConfig({ server: parent.server, key: parent.key }, loadConfig(parent.config));
@@ -122,6 +123,13 @@ export function createImpactPrCommand(): Command {
         report = await client.impactDiff(projectId, diff, 'json');
       }
       const markdown = (await client.impactDiff(projectId, diff, 'md')) as string;
+
+      if (opts.sarifOut) {
+        const sarif = await client.impactDiff(projectId, diff, 'sarif');
+        const fsmod = await import('fs');
+        fsmod.writeFileSync(opts.sarifOut, JSON.stringify(sarif, null, 2), 'utf-8');
+        console.log(`SARIF gravado em ${opts.sarifOut}`);
+      }
       const body = buildCommentBody(markdown, { ranAt: new Date().toISOString() });
 
       if (opts.comment !== false && ctx) {
