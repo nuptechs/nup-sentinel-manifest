@@ -211,6 +211,12 @@ public class JavaASTAnalyzer {
                             + ": " + e.getClass().getSimpleName() + " - " + e.getMessage();
                         System.err.println(msg);
                         resolutionErrors.add(msg);
+                        // Fallback sintático (ADR-0018): sem o solver, sintetiza a
+                        // assinatura a partir do FONTE (fqn.nome(params-como-escritos)).
+                        // O método vira NÓ do grafo mesmo com tipo externo no retorno/
+                        // parâmetro (antes: método inteiro sumia e a cadeia quebrava).
+                        mi.resolvedQualifiedSignature = info.fqn + "." + mi.name
+                            + "(" + String.join(", ", mi.parameters) + ")";
                     }
                 }
             }
@@ -269,6 +275,21 @@ public class JavaASTAnalyzer {
                         String msg = "Could not resolve entity generic for " + className + ": " + e.getMessage();
                         System.err.println(msg);
                         resolutionErrors.add(msg);
+                    }
+
+                    // Fallback sintático (ADR-0018): o argumento genérico está
+                    // ESCRITO no fonte (JpaRepository<Contract, Long>) — resolve
+                    // por import/pacote/nome-único, sem solver.
+                    if (info.resolvedEntityClassName == null) {
+                        String argType = typeArgs.get(0).asString();
+                        int lt = argType.indexOf('<');
+                        if (lt > 0) argType = argType.substring(0, lt);
+                        ClassInfo viaSyntax = resolveTypeToClassInfo(info, argType.trim());
+                        if (viaSyntax != null && viaSyntax.isEntity) {
+                            info.resolvedEntitySymbol = viaSyntax.resolvedSymbol;
+                            info.resolvedEntityClassName = viaSyntax.className;
+                            break;
+                        }
                     }
                 }
             }
@@ -395,6 +416,24 @@ public class JavaASTAnalyzer {
 
             if (info.isEntity) {
                 extractEntityFields(cls, info);
+            }
+
+            // Fallback sintático (ADR-0018): imports do CU (simples → FQN) e o
+            // tipo DECLARADO de cada campo — determinístico, sem SymbolSolver.
+            cu.getImports().forEach(imp -> {
+                if (imp.isStatic() || imp.isAsterisk()) return;
+                String fqnImp = imp.getNameAsString();
+                int lastDot = fqnImp.lastIndexOf('.');
+                String simple = lastDot >= 0 ? fqnImp.substring(lastDot + 1) : fqnImp;
+                info.importsSimpleToFqn.putIfAbsent(simple, fqnImp);
+            });
+            for (FieldDeclaration fd : cls.getFields()) {
+                for (VariableDeclarator vd : fd.getVariables()) {
+                    String t = vd.getTypeAsString();
+                    int lt = t.indexOf('<');
+                    if (lt > 0) t = t.substring(0, lt); // remove genéricos
+                    info.fieldTypes.putIfAbsent(vd.getNameAsString(), t.trim());
+                }
             }
 
             extractMethods(cls, info);
@@ -564,6 +603,18 @@ public class JavaASTAnalyzer {
             mi.parameters = method.getParameters().stream()
                 .map(p -> p.getTypeAsString() + " " + p.getNameAsString())
                 .collect(Collectors.toList());
+            method.getParameters().forEach(par -> {
+                String t = par.getTypeAsString();
+                int lt = t.indexOf('<');
+                if (lt > 0) t = t.substring(0, lt);
+                mi.paramTypesByName.put(par.getNameAsString(), t.trim());
+            });
+            method.getBody().ifPresent(b -> b.findAll(VariableDeclarator.class).forEach(vd -> {
+                String t = vd.getTypeAsString();
+                int lt = t.indexOf('<');
+                if (lt > 0) t = t.substring(0, lt);
+                mi.localVarTypes.putIfAbsent(vd.getNameAsString(), t.trim());
+            }));
 
             for (AnnotationExpr ann : method.getAnnotations()) {
                 String annName = ann.getNameAsString();
@@ -617,6 +668,40 @@ public class JavaASTAnalyzer {
 
                     mi.methodCalls.add(mci);
                 } catch (Exception e) {
+                    // Fallback sintático (ADR-0018): o resolve() falha para QUALQUER
+                    // chamada cujo tipo declarante/argumento não está no classpath —
+                    // ex.: repo.save()/findById() herdados do JpaRepository (externo).
+                    // O catch vazio descartava a chamada e a cadeia morria sem a
+                    // entidade. Agora gravamos os FATOS SINTÁTICOS (nome do método,
+                    // nome simples do escopo, aridade) e o grafo liga depois pelo
+                    // tipo DECLARADO do campo (padrão DI dominante). Precisão:
+                    // só escopo simples (campo/variável/this.campo) — encadeado não.
+                    MethodCallInfo fb = new MethodCallInfo();
+                    fb.methodName = callExpr.getNameAsString();
+                    fb.argCount = callExpr.getArguments().size();
+                    callExpr.getArguments().forEach(a -> {
+                        if (a.isNameExpr()) {
+                            fb.argNames.add(a.asNameExpr().getNameAsString());
+                        } else if (a.isClassExpr()) {
+                            String t = a.asClassExpr().getTypeAsString();
+                            int lt = t.indexOf('<');
+                            if (lt > 0) t = t.substring(0, lt);
+                            fb.argClassLiterals.add(t.trim());
+                        }
+                    });
+                    if (callExpr.getScope().isPresent()) {
+                        var scope = callExpr.getScope().get();
+                        if (scope.isNameExpr()) {
+                            fb.fallbackScopeName = scope.asNameExpr().getNameAsString();
+                        } else if (scope.isFieldAccessExpr() && scope.asFieldAccessExpr().getScope().isThisExpr()) {
+                            fb.fallbackScopeName = scope.asFieldAccessExpr().getNameAsString();
+                        } else {
+                            return; // escopo encadeado/complexo: conservador, não liga
+                        }
+                    } else {
+                        fb.fallbackUnqualified = true; // helper da própria classe
+                    }
+                    mi.methodCalls.add(fb);
                 }
             }
         }, null);
@@ -779,6 +864,33 @@ public class JavaASTAnalyzer {
         return targetQualifiedName + "." + methodPart;
     }
 
+    /**
+     * Fallback sintático (ADR-0018): resolve um tipo SIMPLES declarado no fonte
+     * para a ClassInfo do projeto, sem SymbolSolver — import explícito do CU →
+     * mesmo pacote → nome simples ÚNICO no projeto (ambíguo = null; precisão
+     * acima de recall: nunca liga no chute).
+     */
+    private ClassInfo resolveTypeToClassInfo(ClassInfo caller, String simpleType) {
+        if (simpleType == null || simpleType.isEmpty()) return null;
+        String viaImport = caller.importsSimpleToFqn.get(simpleType);
+        if (viaImport != null) {
+            ClassInfo byFqn = fqnIndex.get(viaImport);
+            if (byFqn != null) return byFqn;
+        }
+        if (caller.packageName != null && !caller.packageName.isEmpty()) {
+            ClassInfo samePkg = fqnIndex.get(caller.packageName + "." + simpleType);
+            if (samePkg != null) return samePkg;
+        }
+        ClassInfo unique = null;
+        for (ClassInfo ci : fqnIndex.values()) {
+            if (ci.className.equals(simpleType)) {
+                if (unique != null) return null; // ambíguo — não liga
+                unique = ci;
+            }
+        }
+        return unique;
+    }
+
     private AnalysisResult buildGraph(List<String> resolutionErrors) {
         List<GraphNodeDTO> nodes = new ArrayList<>();
         List<GraphEdgeDTO> edges = new ArrayList<>();
@@ -911,12 +1023,59 @@ public class JavaASTAnalyzer {
                         targetClass = symbolClassMap.get(call.resolvedScopeType);
                     }
 
+                    // ADR-0018: entidade via ARGUMENTO — o padrão de persistência
+                    // do easynup é helper estático (Db.save(em(), contract) /
+                    // Db.findOne(em(), Contract.class, id)): a entidade está no
+                    // argumento, não no alvo. Guarda: SÓ para operação de
+                    // persistência reconhecida (save/find/delete/exists/count...).
+                    if (call.fallbackScopeName != null || call.fallbackUnqualified) {
+                        String argOp = detectPersistenceOp(call.methodName);
+                        if (argOp != null) {
+                            List<String> candidateTypes = new ArrayList<>();
+                            for (String an : call.argNames) {
+                                String t = method.localVarTypes.get(an);
+                                if (t == null) t = method.paramTypesByName.get(an);
+                                if (t != null) candidateTypes.add(t);
+                            }
+                            candidateTypes.addAll(call.argClassLiterals);
+                            for (String t : candidateTypes) {
+                                ClassInfo entArg = resolveTypeToClassInfo(cls, t);
+                                if (entArg != null && entArg.isEntity) {
+                                    String entityNodeId = resolvedEntityNodeId(entArg);
+                                    if (nodeIds.contains(entityNodeId)) {
+                                        if (isWriteOp(argOp)) {
+                                            addEdge(edges, edgeKeys, fromId, entityNodeId, "WRITES_ENTITY", Map.of("operation", argOp));
+                                        } else {
+                                            addEdge(edges, edgeKeys, fromId, entityNodeId, "READS_ENTITY", Map.of("operation", argOp));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback sintático (ADR-0018): o resolve() falhou (chamada
+                    // gravada só com fatos sintáticos) — liga pelo tipo DECLARADO
+                    // do campo injetado (DI) ou pela própria classe (helper).
+                    if (targetClass == null) {
+                        if (call.fallbackUnqualified) {
+                            targetClass = cls;
+                        } else if (call.fallbackScopeName != null) {
+                            String declaredType = cls.fieldTypes.get(call.fallbackScopeName);
+                            if (declaredType != null) {
+                                targetClass = resolveTypeToClassInfo(cls, declaredType);
+                            }
+                        }
+                    }
+
                     if (targetClass == null) continue;
 
                     if (targetClass.isRepository) {
                         String repoQualifiedName = targetClass.resolvedSymbol != null
                             ? targetClass.resolvedSymbol.getQualifiedName() : targetClass.fqn;
-                        String requalified = requalifySignature(call.resolvedSignature, repoQualifiedName);
+                        String requalified = call.resolvedSignature != null
+                            ? requalifySignature(call.resolvedSignature, repoQualifiedName)
+                            : repoQualifiedName + "." + call.methodName + "(#" + Math.max(0, call.argCount) + ")";
                         String repoMethodNodeId = "REPOSITORY:" + requalified;
 
                         if (!nodeIds.contains(repoMethodNodeId)) {
@@ -946,11 +1105,24 @@ public class JavaASTAnalyzer {
                     } else {
                         String targetQualifiedName = targetClass.resolvedSymbol != null
                             ? targetClass.resolvedSymbol.getQualifiedName() : targetClass.fqn;
-                        String requalified = requalifySignature(call.resolvedSignature, targetQualifiedName);
-                        String toId = signatureToNodeId.get(requalified);
-
-                        if (toId == null) {
-                            toId = signatureToNodeId.get(call.resolvedSignature);
+                        String toId = null;
+                        if (call.resolvedSignature != null) {
+                            String requalified = requalifySignature(call.resolvedSignature, targetQualifiedName);
+                            toId = signatureToNodeId.get(requalified);
+                            if (toId == null) {
+                                toId = signatureToNodeId.get(call.resolvedSignature);
+                            }
+                        } else {
+                            // fallback: método do alvo por NOME (aridade quando bate)
+                            MethodInfo tm = null;
+                            for (MethodInfo cand : targetClass.methods) {
+                                if (!cand.name.equals(call.methodName)) continue;
+                                if (cand.parameters.size() == call.argCount) { tm = cand; break; }
+                                if (tm == null) tm = cand;
+                            }
+                            if (tm != null && tm.resolvedQualifiedSignature != null) {
+                                toId = signatureToNodeId.get(tm.resolvedQualifiedSignature);
+                            }
                         }
 
                         if (toId != null && nodeIds.contains(toId)) {
@@ -986,6 +1158,13 @@ public class JavaASTAnalyzer {
                 ClassInfo targetClass = symbolClassMap.get(call.resolvedDeclaringType);
                 if (targetClass == null && call.resolvedScopeType != null) {
                     targetClass = symbolClassMap.get(call.resolvedScopeType);
+                }
+                // Fallback sintático (ADR-0018) — mesmo caminho do edge-loop
+                if (targetClass == null && call.fallbackScopeName != null) {
+                    String declaredType = cls.fieldTypes.get(call.fallbackScopeName);
+                    if (declaredType != null) {
+                        targetClass = resolveTypeToClassInfo(cls, declaredType);
+                    }
                 }
                 if (targetClass != null && targetClass.isRepository) {
                     ClassInfo entityInfo = resolveEntityClassForRepository(targetClass);
@@ -1053,12 +1232,21 @@ public class JavaASTAnalyzer {
         List<MethodInfo> methods = new ArrayList<>();
         List<EntityField> entityFields = new ArrayList<>();
         List<SecurityAnnotation> securityAnnotations = new ArrayList<>();
+        // Fallback sintático (ADR-0018): tipo declarado de cada campo (DI por
+        // injeção) + imports do CU — resolvem chamadas quando o SymbolSolver
+        // falha em tipos externos (repo.save herdado do JpaRepository etc.).
+        Map<String, String> fieldTypes = new HashMap<>();
+        Map<String, String> importsSimpleToFqn = new HashMap<>();
     }
 
     static class MethodInfo {
         String name;
         String returnType;
         List<String> parameters = new ArrayList<>();
+        // ADR-0018: tipos declarados por nome (var local do corpo + parâmetro) —
+        // resolvem a ENTIDADE passada como argumento (padrão Db.save(em(), contract)).
+        Map<String, String> localVarTypes = new HashMap<>();
+        Map<String, String> paramTypesByName = new HashMap<>();
         String httpMethod;
         String httpPath;
         String resolvedQualifiedSignature;
@@ -1074,6 +1262,12 @@ public class JavaASTAnalyzer {
         String resolvedSignature;
         String resolvedMethodSignature;
         String resolvedReturnType;
+        // fallback sintático quando o resolve() falha (ADR-0018):
+        String fallbackScopeName;      // nome simples do escopo (campo/variável) ou null
+        boolean fallbackUnqualified;   // chamada sem escopo (helper da própria classe)
+        int argCount = -1;
+        List<String> argNames = new ArrayList<>();        // args NameExpr (variáveis)
+        List<String> argClassLiterals = new ArrayList<>(); // args X.class
     }
 
     static class EntityField {
