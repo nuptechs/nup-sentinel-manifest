@@ -24,6 +24,20 @@ export function shouldIndexEntry(relPath: string): boolean {
   return true;
 }
 
+/**
+ * SÓ arquivos-FONTE entram no zip (o scanner do servidor descarta o resto de
+ * qualquer forma — espelha SOURCE_EXTENSIONS do repository-scanner). Sem isto
+ * o zip do checkout real do easynup dava 251 MB (docs/imagens/locks) → 502.
+ */
+const SOURCE_EXT = /\.(java|kt|ts|tsx|js|jsx|mjs|cjs|vue|py|cs)$/i;
+export function shouldIndexFile(relPath: string): boolean {
+  if (!shouldIndexEntry(relPath)) return false;
+  const norm = relPath.replace(/\\/g, '/');
+  if (/(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/.test(norm)) return false;
+  if (/\.(test|spec)\./.test(norm)) return true; // testes são fonte também
+  return SOURCE_EXT.test(norm);
+}
+
 /** Zipa `rootDir` (filtrado) num arquivo temporário; retorna o path do zip. */
 export function zipWorkspace(rootDir: string): string {
   const zip = new AdmZip();
@@ -34,7 +48,7 @@ export function zipWorkspace(rootDir: string): string {
       if (!shouldIndexEntry(rel)) continue;
       const st = fs.statSync(abs);
       if (st.isDirectory()) walk(abs);
-      else if (st.size <= 1_500_000) zip.addLocalFile(abs, path.dirname(rel));
+      else if (shouldIndexFile(rel) && st.size <= 1_500_000) zip.addLocalFile(abs, path.dirname(rel));
     }
   };
   walk(rootDir);

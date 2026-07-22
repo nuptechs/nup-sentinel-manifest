@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 
 import { toSarif } from "../../server/analyzers/sarif-report.ts";
 import _idx from "../../cli/src/commands/index-map.ts";
-const { shouldIndexEntry } = _idx as any;
+const { shouldIndexEntry, shouldIndexFile } = _idx as any;
 
 const REPORT = {
   breaking: {
@@ -83,5 +83,19 @@ describe("shouldIndexEntry (filtro do auto-map)", () => {
     // nomes que CONTÊM os termos mas não são os diretórios não são excluídos
     assert.equal(shouldIndexEntry("src/distributed/queue.ts"), true);
     assert.equal(shouldIndexEntry("src/targeting/rules.ts"), true);
+  });
+});
+
+
+describe("shouldIndexFile (só FONTE entra no zip — fix do 502/251MB)", () => {
+  it("fonte entra; binário/doc/lock ficam de fora", () => {
+    assert.equal(shouldIndexFile("src/main/java/X.java"), true);
+    assert.equal(shouldIndexFile("frontend/src/A.vue"), true);
+    assert.equal(shouldIndexFile("services/gateway/src/a.js"), true);
+    assert.equal(shouldIndexFile("docs/manual/leia.md"), false);
+    assert.equal(shouldIndexFile("assets/logo.png"), false);
+    assert.equal(shouldIndexFile("package-lock.json"), false);
+    assert.equal(shouldIndexFile("frontend/pnpm-lock.yaml"), false);
+    assert.equal(shouldIndexFile("node_modules/x/a.ts"), false);
   });
 });
