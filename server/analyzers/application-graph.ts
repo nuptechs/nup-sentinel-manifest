@@ -136,7 +136,7 @@ export class ApplicationGraph {
       .filter((n): n is GraphNode => n !== undefined);
   }
 
-  reachableFrom(startNodeId: string, maxDepth: number = 15): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  reachableFrom(startNodeId: string, maxDepth: number = 40): { nodes: GraphNode[]; edges: GraphEdge[] } {
     const visitedNodes = new Set<string>();
     const collectedEdges: GraphEdge[] = [];
 
@@ -211,7 +211,7 @@ export function analyzeEndpoints(graph: ApplicationGraph): EndpointImpact[] {
     const visited = new Set<string>();
 
     const walkChain = (nodeId: string, depth: number) => {
-      if (depth > 15 || visited.has(nodeId)) return;
+      if (depth > 40 || visited.has(nodeId)) return;
       visited.add(nodeId);
 
       const n = graph.getNode(nodeId);
@@ -246,7 +246,7 @@ export function analyzeEndpoints(graph: ApplicationGraph): EndpointImpact[] {
     let maxDepth = 0;
     const depthVisited = new Set<string>();
     const measureDepth = (nodeId: string, depth: number) => {
-      if (depth > 15 || depthVisited.has(nodeId)) return;
+      if (depth > 40 || depthVisited.has(nodeId)) return;
       depthVisited.add(nodeId);
       if (depth > maxDepth) maxDepth = depth;
       for (const edge of graph.getOutgoingEdges(nodeId)) {
