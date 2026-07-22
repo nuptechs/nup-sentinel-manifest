@@ -4,6 +4,7 @@ import { createAnalyzeCommand } from './commands/analyze';
 import { createDiffCommand } from './commands/diff';
 import { createManifestCommand } from './commands/manifest';
 import { createConnectCommand } from './commands/connect';
+import { createImpactPrCommand } from './commands/impact-pr';
 
 const program = new Command();
 
@@ -19,5 +20,6 @@ program.addCommand(createAnalyzeCommand());
 program.addCommand(createDiffCommand());
 program.addCommand(createManifestCommand());
 program.addCommand(createConnectCommand());
+program.addCommand(createImpactPrCommand());
 
 program.parse(process.argv);

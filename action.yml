@@ -1,0 +1,62 @@
+# NuPtechs Sentinel — Impacto de Entrega por PR (ADR-0019 Onda 1)
+#
+# Roda no CI do CLIENTE: computa o diff do PR, chama a instância Sentinel do
+# cliente, e posta o laudo de impacto 2-faces (técnico + funcional, domínio-aware,
+# assinado) como comentário do PR — atualizado a cada push. Diff-aware.
+#
+# Uso (workflow do cliente):
+#
+#   name: Impacto Sentinel
+#   on: { pull_request: {} }
+#   permissions: { pull-requests: write, contents: read }
+#   jobs:
+#     impacto:
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: actions/checkout@v4
+#           with: { fetch-depth: 0 }        # necessário p/ o diff base...head
+#         - uses: nuptechs/nup-sentinel-manifest@main
+#           with:
+#             server: https://sentinel.SEU-CLIENTE.com
+#             api-key: ${{ secrets.SENTINEL_API_KEY }}
+#             project: '42'
+#             fail-on-alert: 'true'          # opcional: reprova o PR em quebra alcançada
+name: "NuPtechs Sentinel — Impacto de Entrega"
+description: "Posta o laudo de impacto 2-faces (técnico+funcional, assinado) no PR. Diff-aware, CI-native."
+branding: { icon: "git-pull-request", color: "purple" }
+inputs:
+  server:
+    description: "URL da instância Sentinel do cliente"
+    required: true
+  api-key:
+    description: "API key da instância (secret)"
+    required: true
+  project:
+    description: "ID do projeto no Sentinel"
+    required: true
+  fail-on-alert:
+    description: "sai com erro se houver quebra de contrato alcançada"
+    required: false
+    default: "false"
+runs:
+  using: "composite"
+  steps:
+    - name: Sentinel impact-pr
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        SENTINEL_SERVER: ${{ inputs.server }}
+        SENTINEL_KEY: ${{ inputs.api-key }}
+        SENTINEL_PROJECT: ${{ inputs.project }}
+        SENTINEL_FAIL_ON_ALERT: ${{ inputs.fail-on-alert }}
+      run: |
+        set -e
+        # Executa o CLI a partir da própria Action (build sob demanda até publicar no npm).
+        ACTION_DIR="${{ github.action_path }}"
+        cd "$ACTION_DIR/cli"
+        if [ ! -f dist/index.js ]; then npm ci --silent && npm run build --silent; fi
+        FLAGS=""
+        if [ "$SENTINEL_FAIL_ON_ALERT" = "true" ]; then FLAGS="--fail-on-alert"; fi
+        node dist/index.js \
+          --server "$SENTINEL_SERVER" --key "$SENTINEL_KEY" \
+          impact-pr --project "$SENTINEL_PROJECT" $FLAGS

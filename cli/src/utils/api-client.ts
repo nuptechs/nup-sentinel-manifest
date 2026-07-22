@@ -105,4 +105,30 @@ export class ManifestClient {
       token,
     });
   }
+
+  /**
+   * ADR-0019: impacto de um diff. `format:'md'` devolve o relatório markdown
+   * pronto (assinado, se o servidor tem a chave); default devolve o JSON.
+   */
+  async impactDiff(
+    projectId: number,
+    diff: string,
+    format?: 'md' | 'json',
+  ): Promise<any> {
+    const qs = format === 'md' ? '?format=md' : '';
+    const url = `${this.serverUrl}/api/projects/${projectId}/impact-diff${qs}`;
+    const opts: any = {
+      method: 'POST',
+      headers: this.apiKey
+        ? { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` }
+        : { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ diff }),
+    };
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`API error ${res.status}: ${text}`);
+    }
+    return format === 'md' ? res.text() : res.json();
+  }
 }
