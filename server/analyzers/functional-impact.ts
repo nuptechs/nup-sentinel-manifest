@@ -62,10 +62,55 @@ export interface FunctionalImpactReport {
   unmapped: { files: string[]; note: string };
   /** transparência do método (o que este relatório é — e o que NÃO é) */
   method: string;
+  /**
+   * ADR-0018 (fidelidade multi-projeto): origem do mapa de negócio —
+   * 'project' (ontologia configurada no projeto) ou 'default-procurement'
+   * (mapa default de contratação pública BR — PODE NÃO servir ao domínio do
+   * projeto; o aviso vai junto no method).
+   */
+  mapSource: "project" | "default-procurement";
+}
+
+/**
+ * Valida e compila a ontologia configurada num PROJETO (JSON armazenado) para
+ * DomainConcept[]. Regex inválida ou item malformado ⇒ erro nomeando o campo
+ * (fail-closed: ontologia meio-válida não entra). Retorna null p/ entrada nula.
+ */
+export function parseProjectOntology(raw: unknown): DomainConcept[] | null {
+  if (raw == null) return null;
+  if (!Array.isArray(raw)) throw new Error("ontologia deve ser um array de conceitos");
+  if (raw.length === 0) throw new Error("ontologia vazia — remova a configuração ou adicione conceitos");
+  const out: DomainConcept[] = [];
+  raw.forEach((it: any, i: number) => {
+    const at = `conceito[${i}]`;
+    if (!it || typeof it !== "object") throw new Error(`${at}: deve ser objeto`);
+    if (typeof it.concept !== "string" || !it.concept.trim()) throw new Error(`${at}.concept: obrigatório`);
+    if (it.importance !== "core" && it.importance !== "recommended") throw new Error(`${at}.importance: 'core' | 'recommended'`);
+    if (!Array.isArray(it.patterns) || it.patterns.length === 0) throw new Error(`${at}.patterns: array não-vazio de strings`);
+    const patterns = it.patterns.map((ps: any, j: number) => {
+      if (typeof ps !== "string" || !ps.trim()) throw new Error(`${at}.patterns[${j}]: string obrigatória`);
+      try {
+        return new RegExp(ps, "i");
+      } catch (e) {
+        throw new Error(`${at}.patterns[${j}]: regex inválida (${(e as Error).message})`);
+      }
+    });
+    out.push({
+      concept: it.concept.trim(),
+      patterns,
+      legalBasis: typeof it.legalBasis === "string" ? it.legalBasis : "",
+      importance: it.importance,
+      why: typeof it.why === "string" ? it.why : "",
+    });
+  });
+  return out;
 }
 
 const METHOD_NOTE =
   "Reflexion determinístico: artefatos tocados (entidades/endpoints/telas/símbolos/arquivos) projetados sobre o mapa de negócio declarado (domain-ontology, convenção em código). Caixa só acende com âncora concreta. NÃO cobre ausência ('deveria existir') — isso é a auditoria de cobertura de domínio do sistema inteiro; refinamento por IR/embedding (ADR-080) é evolução declarada.";
+
+const DEFAULT_MAP_WARNING =
+  " ATENÇÃO: mapa de negócio DEFAULT (contratação pública BR) — este projeto NÃO tem ontologia própria configurada; para fidelidade de domínio em outros contextos, configure via PUT /api/projects/:id/ontology.";
 
 const UNMAPPED_NOTE =
   "arquivo sem caixa mapeada ≠ sem impacto de negócio — significa apenas que nenhum padrão do mapa declarado casou; revise manualmente se a entrega for sensível.";
@@ -177,14 +222,16 @@ export function computeFunctionalImpact(
     impactedScreens?: { name: string; route: string | null }[];
   },
   breaking?: BreakingReport,
-  ontology: DomainConcept[] = PUBLIC_PROCUREMENT_ONTOLOGY,
+  ontology?: DomainConcept[] | null,
 ): FunctionalImpactReport {
+  const mapSource: FunctionalImpactReport["mapSource"] = ontology ? "project" : "default-procurement";
+  const activeOntology = ontology ?? PUBLIC_PROCUREMENT_ONTOLOGY;
   const candidates = collectAnchorCandidates(files, impact, breaking);
 
   const boxes: BusinessBoxHit[] = [];
   const anchoredFiles = new Set<string>();
 
-  for (const concept of ontology) {
+  for (const concept of activeOntology) {
     const anchors: BusinessAnchor[] = [];
     for (const cand of candidates) {
       const tokenized = tokenizedView(cand.value);
@@ -219,6 +266,7 @@ export function computeFunctionalImpact(
   return {
     boxes,
     unmapped: { files: unmappedFiles, note: UNMAPPED_NOTE },
-    method: METHOD_NOTE,
+    method: mapSource === "project" ? METHOD_NOTE : METHOD_NOTE + DEFAULT_MAP_WARNING,
+    mapSource,
   };
 }

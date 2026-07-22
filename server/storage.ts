@@ -42,6 +42,7 @@ export interface IStorage {
   deleteProject(id: number): Promise<void>;
 
   getSourceFiles(projectId: number): Promise<SourceFile[]>;
+  updateProjectOntology(projectId: number, ontology: unknown): Promise<void>;
   createSourceFile(file: InsertSourceFile): Promise<SourceFile>;
   deleteSourceFilesByProject(projectId: number): Promise<void>;
 
@@ -140,6 +141,10 @@ export class DatabaseStorage implements IStorage {
 
   async deleteProject(id: number): Promise<void> {
     await db.delete(projects).where(eq(projects.id, id));
+  }
+
+  async updateProjectOntology(projectId: number, ontology: unknown): Promise<void> {
+    await db.update(projects).set({ businessOntology: ontology as any }).where(eq(projects.id, projectId));
   }
 
   async getSourceFiles(projectId: number): Promise<SourceFile[]> {

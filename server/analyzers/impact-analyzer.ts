@@ -18,6 +18,7 @@ import { parseUnifiedDiff, extractChangedSymbols } from "./changed-symbols";
 import { breakingReportForDiff, type BreakingReport } from "./breaking-changes";
 import { computeDeliveryRisk, type DeliveryRiskReport } from "./delivery-risk";
 import { computeFunctionalImpact, type FunctionalImpactReport } from "./functional-impact";
+import type { DomainConcept } from "./domain-ontology";
 
 export interface ImpactedEndpoint {
   path: string;
@@ -422,7 +423,12 @@ function fileClassName(p: string): string {
   return base.replace(/\.(java|kt|ts|js|mjs|cjs|tsx|jsx)$/i, "");
 }
 
-export function computeImpactForDiff(manifest: any, diffText: string): DiffImpactReport {
+export interface DiffImpactOptions {
+  /** ontologia do PROJETO (ADR-0018 fidelidade) — ausente ⇒ mapa default com aviso */
+  ontology?: DomainConcept[] | null;
+}
+
+export function computeImpactForDiff(manifest: any, diffText: string, opts: DiffImpactOptions = {}): DiffImpactReport {
   // parse ÚNICO do diff — alimenta o blast radius (Onda 1) e a classificação de
   // quebra × alcance (Onda 2) sem re-parsear.
   const parsedFiles = parseUnifiedDiff(diffText);
@@ -481,6 +487,7 @@ export function computeImpactForDiff(manifest: any, diffText: string): DiffImpac
       impactedScreens: report.aggregate.impactedScreens,
     },
     report.breaking,
+    opts.ontology ?? null,
   );
   return report;
 }
@@ -526,6 +533,10 @@ export function renderImpactDiffMarkdown(
   if (fn && fn.boxes.length) {
     L.push("## Face funcional — caixas de negócio acesas");
     L.push("");
+    if (fn.mapSource === "default-procurement") {
+      L.push("> ⚠️ Mapa de negócio DEFAULT (contratação pública BR) — configure a ontologia do projeto para fidelidade de domínio.");
+      L.push("");
+    }
     for (const b of fn.boxes) {
       const tier = b.importance === "core" ? "🔶 core" : "▫ recomendado";
       L.push(`- **${b.concept}** (${tier}) — _${b.legalBasis}_`);
