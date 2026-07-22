@@ -310,6 +310,47 @@ function fnBody(node: ts.Node): ts.Node | null {
 
 const WRITE_METHODS = new Set(["insert", "update"]);
 
+// ── Toque por SQL CRU (ADR-0018 pronto-pra-cliente) ──
+// Nem todo backend Node é Drizzle: o gateway do easynup (e muito cliente) usa
+// pg/knex com SQL em string/template literal. Detecta a TABELA no próprio SQL:
+// INSERT INTO t / UPDATE t … SET / DELETE FROM t / FROM t / JOIN t.
+// Guardas de precisão: identificador não pode ser keyword SQL; UPDATE exige um
+// SET no mesmo literal (evita prosa "update the record"); placeholders fora.
+const SQL_KEYWORDS = new Set([
+  "select", "where", "set", "values", "on", "as", "left", "right", "inner",
+  "outer", "join", "group", "order", "limit", "offset", "returning", "distinct",
+  "union", "all", "case", "when", "then", "else", "end", "null", "not", "and",
+  "or", "in", "exists", "between", "like", "is", "asc", "desc", "into", "from",
+  "table", "if", "only",
+]);
+const SQL_TOUCH_RE = /\b(insert\s+into|delete\s+from|update|from|join)\s+"?([a-z_][a-z0-9_]{1,63})"?/gi;
+
+export function sqlTouchesFromText(text: string): DrizzleTouch[] {
+  if (!text || text.length > 20_000) return [];
+  const out: DrizzleTouch[] = [];
+  const lower = text.toLowerCase();
+  // gate de FORMA de SQL (não palavra solta): select…from / insert into /
+  // update…set / delete from — prosa em inglês não passa.
+  if (
+    !/\bselect\b[\s\S]*\bfrom\b/.test(lower) &&
+    !/\binsert\s+into\b/.test(lower) &&
+    !/\bupdate\b[\s\S]*\bset\b/.test(lower) &&
+    !/\bdelete\s+from\b/.test(lower)
+  ) return [];
+  SQL_TOUCH_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = SQL_TOUCH_RE.exec(text)) !== null) {
+    const kw = m[1].toLowerCase().replace(/\s+/g, " ");
+    const table = m[2].toLowerCase();
+    if (SQL_KEYWORDS.has(table)) continue;
+    if (kw === "update" && !/\bset\b/i.test(text)) continue; // prosa, não SQL
+    const op: DrizzleTouch["op"] =
+      kw === "insert into" || kw === "update" ? "write" : kw === "delete from" ? "delete" : "read";
+    out.push({ entity: table, op });
+  }
+  return out;
+}
+
 function walkFnBody(
   body: ts.Node,
   filePath: string,
@@ -326,6 +367,14 @@ function walkFnBody(
   };
 
   const visit = (node: ts.Node) => {
+    // SQL cru em literal (ADR-0018): pg/knex — a tabela está no texto.
+    if (ts.isStringLiteralLike(node)) {
+      for (const t of sqlTouchesFromText(node.text)) touches.push(t);
+    } else if (ts.isTemplateExpression(node)) {
+      const parts = [node.head.text, ...node.templateSpans.map((sp) => sp.literal.text)].join(" ");
+      for (const t of sqlTouchesFromText(parts)) touches.push(t);
+    }
+
     // `db.query.<sym>` — leitura via query API do Drizzle.
     if (
       ts.isPropertyAccessExpression(node) &&
@@ -610,39 +659,49 @@ export function resolveTouches(
   graph: BackendCallGraph,
   maxDepth: number = MAX_CALL_DEPTH,
 ): CallChainResolution {
-  const memo = new Map<string, { touches: DrizzleTouch[]; chain: string[] }>();
+  const memo = new Map<string, { touches: DrizzleTouch[]; chain: string[]; hop: string[] }>();
   const gray = new Set<string>();
 
-  const visit = (key: string, depth: number): { touches: DrizzleTouch[]; chain: string[] } => {
-    if (depth > maxDepth) return { touches: [], chain: [] };
+  const visit = (key: string, depth: number): { touches: DrizzleTouch[]; chain: string[]; hop: string[] } => {
+    if (depth > maxDepth) return { touches: [], chain: [], hop: [] };
     const done = memo.get(key);
     if (done) return done;
-    if (gray.has(key)) return { touches: [], chain: [] }; // ciclo — corta.
+    if (gray.has(key)) return { touches: [], chain: [], hop: [] }; // ciclo — corta.
     const node = graph.get(key);
-    if (!node) return { touches: [], chain: [] };
+    if (!node) return { touches: [], chain: [], hop: [] };
 
     gray.add(key);
     const touches: DrizzleTouch[] = [...node.touches];
     let chain: string[] = node.touches.length > 0 ? [key] : [];
+    // hop-chain (ADR-0018): o caminho de FUNÇÕES percorrido, INDEPENDENTE de
+    // toque em tabela — o alcance (quem depende de quem) tem valor por si
+    // (breaking × reachable) mesmo quando a persistência não é detectável.
+    let bestHop: string[] = [];
     for (const callee of Array.from(node.callees)) {
       const sub = visit(callee, depth + 1);
       touches.push(...sub.touches);
       if (chain.length === 0 && sub.chain.length > 0) chain = [key, ...sub.chain];
+      if (sub.hop.length > bestHop.length) bestHop = sub.hop;
     }
     gray.delete(key);
 
-    const result = { touches, chain };
+    const result = { touches, chain, hop: [key, ...bestHop] };
     memo.set(key, result);
     return result;
   };
 
   const all: DrizzleTouch[] = [];
   let chain: string[] = [];
+  let hop: string[] = [];
   for (const seed of seedKeys) {
     const r = visit(seed, 0);
     all.push(...r.touches);
     if (chain.length === 0 && r.chain.length > 0) chain = r.chain;
+    if (r.hop.length > hop.length) hop = r.hop;
   }
+  // preferência: cadeia ancorada em toque; senão o hop-path (só se tem ≥2 nós —
+  // [seed] sozinho não informa nada)
+  if (chain.length === 0 && hop.length >= 2) chain = hop;
 
   const seen = new Set<string>();
   const touches = all
