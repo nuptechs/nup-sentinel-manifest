@@ -26,6 +26,7 @@ import {
   drizzleSymbolIndex,
   type DrizzleEntity,
 } from "./drizzle-schema";
+import { buildBackendCallChain, resolveTouches } from "./call-chain";
 
 export interface ExpressRoute {
   /** Verbo HTTP em maiúsculas: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, ALL. */
@@ -42,6 +43,11 @@ export interface ExpressRoute {
   entitiesTouched: string[];
   /** Operações de persistência do handler: read/write/delete, ordenadas. */
   persistenceOperations: string[];
+  /**
+   * Cadeia multi-hop até o 1º toque Drizzle (Onda 2 D9): ["file::fn", ...],
+   * começando no handler. Vazia quando o toque é same-file ou não há toque.
+   */
+  callChain: string[];
   sourceFile: string;
   lineNumber: number;
 }
@@ -176,6 +182,33 @@ function resolveHandlerEntities(
   };
 }
 
+/** Divide os args no nível superior (vírgulas fora de aspas/parênteses/chaves). */
+function splitTopLevelArgs(args: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+    else if (ch === "(" || ch === "{" || ch === "[") depth++;
+    else if (ch === ")" || ch === "}" || ch === "]") depth--;
+    else if (ch === "," && depth === 0) {
+      parts.push(args.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(args.slice(start).trim());
+  return parts;
+}
+
+const BARE_IDENT_RE = /^[A-Za-z_$][\w$]*$/;
+
 /** Extrai (roles, expressão) do 1º middleware de permissão reconhecido nos args. */
 function extractPermission(args: string): { roles: string[]; expression: string | null } {
   for (const fn of PERMISSION_FNS) {
@@ -207,11 +240,25 @@ export function extractExpressRoutes(
   // Índice de entidades Drizzle do backend inteiro (resolve refs de handler).
   const drizzle = drizzleSymbolIndex(extractDrizzleEntities(files));
 
+  const EXPRESS_GUARD = /\bexpress\s*\(|\bexpress\s*\.\s*Router\s*\(|\bRouter\s*\(/;
+
+  // Call-chain multi-hop (Onda 2 D8): grafo de chamadas do backend restrito ao
+  // fecho de imports dos arquivos com rotas. Resolve handler → service → repo →
+  // tabela quando o acesso Drizzle NÃO está no call-site (o scan same-file do
+  // D4 continua cobrindo o caso local — os dois resultados são unidos).
+  const routeFiles = files
+    .filter((f) => !f.filePath.endsWith(".java") && EXPRESS_GUARD.test(f.content))
+    .map((f) => f.filePath);
+  const callChain =
+    routeFiles.length > 0
+      ? buildBackendCallChain(files, drizzle, { entryFiles: routeFiles })
+      : null;
+
   for (const file of files) {
     if (file.filePath.endsWith(".java")) continue;
     const content = file.content;
     // Guarda barata: só arquivos que criam router/app entram no parser caro.
-    if (!/\bexpress\s*\(|\bexpress\s*\.\s*Router\s*\(|\bRouter\s*\(/.test(content)) {
+    if (!EXPRESS_GUARD.test(content)) {
       continue;
     }
 
@@ -244,6 +291,35 @@ export function extractExpressRoutes(
       const { roles, expression } = extractPermission(args);
       const { entities, operations } = resolveHandlerEntities(args, drizzle);
 
+      // Multi-hop (D8/D9): funções chamadas nos args E handlers passados por
+      // referência (identificador nu, local ou importado) viram seeds da
+      // travessia; toques a N arquivos de distância se unem ao scan same-file.
+      let chain: string[] = [];
+      if (callChain) {
+        const seeds = callChain.seedsFor(file.filePath, args);
+        for (const arg of splitTopLevelArgs(args)) {
+          if (!BARE_IDENT_RE.test(arg)) continue;
+          const seed = callChain.seedForName(file.filePath, arg);
+          if (seed && !seeds.includes(seed)) seeds.push(seed);
+        }
+        if (seeds.length > 0) {
+          const resolved = resolveTouches(seeds, callChain.graph);
+          for (const touch of resolved.touches) {
+            if (!entities.includes(touch.entity)) entities.push(touch.entity);
+            if (!operations.includes(touch.op)) operations.push(touch.op);
+          }
+          entities.sort();
+          operations.sort();
+          // Telemetria (D9): cadeia começa no handler. Handler inline (arrow)
+          // não tem chave própria — prefixa o call-site como origem.
+          if (resolved.chain.length > 0) {
+            chain = resolved.chain[0].startsWith(`${file.filePath}::`)
+              ? resolved.chain
+              : [`${file.filePath}::handler`, ...resolved.chain];
+          }
+        }
+      }
+
       const prefix = mountPrefix.get(varName) || "";
       routes.push({
         method: verb.toUpperCase(),
@@ -253,6 +329,7 @@ export function extractExpressRoutes(
         permissionExpression: expression,
         entitiesTouched: entities,
         persistenceOperations: operations,
+        callChain: chain,
         sourceFile: file.filePath,
         lineNumber: lineAt(content, r.index),
       });
@@ -307,6 +384,33 @@ export function expressRoutesToCatalogEntries(
         ]
       : [];
 
+    // Telemetria da cadeia (D9): [handler, ...intermediários, quem-toca].
+    // Heurística de camada (espelha o Java): hop intermediário = service,
+    // hop final (o que faz o acesso Drizzle) = repository.
+    const fnOf = (key: string) => key.split("::")[1] ?? key;
+    const fileOf = (key: string) => key.split("::")[0] ?? key;
+    const chain = route.callChain;
+    const serviceMethods = chain.length > 2 ? chain.slice(1, -1).map(fnOf) : [];
+    const repositoryMethods = chain.length >= 2 ? [fnOf(chain[chain.length - 1])] : [];
+    const resolutionPath = [
+      {
+        tier: "backend_only",
+        file: route.sourceFile || route.routerVar,
+        function: "handler",
+        detail: "Express route (multistack node-backend, ADR-0015 D1)",
+      },
+      ...(chain.length >= 2
+        ? [
+            {
+              tier: "call_chain",
+              file: fileOf(chain[chain.length - 1]),
+              function: fnOf(chain[chain.length - 1]),
+              detail: `Express call-chain multi-hop, ${chain.length - 1} hop(s) (ADR-0015 Onda 2 D8/D9)`,
+            },
+          ]
+        : []),
+    ];
+
     return {
       analysisRunId,
       projectId,
@@ -317,10 +421,10 @@ export function expressRoutesToCatalogEntries(
       httpMethod: route.method,
       controllerClass: route.routerVar,
       controllerMethod: null,
-      serviceMethods: [],
-      repositoryMethods: [],
+      serviceMethods,
+      repositoryMethods,
       entitiesTouched: route.entitiesTouched,
-      fullCallChain: [],
+      fullCallChain: route.callChain,
       persistenceOperations: route.persistenceOperations,
       technicalOperation: operationOf(route.method),
       criticalityScore: null,
@@ -328,14 +432,7 @@ export function expressRoutesToCatalogEntries(
       humanClassification: null,
       sourceFile: route.sourceFile,
       lineNumber: route.lineNumber,
-      resolutionPath: [
-        {
-          tier: "backend_only",
-          file: route.sourceFile || route.routerVar,
-          function: "handler",
-          detail: "Express route (multistack node-backend, ADR-0015 D1)",
-        },
-      ],
+      resolutionPath,
       architectureType: "REST_CONTROLLER",
       interactionCategory: "HTTP",
       confidence: 1.0,

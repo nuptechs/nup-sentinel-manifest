@@ -146,6 +146,48 @@ export const webhookEvents = pgTable("webhook_event", {
 `,
   },
 
+  // ── Camadas service/repo do gateway (canário C4, Onda 2 D7/D8) ──
+  // Cadeia multi-hop: rota → webhookService.processInbound (este arquivo) →
+  // insertEvent (repo, outro arquivo) → db.insert(webhookEvents). Enquanto
+  // nenhuma rota os chama (D7), são INERTES — o golden não pode mudar.
+  {
+    filePath: "services/gateway/src/services/webhook-service.ts",
+    content: `import { insertEvent } from "../repos/webhook-repo";
+
+export const webhookService = {
+  async processInbound(payload: unknown) {
+    return insertEvent(payload);
+  },
+};
+`,
+  },
+  {
+    filePath: "services/gateway/src/repos/webhook-repo.ts",
+    content: `import { db } from "../db/client";
+import { webhookEvents } from "../db/schema";
+
+export async function insertEvent(payload: unknown) {
+  await db.insert(webhookEvents).values({ payload });
+}
+
+export async function removeEvent(id: number) {
+  await db.delete(webhookEvents);
+}
+`,
+  },
+  // Handler por REFERÊNCIA (canário C5, Onda 2 D9): a rota recebe o
+  // identificador importado, não uma arrow inline.
+  {
+    filePath: "services/gateway/src/controllers/webhook-controller.ts",
+    content: `import { removeEvent } from "../repos/webhook-repo";
+
+export async function deleteWebhookHandler(req: any, res: any) {
+  await removeEvent(Number(req.params.id));
+  res.status(204).end();
+}
+`,
+  },
+
   // ── Gateway Express (hoje: só prefixo; rotas invisíveis) ──
   {
     filePath: "services/gateway/src/app.ts",
@@ -153,6 +195,8 @@ export const webhookEvents = pgTable("webhook_event", {
 import { requirePermission } from "./middleware/auth";
 import { db } from "./db/client";
 import { webhookEvents } from "./db/schema";
+import { webhookService } from "./services/webhook-service";
+import { deleteWebhookHandler } from "./controllers/webhook-controller";
 
 const app = express();
 const webhookRouter = express.Router();
@@ -166,6 +210,20 @@ webhookRouter.get("/inbound/:id", requirePermission("webhooks.read"), async (req
   const rows = await db.select().from(webhookEvents);
   res.json(rows);
 });
+
+// CANÁRIO 4 (Onda 2 D8): o handler DELEGA — o acesso Drizzle está a dois
+// arquivos de distância (service → repo → db.insert). Flag OFF: invisível.
+// Flag ON: endpoint POST /webhooks/inbound com entitiesTouched=["webhook_event"]
+// e persistenceOperations=["write"] via call-chain multi-hop.
+webhookRouter.post("/inbound", requirePermission("webhooks.write"), async (req, res) => {
+  await webhookService.processInbound(req.body);
+  res.status(202).end();
+});
+
+// CANÁRIO 5 (Onda 2 D9): handler passado por REFERÊNCIA (importado de outro
+// arquivo), que deleta via repo. Flag ON: DELETE /webhooks/inbound/:id com
+// entitiesTouched=["webhook_event"] e a cadeia handler → removeEvent.
+webhookRouter.delete("/inbound/:id", requirePermission("webhooks.delete"), deleteWebhookHandler);
 
 app.use("/webhooks", webhookRouter);
 

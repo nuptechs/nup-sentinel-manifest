@@ -222,9 +222,10 @@ describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda
     try {
       const snap = runPipelineSlice(MINI_EASYNUP);
 
-      const c1 = snap.endpoints.find((e) => e.endpoint === "/webhooks/inbound/:id");
-      assert.ok(c1, "C1: rota Express /webhooks/inbound/:id NÃO virou endpoint com a flag ON");
-      assert.equal(c1!.httpMethod, "GET", "C1: método HTTP errado (esperado GET)");
+      const c1 = snap.endpoints.find(
+        (e) => e.endpoint === "/webhooks/inbound/:id" && e.httpMethod === "GET",
+      );
+      assert.ok(c1, "C1: rota Express GET /webhooks/inbound/:id NÃO virou endpoint com a flag ON");
       assert.deepEqual(
         c1!.requiredRoles,
         ["webhooks.read"],
@@ -238,14 +239,74 @@ describe("ADR-0015 G3 — MANIFEST_MULTISTACK_NODE ON ⇒ superset estrito (Onda
         "C1/C3: rota Express deixou de ligar à entidade Drizzle que o handler lê",
       );
 
-      // Superset estrito: exatamente +1 endpoint / +1 catalog entry, o canário C1.
+      // Superset estrito: exatamente +3 endpoints (canários C1, C4 e C5).
       assert.equal(
         snap.endpoints.length,
-        golden.endpoints.length + 1,
-        "esperado exatamente 1 endpoint novo (o canário C1)",
+        golden.endpoints.length + 3,
+        "esperado exatamente 3 endpoints novos (canários C1, C4 e C5)",
       );
-      assert.equal(snap.totals.endpointEntries, golden.totals.endpointEntries + 1);
-      assert.equal(snap.totals.catalogEntries, golden.totals.catalogEntries + 1);
+      assert.equal(snap.totals.endpointEntries, golden.totals.endpointEntries + 3);
+      assert.equal(snap.totals.catalogEntries, golden.totals.catalogEntries + 3);
+    } finally {
+      delete process.env.MANIFEST_MULTISTACK_NODE;
+    }
+  });
+
+  it("C4 (Onda 2 D8): call-chain multi-hop — handler que DELEGA liga à entidade a 2 arquivos de distância", () => {
+    process.env.MANIFEST_MULTISTACK_NODE = "1";
+    try {
+      const snap = runPipelineSlice(MINI_EASYNUP);
+
+      // A rota POST /webhooks/inbound não toca Drizzle no call-site: o handler
+      // chama webhookService.processInbound (arquivo 2), que chama insertEvent
+      // (arquivo 3), que faz db.insert(webhookEvents). O resolver de call-chain
+      // tem que atravessar a corrente inteira.
+      const c4 = snap.endpoints.find(
+        (e) => e.endpoint === "/webhooks/inbound" && e.httpMethod === "POST",
+      );
+      assert.ok(c4, "C4: rota Express POST /webhooks/inbound NÃO virou endpoint com a flag ON");
+      assert.deepEqual(
+        c4!.requiredRoles,
+        ["webhooks.write"],
+        "C4: permissão do middleware se perdeu",
+      );
+      assert.equal(c4!.technicalOperation, "CREATE", "C4: operação técnica derivada do verbo mudou");
+      assert.deepEqual(
+        c4!.entitiesTouched,
+        ["webhook_event"],
+        "C4: call-chain multi-hop (handler → service → repo → db.insert) não resolveu a entidade",
+      );
+
+      // O multi-hop não pode ter contaminado o C1 (caminho same-file intacto).
+      const c1 = snap.endpoints.find(
+        (e) => e.endpoint === "/webhooks/inbound/:id" && e.httpMethod === "GET",
+      );
+      assert.ok(c1);
+      assert.deepEqual(c1!.entitiesTouched, ["webhook_event"]);
+      assert.deepEqual(c1!.requiredRoles, ["webhooks.read"]);
+    } finally {
+      delete process.env.MANIFEST_MULTISTACK_NODE;
+    }
+  });
+
+  it("C5 (Onda 2 D9): handler passado por REFERÊNCIA (importado) resolve a cadeia até o delete", () => {
+    process.env.MANIFEST_MULTISTACK_NODE = "1";
+    try {
+      const snap = runPipelineSlice(MINI_EASYNUP);
+
+      // A rota DELETE recebe deleteWebhookHandler (importado de outro arquivo),
+      // que chama removeEvent (repo), que faz db.delete(webhookEvents).
+      const c5 = snap.endpoints.find(
+        (e) => e.endpoint === "/webhooks/inbound/:id" && e.httpMethod === "DELETE",
+      );
+      assert.ok(c5, "C5: rota com handler por referência NÃO virou endpoint com a flag ON");
+      assert.deepEqual(c5!.requiredRoles, ["webhooks.delete"], "C5: permissão do middleware se perdeu");
+      assert.equal(c5!.technicalOperation, "DELETE");
+      assert.deepEqual(
+        c5!.entitiesTouched,
+        ["webhook_event"],
+        "C5: call-chain via handler importado não resolveu a entidade",
+      );
     } finally {
       delete process.env.MANIFEST_MULTISTACK_NODE;
     }
