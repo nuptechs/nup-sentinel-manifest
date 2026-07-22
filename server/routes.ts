@@ -1483,10 +1483,10 @@ export async function registerRoutes(
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
       const project = await storage.getProject(projectId);
       if (!project) return res.status(404).json({ message: "Project not found" });
-      const body = req.body?.businessOntology ?? req.body;
+      const { parseProjectOntology, resolveOntologyBody } = await import("./analyzers/functional-impact");
+      const body = resolveOntologyBody(req.body);
       let toStore: unknown = null;
       if (body != null && !(Array.isArray(body) && body.length === 0)) {
-        const { parseProjectOntology } = await import("./analyzers/functional-impact");
         try {
           parseProjectOntology(body); // valida fail-closed (regex + campos)
         } catch (err) {
