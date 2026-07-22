@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { parseUnifiedDiff } from "../../server/analyzers/changed-symbols.ts";
-import { computeFunctionalImpact, parseProjectOntology } from "../../server/analyzers/functional-impact.ts";
+import { computeFunctionalImpact, parseProjectOntology, resolveOntologyBody } from "../../server/analyzers/functional-impact.ts";
 import { computeImpactForDiff, computeImpactForFiles, renderImpactDiffMarkdown } from "../../server/analyzers/impact-analyzer.ts";
 
 const MANIFEST = {
@@ -190,5 +190,21 @@ describe("mapSource (fidelidade de domínio)", () => {
     // acende a caixa do CLIENTE (fatura) e NÃO a de contratação pública (Deflator/glosa não existe no mapa dele)
     assert.deepEqual(r.boxes.map((b) => b.concept), ["Faturamento hospitalar"]);
     assert.match(r.boxes[0].legalBasis, /ANS RN 501/);
+  });
+});
+
+
+describe("resolveOntologyBody (PUT /ontology — remover config)", () => {
+  it("{businessOntology: null} → null (remove); NÃO cai no wrapper (o bug do ??)", () => {
+    assert.equal(resolveOntologyBody({ businessOntology: null }), null);
+  });
+  it("{businessOntology: [array]} → o array", () => {
+    assert.deepEqual(resolveOntologyBody({ businessOntology: [{ concept: "X" }] }), [{ concept: "X" }]);
+  });
+  it("array direto (sem wrapper) → o próprio array", () => {
+    assert.deepEqual(resolveOntologyBody([{ concept: "X" }]), [{ concept: "X" }]);
+  });
+  it("{businessOntology: []} → [] (parser trata como remover)", () => {
+    assert.deepEqual(resolveOntologyBody({ businessOntology: [] }), []);
   });
 });

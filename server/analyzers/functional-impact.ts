@@ -76,6 +76,18 @@ export interface FunctionalImpactReport {
  * DomainConcept[]. Regex inválida ou item malformado ⇒ erro nomeando o campo
  * (fail-closed: ontologia meio-válida não entra). Retorna null p/ entrada nula.
  */
+/**
+ * Resolve o corpo do PUT /ontology: aceita `{businessOntology: X}` OU `X` direto.
+ * `null` EXPLÍCITO em businessOntology = remover a config (retorna null) — sem
+ * cair no wrapper inteiro (o bug do `?? req.body`). Puro.
+ */
+export function resolveOntologyBody(reqBody: unknown): unknown {
+  if (reqBody && typeof reqBody === "object" && "businessOntology" in (reqBody as any)) {
+    return (reqBody as any).businessOntology;
+  }
+  return reqBody;
+}
+
 export function parseProjectOntology(raw: unknown): DomainConcept[] | null {
   if (raw == null) return null;
   if (!Array.isArray(raw)) throw new Error("ontologia deve ser um array de conceitos");
