@@ -253,3 +253,58 @@ describe("resolveBackendModulePath", () => {
     assert.equal(resolveBackendModulePath("src/app.ts", "express", paths), null);
   });
 });
+
+
+// ── ADR-0018 (pronto-pra-cliente): SQL cru + hop-chain ──
+import { sqlTouchesFromText, buildBackendCallChain, resolveTouches as _rt } from "../../server/analyzers/node-backend/call-chain.ts";
+
+describe("sqlTouchesFromText (backend pg/knex sem Drizzle)", () => {
+  it("detecta tabela em SELECT/INSERT/UPDATE/DELETE com op certa", () => {
+    assert.deepEqual(sqlTouchesFromText("SELECT * FROM user_flow_run WHERE id = $1"), [{ entity: "user_flow_run", op: "read" }]);
+    assert.deepEqual(sqlTouchesFromText("INSERT INTO api_keys (name) VALUES ($1)"), [{ entity: "api_keys", op: "write" }]);
+    assert.deepEqual(sqlTouchesFromText("UPDATE projects SET name = $1 WHERE id = $2"), [{ entity: "projects", op: "write" }]);
+    assert.deepEqual(sqlTouchesFromText("DELETE FROM sessions WHERE expired = true"), [{ entity: "sessions", op: "delete" }]);
+  });
+
+  it("JOIN vira read; keyword SQL nunca vira tabela; prosa com 'update' sem SET não toca", () => {
+    const t = sqlTouchesFromText("SELECT a.x FROM orders a JOIN order_items b ON a.id = b.order_id");
+    assert.deepEqual(t.map((x) => x.entity).sort(), ["order_items", "orders"]);
+    assert.deepEqual(sqlTouchesFromText("please update the record from yesterday"), []);
+    assert.deepEqual(sqlTouchesFromText("SELECT 1"), []);
+  });
+
+  it("template SQL multi-parte e texto não-SQL", () => {
+    assert.deepEqual(sqlTouchesFromText("nada a ver"), []);
+  });
+});
+
+describe("hop-chain sem toque (alcance vale por si)", () => {
+  it("handler → service → helper SEM persistência ⇒ cadeia de hops reportada", () => {
+    const files = [
+      { filePath: "routes/a.routes.ts", content: "import { runA } from '../services/a-service';\nexport function handleA(req,res){ return runA(req); }" },
+      { filePath: "services/a-service.ts", content: "import { fmt } from './fmt';\nexport function runA(x){ return fmt(x); }" },
+      { filePath: "services/fmt.ts", content: "export function fmt(x){ return String(x); }" },
+    ];
+    const cc = buildBackendCallChain(files, new Map(), { entryFiles: ["routes/a.routes.ts"] })!;
+    const seed = cc.seedForName("routes/a.routes.ts", "handleA");
+    assert.ok(seed, "seed do handler por nome");
+    const r = _rt([seed!], cc.graph);
+    assert.deepEqual(r.touches, []);
+    assert.ok(r.chain.length >= 2, JSON.stringify(r.chain));
+    assert.match(r.chain[0], /a\.routes/);
+    assert.match(r.chain[1], /a-service/);
+  });
+
+  it("com SQL cru no repo, a cadeia ancora no toque e as ENTIDADES vêm da TABELA", () => {
+    const files = [
+      { filePath: "routes/b.routes.ts", content: "import { save } from '../services/b-service';\nexport function handleB(req,res){ return save(req.body); }" },
+      { filePath: "services/b-service.ts", content: "import { insertRun } from '../repo/run-repo';\nexport function save(x){ return insertRun(x); }" },
+      { filePath: "repo/run-repo.ts", content: "export function insertRun(x){ return pool.query('INSERT INTO user_flow_run (a) VALUES ($1)', [x]); }" },
+    ];
+    const cc = buildBackendCallChain(files, new Map(), { entryFiles: ["routes/b.routes.ts"] })!;
+    const seed = cc.seedForName("routes/b.routes.ts", "handleB");
+    const r = _rt([seed!], cc.graph);
+    assert.deepEqual(r.touches, [{ entity: "user_flow_run", op: "write" }]);
+    assert.equal(r.chain.length, 3, JSON.stringify(r.chain));
+  });
+});
