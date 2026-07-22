@@ -29,6 +29,10 @@ export const projects = pgTable("projects", {
   gitTokenRef: text("git_token_ref"),
   webhookSecret: text("webhook_secret"),
   webhookEnabled: boolean("webhook_enabled").default(false),
+  // ADR-0018 (fidelidade multi-projeto): mapa de negócio POR PROJETO — array de
+  // {concept, legalBasis?, importance, why?, patterns: string[]}. Nulo ⇒ a face
+  // funcional usa o mapa default (contratação pública) COM aviso explícito.
+  businessOntology: jsonb("business_ontology"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { parseUnifiedDiff } from "../../server/analyzers/changed-symbols.ts";
-import { computeFunctionalImpact } from "../../server/analyzers/functional-impact.ts";
+import { computeFunctionalImpact, parseProjectOntology } from "../../server/analyzers/functional-impact.ts";
 import { computeImpactForDiff, computeImpactForFiles, renderImpactDiffMarkdown } from "../../server/analyzers/impact-analyzer.ts";
 
 const MANIFEST = {
@@ -146,5 +146,49 @@ describe("integração impact-diff (aditivo + OFF + markdown)", () => {
 +t
 `));
     assert.match(md, /Nenhuma caixa do mapa de negócio acendeu/);
+  });
+});
+
+
+// ── ADR-0018 (fidelidade multi-projeto): ontologia POR PROJETO ──
+
+describe("parseProjectOntology", () => {
+  it("valida e compila (regex case-insensitive); null passa como null", () => {
+    assert.equal(parseProjectOntology(null), null);
+    const o = parseProjectOntology([
+      { concept: "Pedido", importance: "core", patterns: ["\\border\\b", "pedido"], legalBasis: "", why: "" },
+    ])!;
+    assert.equal(o.length, 1);
+    assert.ok(o[0].patterns[0].test("OrderService") === false); // \border\b não casa OrderService
+    assert.ok(o[0].patterns[1].test("PedidoRepository"));
+  });
+
+  it("FAIL-CLOSED: regex inválida / campo faltando / vazio → erro NOMEANDO o problema", () => {
+    assert.throws(() => parseProjectOntology([{ concept: "X", importance: "core", patterns: ["("] }]), /patterns\[0\].*inválida/);
+    assert.throws(() => parseProjectOntology([{ importance: "core", patterns: ["x"] }]), /concept/);
+    assert.throws(() => parseProjectOntology([{ concept: "X", importance: "alta", patterns: ["x"] }]), /importance/);
+    assert.throws(() => parseProjectOntology([]), /vazia/);
+    assert.throws(() => parseProjectOntology({}), /array/);
+  });
+});
+
+describe("mapSource (fidelidade de domínio)", () => {
+  it("SEM ontologia do projeto → default-procurement COM aviso explícito no method", () => {
+    const r = computeFunctionalImpact([], { entitiesTouched: ["Deflator"] });
+    assert.equal(r.mapSource, "default-procurement");
+    assert.match(r.method, /mapa de negócio DEFAULT/i);
+    assert.match(r.method, /PUT \/api\/projects\/:id\/ontology/);
+  });
+
+  it("COM ontologia do projeto → mapSource 'project', SEM aviso, e as caixas são AS DO CLIENTE", () => {
+    const clientOntology = parseProjectOntology([
+      { concept: "Faturamento hospitalar", importance: "core", patterns: ["fatura", "billing"], legalBasis: "ANS RN 501", why: "núcleo do cliente" },
+    ])!;
+    const r = computeFunctionalImpact([], { entitiesTouched: ["FaturaGuia", "Deflator"] }, undefined, clientOntology);
+    assert.equal(r.mapSource, "project");
+    assert.ok(!/mapa de negócio DEFAULT/i.test(r.method));
+    // acende a caixa do CLIENTE (fatura) e NÃO a de contratação pública (Deflator/glosa não existe no mapa dele)
+    assert.deepEqual(r.boxes.map((b) => b.concept), ["Faturamento hospitalar"]);
+    assert.match(r.boxes[0].legalBasis, /ANS RN 501/);
   });
 });

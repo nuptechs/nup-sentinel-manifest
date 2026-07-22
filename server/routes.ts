@@ -1460,6 +1460,48 @@ export async function registerRoutes(
   // ADR-070 Onda 2 / Propósito 2 — impacto de um DIFF/entrega: "o fornecedor
   // entregou estes N arquivos, o que foi impactado?". Agrega o blast radius de
   // cada arquivo mudado. Body: { files: string[] }.
+  // ADR-0018 (fidelidade multi-projeto): ontologia de negócio POR PROJETO.
+  // GET devolve a configurada (ou null = usa default com aviso). PUT valida
+  // FAIL-CLOSED (regex compilada, campos obrigatórios — ontologia meio-válida
+  // não entra); null/[] remove a configuração.
+  app.get("/api/projects/:projectId/ontology", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      res.json({ projectId, businessOntology: (project as any).businessOntology ?? null });
+    } catch (error) {
+      console.error("Error reading ontology:", error);
+      res.status(500).json({ message: "Failed to read ontology" });
+    }
+  });
+
+  app.put("/api/projects/:projectId/ontology", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      const body = req.body?.businessOntology ?? req.body;
+      let toStore: unknown = null;
+      if (body != null && !(Array.isArray(body) && body.length === 0)) {
+        const { parseProjectOntology } = await import("./analyzers/functional-impact");
+        try {
+          parseProjectOntology(body); // valida fail-closed (regex + campos)
+        } catch (err) {
+          return res.status(400).json({ message: `ontologia inválida: ${(err as Error).message}` });
+        }
+        toStore = body;
+      }
+      await storage.updateProjectOntology(projectId, toStore);
+      res.json({ projectId, businessOntology: toStore, updated: true });
+    } catch (error) {
+      console.error("Error updating ontology:", error);
+      res.status(500).json({ message: "Failed to update ontology" });
+    }
+  });
+
   app.post("/api/projects/:projectId/impact-diff", async (req, res) => {
     try {
       const projectId = parseInt(req.params.projectId);
@@ -1482,7 +1524,50 @@ export async function registerRoutes(
       const manifest = (snapshots[0].manifestJson as any) || {};
       const { computeImpactForFiles, computeImpactForDiff, renderImpactDiffMarkdown } = await import("./analyzers/impact-analyzer");
       const { retrieveAdrsForFiles, renderApplicableAdrsMarkdown } = await import("./analyzers/adr-retrieval");
-      const report = diff ? computeImpactForDiff(manifest, diff) : computeImpactForFiles(manifest, files);
+      // ADR-0018 (fidelidade multi-projeto): ontologia de negócio DO PROJETO —
+      // ausente ⇒ mapa default de contratação pública COM aviso explícito no
+      // relatório (aplicar régua de domínio errada em cliente é infidelidade).
+      const projectRec = await storage.getProject(projectId);
+      let projectOntology: any = null;
+      try {
+        const { parseProjectOntology } = await import("./analyzers/functional-impact");
+        projectOntology = parseProjectOntology((projectRec as any)?.businessOntology ?? null);
+      } catch (err) {
+        console.error(`[impact-diff] ontologia do projeto ${projectId} inválida — usando default: ${err}`);
+      }
+      const report = diff ? computeImpactForDiff(manifest, diff, { ontology: projectOntology }) : computeImpactForFiles(manifest, files);
+
+      // ADR-0018 (fidelidade multi-projeto): FRESCOR do mapa — a análise de
+      // impacto vale o que vale o snapshot. Idade + arquivos do diff que o
+      // mapa NEM CONHECE (novo/renomeado/fora do escopo analisado) viram aviso
+      // explícito em vez de silêncio (o erro que já nos mordeu: snapshot de 5
+      // semanas parecia 'o sistema'). Casamento tolerante por sufixo de path.
+      const generatedAt = typeof manifest.generatedAt === "string" ? manifest.generatedAt : null;
+      const ageDays = generatedAt ? Math.floor((Date.now() - new Date(generatedAt).getTime()) / 86400000) : null;
+      const diffPaths: string[] = diff ? report.perFile.map((f) => f.file) : (files || []);
+      let unknownToMap: string[] = [];
+      try {
+        const known = await storage.getSourceFiles(projectId);
+        const knownPaths = known.map((k) => (k.filePath || "").replace(/^\.?\/+/, ""));
+        unknownToMap = diffPaths.filter((p0) => {
+          const norm = p0.replace(/^\.?\/+/, "");
+          return !knownPaths.some((kp) => kp === norm || kp.endsWith("/" + norm) || norm.endsWith("/" + kp));
+        });
+      } catch (err) {
+        console.error(`[impact-diff] frescor: falha ao listar arquivos do projeto (fail-soft): ${err}`);
+      }
+      const mapInfo = {
+        generatedAt,
+        ageDays,
+        stale: ageDays !== null && ageDays > 14,
+        diffFilesUnknownToMap: unknownToMap,
+        note:
+          unknownToMap.length > 0
+            ? "arquivos do diff DESCONHECIDOS do mapa — snapshot desatualizado, arquivo novo/renomeado, ou fora do escopo analisado; reanalise para fidelidade"
+            : ageDays !== null && ageDays > 14
+              ? "mapa com mais de 14 dias — considere reanalisar"
+              : null,
+      };
       // ADR retrieval é por NOME de arquivo — no modo diff, deriva dos arquivos tocados.
       const filesForAdr: string[] = diff ? report.perFile.map((f) => f.file) : files;
       // ADR-070 Onda 1 — decisões arquiteturais que governam a entrega (advisory).
@@ -1491,7 +1576,7 @@ export async function registerRoutes(
       // SÓ quando MANIFEST_REPORT_HMAC_KEY existe; sem a chave o response é
       // byte-a-byte o de antes (OFF honesto — nunca assinatura fake).
       const hmacKey = process.env.MANIFEST_REPORT_HMAC_KEY;
-      const payload = { projectId, analysisRunId: snapshots[0].analysisRunId, ...report, applicableAdrs };
+      const payload = { projectId, analysisRunId: snapshots[0].analysisRunId, mapInfo, ...report, applicableAdrs };
       let signature: import("./analyzers/report-signature").ReportSignature | undefined;
       if (hmacKey) {
         const { signReport } = await import("./analyzers/report-signature");
@@ -1500,8 +1585,17 @@ export async function registerRoutes(
       // ADR-070 Propósito 2 — `?format=md` devolve o relatório pronto p/
       // documentação (anexo de recebimento de entrega do fornecedor).
       if (String(req.query.format || "").toLowerCase() === "md") {
-        const project = await storage.getProject(projectId);
-        let md = renderImpactDiffMarkdown(report, { projectName: project?.name })
+        let md = renderImpactDiffMarkdown(report, { projectName: projectRec?.name });
+        if (mapInfo.generatedAt || mapInfo.diffFilesUnknownToMap.length) {
+          const staleFlag = mapInfo.stale ? " ⚠️ DESATUALIZADO" : "";
+          let header = `> **Mapa do sistema:** gerado em ${mapInfo.generatedAt ?? "?"} (${mapInfo.ageDays ?? "?"} dia(s))${staleFlag}`;
+          if (mapInfo.diffFilesUnknownToMap.length) {
+            const fileList = mapInfo.diffFilesUnknownToMap.slice(0, 5).map((f) => "`" + f + "`").join(", ");
+            header += `\n> ⚠️ ${mapInfo.diffFilesUnknownToMap.length} arquivo(s) do diff DESCONHECIDO(S) do mapa: ${fileList}${mapInfo.diffFilesUnknownToMap.length > 5 ? "…" : ""} — ${mapInfo.note}`;
+          }
+          md = md.replace("\n", `\n\n${header}\n`);
+        }
+        md = md
           + (applicableAdrs.length ? "\n" + renderApplicableAdrsMarkdown(applicableAdrs) : "");
         if (signature) {
           const { renderSignatureFooter } = await import("./analyzers/report-signature");
