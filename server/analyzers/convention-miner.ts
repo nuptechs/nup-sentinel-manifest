@@ -62,6 +62,20 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Restringe o conjunto de suporte à EXTENSÃO DOMINANTE — e é ESSE subconjunto
+ * que vira claim/minSites/contagens (auditoria 2026-07-23, furo C: contar
+ * todas as extensões no claim mas gatear só a dominante superdeclarava o
+ * suporte e podia auto-rejeitar o próprio candidato em fileset poliglota).
+ */
+function restrictToDominantExtension(files: Set<string>): { ext: string | undefined; files: Set<string> } {
+  const ext = dominantExtension(files);
+  if (!ext) return { ext: undefined, files };
+  const restricted = new Set<string>();
+  for (const f of Array.from(files)) if (f.toLowerCase().endsWith(ext.toLowerCase())) restricted.add(f);
+  return { ext, files: restricted };
+}
+
 /** Extensão dominante entre os arquivos de suporte (vira o fileGlob da regra). */
 function dominantExtension(files: Iterable<string>): string | undefined {
   const counts = new Map<string, number>();
@@ -108,10 +122,14 @@ export function mineLayerSuffixes(
   // Domina: se "ServiceV1" tem o MESMO conjunto de arquivos que "V1", o mais
   // longo é a convenção real e o curto é sombra — mantém o mais informativo.
   const entries = Array.from(stats.entries())
-    .filter(([, s]) => s.files.size >= minFiles)
+    .map(([suffix, st]) => {
+      const { ext, files: dom } = restrictToDominantExtension(st.files);
+      return [suffix, { support: st.support, files: dom, ext }] as const;
+    })
+    .filter(([, st]) => st.files.size >= minFiles)
     .sort((a, b) => b[1].files.size - a[1].files.size || b[0].length - a[0].length);
 
-  const kept: [string, { support: number; files: Set<string> }][] = [];
+  const kept: (readonly [string, { support: number; files: Set<string>; ext: string | undefined }])[] = [];
   for (const [suffix, s] of entries) {
     const shadowed = kept.some(
       ([other, os]) =>
@@ -126,10 +144,12 @@ export function mineLayerSuffixes(
     distinctFiles: s.files.size,
     rule: {
       id: `mined-suffix-${suffix.toLowerCase()}`,
-      claim: `Classes de camada terminam em "${suffix}" (${s.files.size} arquivos)`,
+      // Claim conta SÓ os arquivos da extensão dominante — o MESMO conjunto
+      // que o gate vai medir (claim==gate, sem superdeclaração).
+      claim: `Classes de camada terminam em "${suffix}" (${s.files.size} arquivos ${s.ext ?? ""})`.trim(),
       kind: "layer-suffix",
       pattern: `\\bclass\\s+\\w+${escapeRe(suffix)}\\b`,
-      ...(dominantExtension(s.files) ? { fileGlob: dominantExtension(s.files) } : {}),
+      ...(s.ext ? { fileGlob: s.ext } : {}),
       minSites: Math.min(DEFAULT_MIN_FILES, s.files.size),
     },
   }));
@@ -180,7 +200,11 @@ export function mineRouteAnchors(
   }
 
   const kept = Array.from(stats.entries())
-    .filter(([, s]) => s.files.size >= minFiles)
+    .map(([anchor, st]) => {
+      const { ext, files: dom } = restrictToDominantExtension(st.files);
+      return [anchor, { support: st.support, files: dom, ext, sample: st.sample }] as const;
+    })
+    .filter(([, st]) => st.files.size >= minFiles)
     .sort((a, b) => b[1].files.size - a[1].files.size)
     .slice(0, MAX_RULES_PER_FAMILY);
 
@@ -192,10 +216,10 @@ export function mineRouteAnchors(
       distinctFiles: s.files.size,
       rule: {
         id: `mined-route-${anchor.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`,
-        claim: `Rotas registradas via ${anchor}("<path>") — ex.: ${s.sample} (${s.files.size} arquivos)`,
+        claim: `Rotas registradas via ${anchor}("<path>") — ex.: ${s.sample} (${s.files.size} arquivos ${s.ext ?? ""})`.trim(),
         kind: "endpoint",
         pattern: `${escapeRe(anchor)}\\s*\\(\\s*["'](\\/[^"']*)["']`,
-        ...(dominantExtension(s.files) ? { fileGlob: dominantExtension(s.files) } : {}),
+        ...(s.ext ? { fileGlob: s.ext } : {}),
         minSites: Math.min(DEFAULT_MIN_FILES, s.files.size),
         endpoint: { pathTemplate: "$1", httpMethod: method },
       },
