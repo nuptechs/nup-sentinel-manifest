@@ -15,6 +15,7 @@ import InsightsPage from "@/pages/insights";
 import DiffViewerPage from "@/pages/diff-viewer";
 import GitIntegrationPage from "@/pages/git-integration";
 import SettingsPage from "@/pages/settings";
+import ConventionsPage from "@/pages/conventions";
 import SecurityAuditPage from "@/pages/security-audit";
 
 function Router() {
@@ -27,6 +28,7 @@ function Router() {
       <Route path="/diff" component={DiffViewerPage} />
       <Route path="/git" component={GitIntegrationPage} />
       <Route path="/security" component={SecurityAuditPage} />
+      <Route path="/conventions" component={ConventionsPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route component={NotFound} />
     </Switch>
