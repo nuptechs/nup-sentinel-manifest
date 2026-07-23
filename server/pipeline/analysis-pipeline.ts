@@ -367,17 +367,17 @@ export class AnalysisPipeline {
       }
       const endpoints = computeProfileEndpoints(files, report.admitted);
       if (mode === "shadow") {
-        this.progress(
-          "Step 1/4",
-          `Convention profile SHADOW: ${endpoints.length} endpoint(s) de ${report.admitted.length} regra(s) admitida(s) SERIAM adicionados (não consumido)`,
-        );
+        const msg = `Convention profile SHADOW [projeto ${projectId}]: ${endpoints.length} endpoint(s) de ${report.admitted.length} regra(s) admitida(s) SERIAM adicionados (não consumido)`;
+        // console TAMBÉM: o papel do shadow é ser INSPECIONÁVEL nos logs do
+        // Railway — progress() vai só pro SSE (invisível pós-request).
+        console.log(`[convention-profile] ${msg}`);
+        this.progress("Step 1/4", msg);
         return;
       }
       const added = augmentGraphWithProfile(appGraph, endpoints);
-      this.progress(
-        "Step 1/4",
-        `Convention profile ON: +${added} endpoint(s) sintético(s) de ${report.admitted.length} regra(s) admitida(s)`,
-      );
+      const onMsg = `Convention profile ON [projeto ${projectId}]: +${added} endpoint(s) sintético(s) de ${report.admitted.length} regra(s) admitida(s)`;
+      console.log(`[convention-profile] ${onMsg}`);
+      this.progress("Step 1/4", onMsg);
     } catch (err) {
       console.warn(`[convention-profile] fail-soft (análise segue sem perfil): ${(err as Error).message}`);
     }

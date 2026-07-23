@@ -1820,6 +1820,16 @@ export async function registerRoutes(
       const fileData = scannedFiles.map(f => ({ filePath: f.filePath, content: f.content }));
       const pipeline = new AnalysisPipeline();
       const result = await pipeline.runFullAnalysis(projectId, fileData);
+      // ADR-0020 Onda 5 — DRIFT: reindex trocou o fileset ⇒ o perfil re-minera
+      // e re-verifica contra os arquivos ATUAIS (fail-soft, manual vence).
+      {
+        const { refreshMinedProfile } = await import("./analyzers/convention-miner");
+        await refreshMinedProfile(
+          storage,
+          projectId,
+          fileData.map((f: any) => ({ filePath: f.filePath, content: f.content ?? "" })),
+        );
+      }
 
       res.json({
         projectId,
@@ -2874,6 +2884,15 @@ export async function registerRoutes(
           const pipeline = new AnalysisPipeline();
           await pipeline.runFullAnalysis(project.id, files.map((f) => ({ filePath: f.filePath, content: f.content })));
           console.log(`[github-app] auto-onboard: projeto ${project.id} indexado (${files.length} arquivos)`);
+          // ADR-0020 Onda 5 — o ConventionProfile NASCE no onboarding: minera
+          // estatisticamente + gate D4 + grava (fail-soft; manual vence).
+          const { refreshMinedProfile } = await import("./analyzers/convention-miner");
+          await refreshMinedProfile(
+            storage,
+            project.id,
+            files.map((f) => ({ filePath: f.filePath, content: f.content ?? "" })),
+            (m) => console.log(`[github-app] ${m}`),
+          );
         }
 
         const gitProvider = await createGitProvider({ provider: "github", repoUrl, token: instToken });
