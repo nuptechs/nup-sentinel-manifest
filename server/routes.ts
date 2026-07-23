@@ -1502,6 +1502,97 @@ export async function registerRoutes(
     }
   });
 
+  // ── ADR-0020 r2 Onda 1 — ConventionProfile (GET/PUT) ─────────────────────
+  // 2ª instância do mecanismo businessOntology: JSONB por projeto, validação
+  // fail-closed, e — diferença central — o PUT roda o GATE DE VERIFICAÇÃO
+  // contra os arquivos armazenados e devolve admitted/rejected com razões.
+  // Regra rejeitada É armazenada (rascunho revisável) mas NUNCA é consumida:
+  // o pipeline re-roda o gate a cada análise (a verificação de verdade é
+  // sempre contra os arquivos ATUAIS, nunca um carimbo velho).
+  app.get("/api/projects/:projectId/convention-profile", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+      const { profilerMode } = await import("./analyzers/convention-profile");
+      res.json({
+        projectId,
+        mode: profilerMode(),
+        conventionProfile: (project as any).conventionProfile ?? null,
+      });
+    } catch (error) {
+      console.error("Error reading convention profile:", error);
+      res.status(500).json({ message: "Failed to read convention profile" });
+    }
+  });
+
+  app.put("/api/projects/:projectId/convention-profile", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+
+      const { parseConventionProfile, verifyConventionProfile, profilerMode } = await import(
+        "./analyzers/convention-profile"
+      );
+
+      const body = (req.body && typeof req.body === "object" && "conventionProfile" in req.body)
+        ? (req.body as any).conventionProfile
+        : req.body;
+
+      // Remoção explícita: null limpa o perfil (mesmo contrato do ontology PUT).
+      if (body == null) {
+        await storage.updateProjectConventionProfile(projectId, null);
+        const { clearProjectCache } = await import("./pipeline/analysis-pipeline");
+        clearProjectCache(projectId);
+        return res.json({ projectId, conventionProfile: null, updated: true });
+      }
+
+      let profile;
+      try {
+        profile = parseConventionProfile(body); // fail-closed: regex compila, campos válidos
+      } catch (err) {
+        return res.status(400).json({ message: `perfil inválido: ${(err as Error).message}` });
+      }
+
+      // GATE D4 no momento do save — feedback imediato de quais regras passam
+      // nos arquivos ATUAIS do projeto (o pipeline re-verifica a cada análise).
+      const files = await storage.getSourceFiles(projectId);
+      const report = verifyConventionProfile(
+        profile,
+        files.map((f: any) => ({ filePath: f.filePath, content: f.content ?? "" })),
+      );
+
+      await storage.updateProjectConventionProfile(projectId, profile);
+
+      // Perfil mudou ⇒ o grafo cacheado (construído com o perfil anterior)
+      // está obsoleto. Sem isto o modo "on" serviria análise velha por 30min.
+      const { clearProjectCache } = await import("./pipeline/analysis-pipeline");
+      clearProjectCache(projectId);
+
+      res.json({
+        projectId,
+        updated: true,
+        mode: profilerMode(),
+        verification: {
+          verifiedAt: report.verifiedAt,
+          admitted: report.admitted.map((a) => ({
+            ruleId: a.rule.id,
+            sites: a.sites,
+            distinctFiles: a.distinctFiles,
+            sample: a.sample.slice(0, 2),
+          })),
+          rejected: report.rejected.map((r) => ({ ruleId: r.rule.id, reason: r.reason })),
+        },
+      });
+    } catch (error) {
+      console.error("Error updating convention profile:", error);
+      res.status(500).json({ message: "Failed to update convention profile" });
+    }
+  });
+
   // ADR-0019 Onda 2 — AUTO-MAP: refresca o mapa de um projeto EXISTENTE a
   // partir de um zip (a Action roda isto no push pra main). Substitui os
   // arquivos armazenados (mesmo padrão do analyze-branch) e roda a análise

@@ -141,6 +141,11 @@ export class AnalysisPipeline {
         appGraph = result.appGraph;
         resolutionErrors = result.resolutionErrors;
         archType = result.archResult.type;
+        // ADR-0020 r2 Onda 1 — ConventionProfile: seam ADITIVA, gated por
+        // MANIFEST_CONVENTION_PROFILER (off default = byte-a-byte). Roda ANTES
+        // do analyzeEndpoints e do cache-set, então endpoints + cache já saem
+        // com o perfil aplicado (cache-hit herda; PUT do perfil invalida).
+        await this.applyConventionProfile(projectId, appGraph, fileData);
         endpointImpacts = this.analyzeEndpoints(appGraph);
 
         const graphJson = appGraph.toJSON();
@@ -325,6 +330,57 @@ export class AnalysisPipeline {
       content: f.content,
     }));
     return this.runFullAnalysis(projectId, fileData);
+  }
+
+  /**
+   * ADR-0020 r2 Onda 1 — aplica o ConventionProfile do projeto ao grafo.
+   * off (default): retorna sem tocar NADA (byte-a-byte — nem storage é lido).
+   * shadow: verifica + LOGA o que seria adicionado; grafo intocado.
+   * on: injeta nós CONTROLLER sintéticos SÓ das regras admitidas pelo gate.
+   * SEMPRE fail-soft: perfil quebrado nunca derruba a análise.
+   */
+  private async applyConventionProfile(
+    projectId: number,
+    appGraph: any,
+    fileData: FileData[],
+  ): Promise<void> {
+    const { profilerMode } = await import("../analyzers/convention-profile");
+    const mode = profilerMode();
+    if (mode === "off") return;
+    try {
+      const project = await storage.getProject(projectId);
+      const raw = (project as any)?.conventionProfile;
+      if (!raw) return;
+      const { parseConventionProfile, verifyConventionProfile } = await import(
+        "../analyzers/convention-profile"
+      );
+      const { computeProfileEndpoints, augmentGraphWithProfile } = await import(
+        "../analyzers/profile-augment"
+      );
+      const profile = parseConventionProfile(raw);
+      const files = fileData.map((f) => ({ filePath: f.filePath, content: f.content }));
+      // O gate roda contra os arquivos ATUAIS a cada análise — carimbo de
+      // verificação armazenado é advisory, nunca a autoridade (anti-drift).
+      const report = verifyConventionProfile(profile, files);
+      for (const rej of report.rejected) {
+        this.progress("Step 1/4", `Convention profile: regra "${rej.rule.id}" NÃO admitida — ${rej.reason}`);
+      }
+      const endpoints = computeProfileEndpoints(files, report.admitted);
+      if (mode === "shadow") {
+        this.progress(
+          "Step 1/4",
+          `Convention profile SHADOW: ${endpoints.length} endpoint(s) de ${report.admitted.length} regra(s) admitida(s) SERIAM adicionados (não consumido)`,
+        );
+        return;
+      }
+      const added = augmentGraphWithProfile(appGraph, endpoints);
+      this.progress(
+        "Step 1/4",
+        `Convention profile ON: +${added} endpoint(s) sintético(s) de ${report.admitted.length} regra(s) admitida(s)`,
+      );
+    } catch (err) {
+      console.warn(`[convention-profile] fail-soft (análise segue sem perfil): ${(err as Error).message}`);
+    }
   }
 
   private async buildGraph(fileData: FileData[]) {

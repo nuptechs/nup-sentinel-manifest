@@ -36,6 +36,9 @@ export const projects = pgTable("projects", {
   // {concept, legalBasis?, importance, why?, patterns: string[]}. Nulo ⇒ a face
   // funcional usa o mapa default (contratação pública) COM aviso explícito.
   businessOntology: jsonb("business_ontology"),
+  // ADR-0020 r2 Onda 1 — perfil de convenções por projeto (regras executáveis
+  // verificadas pelo gate; 2ª instância do mecanismo businessOntology).
+  conventionProfile: jsonb("convention_profile"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 
