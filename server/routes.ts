@@ -209,7 +209,22 @@ export async function registerRoutes(
       const format = options?.format || "manifest";
       const projectName = options?.projectName || `headless-${Date.now()}`;
 
-      const project = await storage.createProject({ name: projectName, description: "Headless analysis" });
+      // Reuso por NOME (anti-duplicação): caller que NOMEIA o projeto (ex. o
+      // cron manifest_analyze do Sentinel com 'easynup-cron') REUSA o projeto
+      // existente e substitui os fontes — sem isto cada run noturno criava um
+      // projeto novo (colcha real: 4× 'easynup-cron' em produção até 2026-07-23).
+      // Sem projectName explícito (headless-<ts>), segue criando — byte-a-byte.
+      let project = options?.projectName
+        ? await storage.getProjectByName(projectName)
+        : undefined;
+      if (project) {
+        await storage.deleteSourceFilesByProject(project.id);
+        // fontes trocaram — grafo cacheado é de outro fileset
+        const { clearProjectCache } = await import("./pipeline/analysis-pipeline");
+        clearProjectCache(project.id);
+      } else {
+        project = await storage.createProject({ name: projectName, description: "Headless analysis" });
+      }
       const fileData = files.map((f: any) => ({
         filePath: f.path,
         content: f.content,
