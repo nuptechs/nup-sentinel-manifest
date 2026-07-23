@@ -1677,6 +1677,113 @@ export async function registerRoutes(
     }
   });
 
+  // ── ADR-0020 r2 Onda 3 — hipóteses por IA (D3), gated pelo MESMO gate D4 ──
+  // A IA propõe regras ADICIONAIS sobre o que a estatística não captou; cada
+  // uma exige citação (arquivo:linhas) e é EXECUTADA no repo — 0 matches =
+  // morta. Sem OPENAI_API_KEY ⇒ {skipped:'llm_unconfigured'} (perfil segue
+  // só-estatístico — degradação honesta, nunca erro). body {apply:true}
+  // mescla os ADMITIDOS (ids ai-*, regra existente com mesmo id VENCE).
+  app.post("/api/projects/:projectId/convention-profile/hypothesize", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+
+      const { mineConventionProfile, mergeMinedIntoProfile } = await import("./analyzers/convention-miner");
+      const { generateHypotheses, hypothesesAsProfile } = await import("./analyzers/hypothesis-generator");
+      const { parseConventionProfile, verifyConventionProfile, profilerMode } = await import(
+        "./analyzers/convention-profile"
+      );
+
+      const files = await storage.getSourceFiles(projectId);
+      const profileFiles = files.map((f: any) => ({ filePath: f.filePath, content: f.content ?? "" }));
+
+      // Contexto estatístico (o "não repita" do prompt) — mesmo minerador da /mine.
+      const { report: statReport } = mineConventionProfile(profileFiles, {});
+
+      // Porta LLM: construída SÓ se houver chave (senão null ⇒ skipped honesto).
+      const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+      let llm = null as null | ((prompt: string) => Promise<string>);
+      if (apiKey) {
+        const { default: OpenAI } = await import("openai");
+        const client = new OpenAI({
+          apiKey,
+          ...(process.env.AI_INTEGRATIONS_OPENAI_BASE_URL
+            ? { baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL }
+            : {}),
+        });
+        const model = process.env.CONVENTION_LLM_MODEL || "gpt-4o-mini";
+        llm = async (prompt: string) => {
+          const r = await client.chat.completions.create({
+            model,
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0,
+          });
+          return r.choices?.[0]?.message?.content ?? "";
+        };
+      }
+
+      const gen = await generateHypotheses(profileFiles, statReport.admitted, llm);
+      if (gen.skipped) {
+        return res.json({
+          projectId,
+          skipped: true,
+          reason: gen.reason,
+          mode: profilerMode(),
+          proposedByLlm: 0,
+          dropped: gen.dropped,
+        });
+      }
+
+      // GATE D4 — a mesma régua de qualquer fonte: a eloquência não conta,
+      // só a contagem no código.
+      const gateReport = verifyConventionProfile(hypothesesAsProfile(gen.candidates), profileFiles);
+
+      let applied = false;
+      if ((req.body as any)?.apply === true && gateReport.admitted.length > 0) {
+        let existing: any = null;
+        const rawExisting = (project as any).conventionProfile;
+        if (rawExisting) {
+          try {
+            existing = parseConventionProfile(rawExisting);
+          } catch {
+            existing = null;
+          }
+        }
+        const merged = mergeMinedIntoProfile(existing, gateReport.admitted.map((a) => a.rule));
+        merged.source = existing?.source ? `${existing.source}+llm` : "llm-hypothesis";
+        await storage.updateProjectConventionProfile(projectId, merged);
+        const { clearProjectCache } = await import("./pipeline/analysis-pipeline");
+        clearProjectCache(projectId);
+        applied = true;
+      }
+
+      res.json({
+        projectId,
+        skipped: false,
+        applied,
+        mode: profilerMode(),
+        proposedByLlm: gen.proposedByLlm,
+        droppedPreGate: gen.dropped,
+        verification: {
+          verifiedAt: gateReport.verifiedAt,
+          admitted: gateReport.admitted.map((a) => ({
+            ruleId: a.rule.id,
+            claim: a.rule.claim,
+            kind: a.rule.kind,
+            sites: a.sites,
+            distinctFiles: a.distinctFiles,
+          })),
+          rejected: gateReport.rejected.map((r) => ({ ruleId: r.rule.id, reason: r.reason })),
+        },
+      });
+    } catch (error) {
+      console.error("Error generating convention hypotheses:", error);
+      res.status(500).json({ message: "Failed to generate convention hypotheses" });
+    }
+  });
+
   // ADR-0019 Onda 2 — AUTO-MAP: refresca o mapa de um projeto EXISTENTE a
   // partir de um zip (a Action roda isto no push pra main). Substitui os
   // arquivos armazenados (mesmo padrão do analyze-branch) e roda a análise
