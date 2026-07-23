@@ -47,7 +47,7 @@ export async function buildImpactForDiff(
   // ADR-0021 r2 Onda 4 — consumidores cross-repo do índice de símbolos
   // (env-gated + fail-soft: sem envs/índice fora ⇒ laudo byte-a-byte).
   try {
-    const { consumersConfigFromEnv, fetchCrossRepoConsumers, repoSlugOf } = await import(
+    const { consumersConfigFromEnv, fetchCrossRepoConsumers, repoSlugOf, bareSymbolName } = await import(
       "./analyzers/cross-repo-consumers"
     );
     const cfg = consumersConfigFromEnv();
@@ -57,14 +57,28 @@ export async function buildImpactForDiff(
     // o ponto cego que o índice de símbolos cobre — a quebra que o grafo
     // não alcança pode ter consumidores INDEXADOS (mesmo cross-repo).
     const inconclusive = (report as any)?.breaking?.inconclusive ?? [];
-    const querySymbols = [...alerts.map((a: any) => a.symbol), ...inconclusive.map((i: any) => i.symbol)];
+    // suppressedDead TAMBÉM entra: o índice é a SEGUNDA OPINIÃO da supressão
+    // de Ochoa — 'sem consumidor no grafo' com consumo indexado = contestada.
+    const suppressed = (report as any)?.breaking?.suppressedDead ?? [];
+    const querySymbols = [
+      ...alerts.map((a: any) => a.symbol),
+      ...inconclusive.map((i: any) => i.symbol),
+      ...suppressed.map((d: any) => d.symbol),
+    ];
     if (cfg && repoSlug && querySymbols.length > 0) {
       const section = await fetchCrossRepoConsumers(
         querySymbols,
         repoSlug,
         cfg,
       );
-      if (section) (report as any).crossRepoConsumers = section;
+      if (section) {
+        const suppressedBare = new Set(suppressed.map((d: any) => bareSymbolName(d.symbol)));
+        const contested = section.bySymbol
+          .filter((b) => suppressedBare.has(b.symbol))
+          .map((b) => ({ symbol: b.symbol, totalConsumers: b.totalConsumers }));
+        if (contested.length > 0) section.contested = contested;
+        (report as any).crossRepoConsumers = section;
+      }
     }
   } catch {
     /* fail-soft: laudo segue sem a seção */

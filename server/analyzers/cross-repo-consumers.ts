@@ -34,6 +34,13 @@ export interface CrossRepoSection {
   noConsumers: string[];
   /** Falhas de consulta (fail-soft, nomeadas nos limites do laudo). */
   errors: string[];
+  /**
+   * Supressões breaking-but-dead CONTESTADAS pelo índice: o grafo não viu
+   * consumidor, mas o índice viu N consumos. O veredito do grafo fica de pé
+   * (não des-suprime — precisão>recall), mas a contradição é ANUNCIADA:
+   * a segunda opinião que a supressão de Ochoa não tinha.
+   */
+  contested?: { symbol: string; totalConsumers: number }[];
 }
 
 const MAX_SYMBOLS = 8;
@@ -134,6 +141,13 @@ export function renderCrossRepoSection(section: CrossRepoSection): string[] {
   }
   if (section.noConsumers.length > 0 && section.bySymbol.length > 0) {
     L.push(`> Sem consumidor indexado: ${section.noConsumers.map((n) => `\`${n}\``).join(", ")}.`);
+  }
+  if (section.contested && section.contested.length > 0) {
+    for (const c of section.contested) {
+      L.push(
+        `> 🔴 **Supressão contestada pelo índice**: \`${c.symbol}\` foi suprimida como breaking-but-dead (o grafo não vê consumidor), mas o índice de símbolos registra **${c.totalConsumers} consumo(s)** — revisar antes de confiar na supressão.`,
+      );
+    }
   }
   if (section.errors.length > 0) {
     L.push(`> ⚠️ Consultas ao índice que falharam (fail-soft): ${section.errors.join("; ")}.`);

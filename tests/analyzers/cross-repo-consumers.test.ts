@@ -100,3 +100,18 @@ describe("renderCrossRepoSection", () => {
     assert.match(md, /Sem consumidor indexado: `orfao`/);
   });
 });
+
+describe("supressão contestada (segunda opinião do índice)", () => {
+  it("render anuncia 🔴 quando o grafo suprimiu mas o índice vê consumo", () => {
+    const md = renderCrossRepoSection({
+      repoSlug: "nuptechs/easynup",
+      bySymbol: [{ symbol: "asyncHandler", totalConsumers: 84, repos: [] }],
+      noConsumers: [],
+      errors: [],
+      contested: [{ symbol: "asyncHandler", totalConsumers: 84 }],
+    }).join("\n");
+    assert.match(md, /Supressão contestada pelo índice/);
+    assert.match(md, /84 consumo\(s\)/);
+    assert.match(md, /revisar antes de confiar na supressão/);
+  });
+});
