@@ -34,6 +34,7 @@ export interface IStorage {
 
   getProjects(): Promise<Project[]>;
   getProject(id: number): Promise<Project | undefined>;
+  getProjectByName(name: string): Promise<Project | undefined>;
   createProject(project: InsertProject): Promise<Project>;
   updateProjectStatus(id: number, status: string, fileCount?: number): Promise<void>;
   updateProjectGitConfig(id: number, config: { gitProvider: string; gitRepoUrl: string; gitDefaultBranch: string; gitTokenRef: string }): Promise<void>;
@@ -107,6 +108,16 @@ export class DatabaseStorage implements IStorage {
   async getProject(id: number): Promise<Project | undefined> {
     const [project] = await db.select().from(projects).where(eq(projects.id, id));
     return project;
+  }
+
+  async getProjectByName(name: string): Promise<Project | undefined> {
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(eq(projects.name, name))
+      .orderBy(desc(projects.id))
+      .limit(1);
+    return project || undefined;
   }
 
   async createProject(project: InsertProject): Promise<Project> {
