@@ -44,6 +44,26 @@ export async function buildImpactForDiff(
   }
 
   const report = computeImpactForDiff(manifest, diff, { ontology: projectOntology });
+  // ADR-0021 r2 Onda 4 — consumidores cross-repo do índice de símbolos
+  // (env-gated + fail-soft: sem envs/índice fora ⇒ laudo byte-a-byte).
+  try {
+    const { consumersConfigFromEnv, fetchCrossRepoConsumers, repoSlugOf } = await import(
+      "./analyzers/cross-repo-consumers"
+    );
+    const cfg = consumersConfigFromEnv();
+    const repoSlug = repoSlugOf((projectRec as any)?.gitRepoUrl);
+    const alerts = (report as any)?.breaking?.alerts ?? [];
+    if (cfg && repoSlug && alerts.length > 0) {
+      const section = await fetchCrossRepoConsumers(
+        alerts.map((a: any) => a.symbol),
+        repoSlug,
+        cfg,
+      );
+      if (section) (report as any).crossRepoConsumers = section;
+    }
+  } catch {
+    /* fail-soft: laudo segue sem a seção */
+  }
   const filesForAdr: string[] = report.perFile.map((f) => f.file);
   const applicableAdrs = retrieveAdrsForFiles(Array.isArray(manifest.adrIndex) ? manifest.adrIndex : [], filesForAdr);
 
