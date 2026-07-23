@@ -56,7 +56,7 @@ export function computeProfileEndpoints(
     const method = rule.endpoint.httpMethod ?? "POST";
     let perRule = 0;
 
-    for (const m of matcher.match(rule, files)) {
+    for (const m of matcher.match(rule, files).matches) {
       const path = renderPathTemplate(rule.endpoint.pathTemplate, m.groups);
       if (!path) continue; // grupo ausente ⇒ endpoint indeterminado — pula, nunca inventa
       if (!path.startsWith("/")) continue; // template grupo-puro com captura não-rota — nunca inventa

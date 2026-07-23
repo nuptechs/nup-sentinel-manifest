@@ -211,22 +211,51 @@ export interface PatternMatch {
 }
 
 /**
+ * Resultado do matcher: CONTAGENS EXATAS + amostra capada.
+ *
+ * Auditoria 2026-07-23 (furo B): o cap antigo de 5.000 matches truncava a
+ * PRÓPRIA contagem — falso-negativo dependente de ordem (1 arquivo gigante
+ * esgotava o cap e escondia os demais), razão anti-largo subestimada e
+ * `sites` capado no relatório humano. Agora: `sites`/`files`/`citationHit`
+ * são exatos (a varredura NUNCA para cedo); só `matches` (a amostra que
+ * alimenta samples e a materialização de endpoints) é capada.
+ */
+export interface MatchReport {
+  /** Amostra de ocorrências (≤ MATCH_STORE_CAP) — para samples/endpoints. */
+  matches: PatternMatch[];
+  /** Contagem EXATA de ocorrências. */
+  sites: number;
+  /** Arquivos DISTINTOS com ≥1 ocorrência (exato). */
+  files: string[];
+  /** true/false quando a regra tem citação; null quando não tem. */
+  citationHit: boolean | null;
+}
+
+/**
  * Porta plugável (ADR-0020 D4): o rigor do gate é o INVARIANTE (≥N sites
  * distintos + citação que resolve), não a ferramenta. V1 = regex ancorado;
  * adapters estruturais (TsAst / TreeSitter da ADR-0021) plugam aqui sem
  * tocar o gate nem o pipeline.
  */
 export interface PatternMatcher {
-  match(rule: ConventionRule, files: ProfileFile[]): PatternMatch[];
+  match(rule: ConventionRule, files: ProfileFile[]): MatchReport;
 }
 
 const COMMENT_LINE_RE = /^\s*(\/\/|\*|\/\*|#|<!--)/;
-const MAX_MATCHES_PER_RULE = 5_000;
+/** Cap da AMOSTRA armazenada — nunca das contagens (exatas por contrato). */
+const MATCH_STORE_CAP = 20_000;
 
 export class RegexAnchoredMatcher implements PatternMatcher {
-  match(rule: ConventionRule, files: ProfileFile[]): PatternMatch[] {
+  match(rule: ConventionRule, files: ProfileFile[]): MatchReport {
     const flags = (rule.patternFlags || "").replace(/g/g, "");
-    const out: PatternMatch[] = [];
+    // Regex içada pra fora dos loops (furo A da auditoria: recompilar por
+    // linha custava milhões de new RegExp por análise; sem flag g o exec é
+    // stateless — não há estado a resetar).
+    const re = new RegExp(rule.pattern, flags);
+    const matches: PatternMatch[] = [];
+    const filesMatched = new Set<string>();
+    let sites = 0;
+    let citationHit: boolean | null = rule.cited ? false : null;
 
     for (const file of files) {
       if (!fileMatchesGlob(file.filePath, rule.fileGlob)) continue;
@@ -236,15 +265,24 @@ export class RegexAnchoredMatcher implements PatternMatcher {
         // Anti-superalarme herdado do changed-symbols: linha de comentário não
         // é evidência de convenção (Javadoc citando "WsV1" não é um WsV1).
         if (COMMENT_LINE_RE.test(lineText)) continue;
-        const re = new RegExp(rule.pattern, flags); // por linha — sem estado g entre linhas
         const m = re.exec(lineText);
-        if (m) {
-          out.push({ file: file.filePath, line: i + 1, text: lineText.trim().slice(0, 200), groups: m.slice(1) });
-          if (out.length >= MAX_MATCHES_PER_RULE) return out;
+        if (!m) continue;
+        sites++;
+        filesMatched.add(file.filePath);
+        if (
+          rule.cited &&
+          file.filePath === rule.cited.file &&
+          i + 1 >= rule.cited.lineStart &&
+          i + 1 <= rule.cited.lineEnd
+        ) {
+          citationHit = true;
+        }
+        if (matches.length < MATCH_STORE_CAP) {
+          matches.push({ file: file.filePath, line: i + 1, text: lineText.trim().slice(0, 200), groups: m.slice(1) });
         }
       }
     }
-    return out;
+    return { matches, sites, files: Array.from(filesMatched), citationHit };
   }
 }
 
@@ -288,52 +326,47 @@ export function verifyConventionProfile(
   const rejected: RejectedRule[] = [];
 
   for (const rule of profile.rules) {
-    let matches: PatternMatch[];
+    let report: MatchReport;
     try {
-      matches = matcher.match(rule, files);
+      report = matcher.match(rule, files);
     } catch (err) {
       rejected.push({ rule, reason: `matcher falhou: ${(err as Error).message}` });
       continue;
     }
 
-    const filesMatched = new Set(matches.map((m) => m.file));
+    const distinct = report.files.length;
     const minSites = rule.minSites ?? DEFAULT_MIN_SITES;
 
-    if (filesMatched.size < minSites) {
+    if (distinct < minSites) {
       rejected.push({
         rule,
-        reason: `sites insuficientes: ${matches.length} match(es) em ${filesMatched.size} arquivo(s) distintos; mínimo ${minSites} arquivos`,
+        reason: `sites insuficientes: ${report.sites} match(es) em ${distinct} arquivo(s) distintos; mínimo ${minSites} arquivos`,
       });
       continue;
     }
 
     const candidates = files.filter((f) => fileMatchesGlob(f.filePath, rule.fileGlob)).length;
-    if (candidates > 0 && filesMatched.size / candidates > MAX_FILE_COVERAGE_RATIO && candidates >= 10) {
+    if (candidates > 0 && distinct / candidates > MAX_FILE_COVERAGE_RATIO && candidates >= 10) {
       rejected.push({
         rule,
-        reason: `padrão largo demais: casa ${filesMatched.size}/${candidates} dos arquivos candidatos (> ${MAX_FILE_COVERAGE_RATIO * 100}%) — ruído, não convenção`,
+        reason: `padrão largo demais: casa ${distinct}/${candidates} dos arquivos candidatos (> ${MAX_FILE_COVERAGE_RATIO * 100}%) — ruído, não convenção`,
       });
       continue;
     }
 
-    if (rule.cited) {
-      const hit = matches.some(
-        (m) => m.file === rule.cited!.file && m.line >= rule.cited!.lineStart && m.line <= rule.cited!.lineEnd,
-      );
-      if (!hit) {
-        rejected.push({
-          rule,
-          reason: `citação não resolve: nenhuma ocorrência em ${rule.cited.file}:${rule.cited.lineStart}-${rule.cited.lineEnd}`,
-        });
-        continue;
-      }
+    if (rule.cited && report.citationHit !== true) {
+      rejected.push({
+        rule,
+        reason: `citação não resolve: nenhuma ocorrência em ${rule.cited.file}:${rule.cited.lineStart}-${rule.cited.lineEnd}`,
+      });
+      continue;
     }
 
     admitted.push({
       rule,
-      sites: matches.length,
-      distinctFiles: filesMatched.size,
-      sample: matches.slice(0, 5),
+      sites: report.sites,
+      distinctFiles: distinct,
+      sample: report.matches.slice(0, 5),
     });
   }
 

@@ -38,6 +38,12 @@ export const projects = pgTable("projects", {
   businessOntology: jsonb("business_ontology"),
   // ADR-0020 r2 Onda 1 — perfil de convenções por projeto (regras executáveis
   // verificadas pelo gate; 2ª instância do mecanismo businessOntology).
+  // ⚠️ PROVISIONAMENTO: o deploy NÃO roda drizzle push (railway.toml
+  // preDeployCommand é no-op) — coluna nova exige ALTER manual em prod ANTES
+  // do deploy, senão TODO read/write de projects quebra (drizzle seleciona
+  // todas as colunas). convention_profile e git_token_encrypted foram
+  // aplicadas manualmente em 2026-07-2x; próxima coluna: mesma liturgia ou
+  // ligar db:push no pipeline (decisão ops pendente — auditoria 2026-07-23).
   conventionProfile: jsonb("convention_profile"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });

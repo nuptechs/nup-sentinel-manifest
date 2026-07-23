@@ -127,6 +127,28 @@ describe("mineConventionProfile — dog-food do gate D4", () => {
   });
 });
 
+describe("claim == gate (furo C da auditoria): extensão dominante conta nos DOIS", () => {
+  it("fileset poliglota: claim/minSites contam SÓ a extensão dominante — o gate admite consistente", () => {
+    // 5 .js + 2 .ts com o MESMO anchor: dominante .js; claim deve dizer 5 (não 7)
+    const poly = [
+      ...Array.from({ length: 5 }, (_, i) => ({
+        filePath: `src/r${i}.js`,
+        content: `router.get("/api/x${i}", h);\n`,
+      })),
+      ...Array.from({ length: 2 }, (_, i) => ({
+        filePath: `src/t${i}.ts`,
+        content: `router.get("/api/y${i}", h);\n`,
+      })),
+    ];
+    const { report } = mineConventionProfile(poly, { minFiles: 5 });
+    const get = report.admitted.find((a: any) => a.rule.id === "mined-route-router-get");
+    assert.ok(get, `esperava router.get admitida; rejeitadas: ${JSON.stringify(report.rejected.map((r: any) => r.reason))}`);
+    assert.equal(get!.rule.fileGlob, ".js");
+    assert.match(get!.rule.claim, /5 arquivos \.js/, "claim conta só a extensão dominante");
+    assert.equal(get!.distinctFiles, 5, "gate mede o MESMO conjunto do claim");
+  });
+});
+
 describe("mergeMinedIntoProfile — curadoria manual VENCE", () => {
   it("regra existente com o mesmo id nunca é sobrescrita; novas entram; source anotada", () => {
     const existing = {

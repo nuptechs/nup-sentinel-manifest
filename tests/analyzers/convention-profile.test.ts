@@ -75,13 +75,28 @@ describe("parseConventionProfile — fail-closed", () => {
   });
 });
 
-describe("RegexAnchoredMatcher — anti-superalarme herdado", () => {
-  it("casa código, IGNORA linha de comentário, respeita fileGlob", () => {
-    const m = new RegexAnchoredMatcher().match(WS_RULE, FILES);
+describe("RegexAnchoredMatcher — anti-superalarme herdado + contagem exata", () => {
+  it("casa código, IGNORA linha de comentário, respeita fileGlob; report com contagens exatas", () => {
+    const r = new RegexAnchoredMatcher().match(WS_RULE, FILES);
     // 3 classes reais; o "class FakeWsV9" vive em comentário e NÃO conta.
-    assert.equal(m.length, 3);
-    assert.ok(m.every((x: any) => x.file.endsWith(".java")));
-    assert.deepEqual(m[0].groups, ["FindContract", "1"]);
+    assert.equal(r.sites, 3);
+    assert.equal(r.files.length, 3);
+    assert.equal(r.matches.length, 3);
+    assert.ok(r.matches.every((x: any) => x.file.endsWith(".java")));
+    assert.deepEqual(r.matches[0].groups, ["FindContract", "1"]);
+    assert.equal(r.citationHit, null, "regra sem citação → null");
+  });
+
+  it("contagem NUNCA trunca (furo B da auditoria): sites/files exatos mesmo além do cap de amostra", () => {
+    // arquivo único com MUITAS linhas casando + 3 arquivos distintos — a
+    // contagem de arquivos distintos não pode depender da ordem/cap.
+    const big = {
+      filePath: "src/services/web/Big.java",
+      content: Array.from({ length: 500 }, (_, i) => `class Gen${i}WsV1 {}`).join("\n"),
+    };
+    const r = new RegexAnchoredMatcher().match(WS_RULE, [big, ...FILES]);
+    assert.equal(r.sites, 503, "500 do arquivão + 3 da fleet — exato");
+    assert.equal(r.files.length, 4, "4 arquivos distintos — nunca escondidos por cap");
   });
 
   it("fileMatchesGlob: sufixo, fragmento, ausente", () => {
