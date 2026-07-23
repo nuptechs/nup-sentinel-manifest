@@ -1593,6 +1593,75 @@ export async function registerRoutes(
     }
   });
 
+  // ── ADR-0020 r2 Onda 2 — mineração ESTATÍSTICA do perfil (zero LLM) ──────
+  // Minera candidatos (layer-suffix + route-anchor) dos arquivos armazenados,
+  // passa TODOS pelo gate D4 e devolve admitted/rejected com contagens.
+  // body {apply:true} ⇒ mescla os ADMITIDOS no perfil atual (regra existente
+  // com o mesmo id VENCE — curadoria manual nunca é sobrescrita) + invalida
+  // o cache. Sem apply, é um dry-run inspecionável.
+  app.post("/api/projects/:projectId/convention-profile/mine", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+
+      const { mineConventionProfile, mergeMinedIntoProfile } = await import(
+        "./analyzers/convention-miner"
+      );
+      const { parseConventionProfile, profilerMode } = await import("./analyzers/convention-profile");
+
+      const files = await storage.getSourceFiles(projectId);
+      const profileFiles = files.map((f: any) => ({ filePath: f.filePath, content: f.content ?? "" }));
+      const minFiles = Number.isInteger(Number((req.body as any)?.minFiles))
+        ? Number((req.body as any).minFiles)
+        : undefined;
+      const { candidates, report } = mineConventionProfile(
+        profileFiles,
+        minFiles ? { minFiles } : {},
+      );
+
+      let applied = false;
+      if ((req.body as any)?.apply === true && report.admitted.length > 0) {
+        let existing: any = null;
+        const rawExisting = (project as any).conventionProfile;
+        if (rawExisting) {
+          try {
+            existing = parseConventionProfile(rawExisting);
+          } catch {
+            existing = null; // perfil armazenado inválido não bloqueia a mineração
+          }
+        }
+        const merged = mergeMinedIntoProfile(existing, report.admitted.map((a) => a.rule));
+        await storage.updateProjectConventionProfile(projectId, merged);
+        const { clearProjectCache } = await import("./pipeline/analysis-pipeline");
+        clearProjectCache(projectId);
+        applied = true;
+      }
+
+      res.json({
+        projectId,
+        mode: profilerMode(),
+        applied,
+        mined: candidates.length,
+        verification: {
+          verifiedAt: report.verifiedAt,
+          admitted: report.admitted.map((a) => ({
+            ruleId: a.rule.id,
+            claim: a.rule.claim,
+            kind: a.rule.kind,
+            sites: a.sites,
+            distinctFiles: a.distinctFiles,
+          })),
+          rejected: report.rejected.map((r) => ({ ruleId: r.rule.id, reason: r.reason })),
+        },
+      });
+    } catch (error) {
+      console.error("Error mining convention profile:", error);
+      res.status(500).json({ message: "Failed to mine convention profile" });
+    }
+  });
+
   // ADR-0019 Onda 2 — AUTO-MAP: refresca o mapa de um projeto EXISTENTE a
   // partir de um zip (a Action roda isto no push pra main). Substitui os
   // arquivos armazenados (mesmo padrão do analyze-branch) e roda a análise

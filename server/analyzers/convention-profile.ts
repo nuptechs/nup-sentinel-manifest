@@ -151,11 +151,15 @@ export function parseConventionProfile(raw: unknown): ConventionProfile {
     if (rule.endpoint != null) {
       if (rule.kind !== "endpoint") throw new Error(`regra ${id}: endpoint só vale para kind "endpoint"`);
       const e = rule.endpoint as Record<string, unknown>;
-      if (typeof e.pathTemplate !== "string" || !e.pathTemplate.trim() || !e.pathTemplate.startsWith("/")) {
-        throw new Error(`regra ${id}: endpoint.pathTemplate deve começar com "/"`);
+      const tpl = typeof e.pathTemplate === "string" ? e.pathTemplate.trim() : "";
+      // Aceita "/x/$1" (prefixado) OU "$1" (grupo-puro — o grupo capturado é o
+      // próprio literal de rota, caso do minerador route-anchor). O augment
+      // ainda guarda: path RENDERIZADO que não começe com "/" é descartado.
+      if (!tpl || !(tpl.startsWith("/") || /^\$[1-9]/.test(tpl))) {
+        throw new Error(`regra ${id}: endpoint.pathTemplate deve começar com "/" ou "$<n>"`);
       }
       endpoint = {
-        pathTemplate: e.pathTemplate.trim(),
+        pathTemplate: tpl,
         ...(typeof e.httpMethod === "string" && e.httpMethod.trim()
           ? { httpMethod: e.httpMethod.trim().toUpperCase() }
           : {}),
