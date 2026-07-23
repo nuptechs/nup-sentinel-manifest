@@ -1892,9 +1892,14 @@ export async function registerRoutes(
           const cfg = consumersConfigFromEnv();
           const repoSlug = repoSlugOf((projectRec as any)?.gitRepoUrl);
           const alerts = (report as any)?.breaking?.alerts ?? [];
-          if (cfg && repoSlug && alerts.length > 0) {
+          // Inclui também os INCONCLUSIVOS (JS sem modelo no grafo): é exatamente
+          // o ponto cego que o índice de símbolos cobre — a quebra que o grafo
+          // não alcança pode ter consumidores INDEXADOS (mesmo cross-repo).
+          const inconclusive = (report as any)?.breaking?.inconclusive ?? [];
+          const querySymbols = [...alerts.map((a: any) => a.symbol), ...inconclusive.map((i: any) => i.symbol)];
+          if (cfg && repoSlug && querySymbols.length > 0) {
             const section = await fetchCrossRepoConsumers(
-              alerts.map((a: any) => a.symbol),
+              querySymbols,
               repoSlug,
               cfg,
             );
