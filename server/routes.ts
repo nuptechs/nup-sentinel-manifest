@@ -1883,6 +1883,27 @@ export async function registerRoutes(
         console.error(`[impact-diff] ontologia do projeto ${projectId} inválida — usando default: ${err}`);
       }
       const report = diff ? computeImpactForDiff(manifest, diff, { ontology: projectOntology }) : computeImpactForFiles(manifest, files);
+      // ADR-0021 r2 Onda 4 — consumidores cross-repo (env-gated, fail-soft).
+      if (diff) {
+        try {
+          const { consumersConfigFromEnv, fetchCrossRepoConsumers, repoSlugOf } = await import(
+            "./analyzers/cross-repo-consumers"
+          );
+          const cfg = consumersConfigFromEnv();
+          const repoSlug = repoSlugOf((projectRec as any)?.gitRepoUrl);
+          const alerts = (report as any)?.breaking?.alerts ?? [];
+          if (cfg && repoSlug && alerts.length > 0) {
+            const section = await fetchCrossRepoConsumers(
+              alerts.map((a: any) => a.symbol),
+              repoSlug,
+              cfg,
+            );
+            if (section) (report as any).crossRepoConsumers = section;
+          }
+        } catch {
+          /* fail-soft */
+        }
+      }
 
       // ADR-0018 (fidelidade multi-projeto): FRESCOR do mapa — a análise de
       // impacto vale o que vale o snapshot. Idade + arquivos do diff que o

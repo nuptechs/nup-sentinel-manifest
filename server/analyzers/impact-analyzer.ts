@@ -16,6 +16,7 @@
  */
 import { parseUnifiedDiff, extractChangedSymbols } from "./changed-symbols";
 import { breakingReportForDiff, type BreakingReport } from "./breaking-changes";
+import { renderCrossRepoSection } from "./cross-repo-consumers";
 import { computeDeliveryRisk, type DeliveryRiskReport } from "./delivery-risk";
 import { computeFunctionalImpact, type FunctionalImpactReport } from "./functional-impact";
 import type { DomainConcept } from "./domain-ontology";
@@ -602,6 +603,11 @@ export function renderImpactDiffMarkdown(
     }
     if (brk.suppressedDead.length) {
       L.push(`> ${brk.suppressedDead.length} quebra(s) **sem consumidor no grafo conhecido** — suprimida(s) do alerta (breaking-but-dead, Ochoa EMSE'22) e contada(s): ${brk.suppressedDead.map((d) => `\`${d.symbol}\``).join(", ")}.`);
+    }
+    // ADR-0021 r2 Onda 4 — consumidores do índice de símbolos (cross-repo),
+    // presente só quando o enriquecimento rodou (env-gated, fail-soft).
+    if ((report as any).crossRepoConsumers) {
+      L.push(...renderCrossRepoSection((report as any).crossRepoConsumers));
       L.push("");
     }
     if (brk.refactors.length) {
