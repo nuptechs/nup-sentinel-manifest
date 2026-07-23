@@ -4,7 +4,11 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "npm run start"
-preDeployCommand = "echo 'skip pre-deploy'"
+# Sincroniza o schema ANTES de trocar o tráfego. Aditivo aplica sozinho
+# (provado idempotente: 2ª rodada = "No changes detected"); mudança DESTRUTIVA
+# pede prompt, não há TTY ⇒ o deploy FALHA = fail-closed, humano decide.
+# Roda nos 2 serviços do repo (o 2º é no-op).
+preDeployCommand = "npx drizzle-kit push"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"

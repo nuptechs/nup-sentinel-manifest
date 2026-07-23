@@ -32,6 +32,12 @@ RUN npm install --omit=dev --ignore-scripts
 # Copy built Node.js app
 COPY --from=node-build /app/dist ./dist
 
+# drizzle-kit push no pré-deploy (railway.toml) precisa do config + schema TS
+# (o drizzle-kit lê TS com o esbuild embutido). Auditoria 2026-07-23: sem isto
+# a liturgia era ALTER manual antes de cada coluna nova — furo operacional.
+COPY drizzle.config.ts ./drizzle.config.ts
+COPY shared ./shared
+
 # Copy built Java analyzer JAR
 COPY --from=java-build /build/java-analyzer-engine/target/java-analyzer-engine-1.0.0.jar \
     java-analyzer-engine/target/java-analyzer-engine-1.0.0.jar
