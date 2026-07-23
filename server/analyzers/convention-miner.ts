@@ -252,6 +252,55 @@ export function mineConventionProfile(files: ProfileFile[], opts: MineOptions = 
 }
 
 /**
+ * ADR-0020 r2 Onda 5 — re-perfil no DRIFT + nascimento no ONBOARDING.
+ *
+ * Minera dos arquivos ATUAIS e mescla os admitidos no perfil armazenado
+ * (manual/curada vence, como sempre). Chamado após reindex (o mapa mudou ⇒
+ * o perfil re-verifica) e no auto-onboard do GitHub App (o perfil NASCE com
+ * o projeto — a promessa "perfil nasce no onboarding" vira verdade também
+ * na porta do App). SEMPRE fail-soft: perfilar nunca derruba a análise.
+ *
+ * storageLike é injetado (evita import circular com storage).
+ */
+export async function refreshMinedProfile(
+  storageLike: {
+    getProject(id: number): Promise<unknown>;
+    updateProjectConventionProfile(id: number, profile: unknown): Promise<void>;
+  },
+  projectId: number,
+  files: ProfileFile[],
+  log: (msg: string) => void = console.log,
+): Promise<{ admitted: number; total: number } | null> {
+  try {
+    const { report } = mineConventionProfile(files, {});
+    if (report.admitted.length === 0) {
+      log(`[convention-profile] projeto ${projectId}: mineração sem regras admitidas — perfil inalterado`);
+      return { admitted: 0, total: 0 };
+    }
+    const project = (await storageLike.getProject(projectId)) as { conventionProfile?: unknown } | undefined;
+    let existing: { version: 1; rules: ConventionRule[]; source?: string } | null = null;
+    if (project?.conventionProfile) {
+      try {
+        // parse fail-closed do armazenado; inválido não bloqueia o refresh
+        const { parseConventionProfile } = await import("./convention-profile");
+        existing = parseConventionProfile(project.conventionProfile);
+      } catch {
+        existing = null;
+      }
+    }
+    const merged = mergeMinedIntoProfile(existing, report.admitted.map((a) => a.rule));
+    await storageLike.updateProjectConventionProfile(projectId, merged);
+    log(
+      `[convention-profile] projeto ${projectId}: perfil re-minerado — ${report.admitted.length} regra(s) admitida(s), total ${merged.rules.length}`,
+    );
+    return { admitted: report.admitted.length, total: merged.rules.length };
+  } catch (err) {
+    log(`[convention-profile] projeto ${projectId}: refresh fail-soft (${(err as Error).message})`);
+    return null;
+  }
+}
+
+/**
  * Merge dos ADMITIDOS minerados num perfil existente: regra existente com o
  * MESMO id vence (manual/curada > minerada — nunca sobrescreve em silêncio).
  */
