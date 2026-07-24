@@ -7,8 +7,8 @@ This package on npm is `@nuptechs/sentinel-manifest`. The CLI is `@nuptechs/sent
 ## What it does
 
 - Parses repos and inventories endpoints, permissions, schema fields, role/auth decorators (Java AST engine + frontend analyzer).
-- Runs 6 security-omission detectors plus a frontend↔backend consistency detector (screens calling endpoints the backend doesn't expose).
-- Emits Finding v2 records (`source: 'auto_manifest'`, types `permission_drift` and `inconsistency`) into the central NuP Sentinel correlator.
+- Runs 6 security-omission detectors plus a frontend↔backend consistency detector (screens calling endpoints the backend doesn't expose), plus the ADR-070 Onda 4 graph critics (redundant paths and read/write lifecycle gaps over the domain graph).
+- Emits Finding v2 records (`source: 'auto_manifest'`) into the central NuP Sentinel correlator — types `permission_drift`, `inconsistency`, and the ADR-070 Onda 4 graph critics `functional_overlap` and `lifecycle_gap` (`server/security/sentinel-emitter.ts:60,209,254,295`).
 - Java analyzer engine (`java-analyzer-engine/`) runs as a sibling JVM process for Java/JVM repos.
 
 Analysis is **on-demand** (HTTP `/api/analyze*` or CLI) — there is no cron.

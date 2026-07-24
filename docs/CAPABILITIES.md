@@ -154,6 +154,7 @@ envia ao `nup-sentinel` (cria sessão em `/api/sessions`, ingere em `/api/findin
 |---|---|---|
 | `emitSecurityFindings` → findings `type:permission_drift` (subtypes mapeados dos 6 detectores) | ✅ código / 🟡 efeito | `sentinel-emitter.ts:146`, subtype map `:61-68` |
 | `emitConsistencyFindings` → findings `type:inconsistency` (subtype `missing_backend_endpoint`) | ✅ código / 🟡 efeito | `sentinel-emitter.ts:165,180` (novo no PR #8) |
+| **Críticos de grafo (ADR-070 Onda 4)** → findings `type:functional_overlap` (2+ caminhos fazem o mesmo sobre a mesma entidade; subtype `<opClass>_overlap`) e `type:lifecycle_gap` (entidade escrita sem leitura própria, ou lida sem escrita) | ✅ código / 🟡 efeito | `sentinel-emitter.ts:254` (overlap), `:295` (lifecycle) |
 | Transporte best-effort: Sentinel fora do ar **nunca** quebra a análise (loga e engole) | ✅ | `sentinel-emitter.ts:220,308-312` |
 | **Emissão de fato acontecer** | 🟡 | É **no-op** sem as três envs: `SENTINEL_URL`, `SENTINEL_API_KEY`, `SENTINEL_PROJECT_ID` (`sentinel-emitter.ts:231-233`). Opcionais: `SENTINEL_ORG_ID` (tenant), `SENTINEL_TIMEOUT_MS`. Sem elas, retorna `{ skipped: true }` e o pipeline segue normal. |
 
