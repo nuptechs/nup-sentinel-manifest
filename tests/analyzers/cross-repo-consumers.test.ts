@@ -115,3 +115,41 @@ describe("supressão contestada (segunda opinião do índice)", () => {
     assert.match(md, /revisar antes de confiar na supressão/);
   });
 });
+
+describe("rótulo de profundidade da leitura (ADR-0023 O1/D5)", () => {
+  it("render exibe o rótulo pt-BR quando o sentinel manda resolutions", () => {
+    const md = renderCrossRepoSection({
+      repoSlug: "nuptechs/easynup",
+      bySymbol: [{
+        symbol: "logger",
+        totalConsumers: 3,
+        repos: [{ repo: "nuptechs/identify", count: 3, sample: [{ relativePath: "src/a.ts", startLine: 5 }] }],
+        resolutions: ["semantic", "syntactic"],
+      }],
+      noConsumers: [],
+      errors: [],
+    }).join("\n");
+    assert.match(md, /leitura semântica \+ leitura sintática/);
+  });
+
+  it("sentinel ANTIGO (sem o campo) → sem rótulo, sem quebrar — nunca inventa profundidade", () => {
+    const md = renderCrossRepoSection({
+      repoSlug: "nuptechs/easynup",
+      bySymbol: [{ symbol: "logger", totalConsumers: 3, repos: [] }],
+      noConsumers: [],
+      errors: [],
+    }).join("\n");
+    assert.doesNotMatch(md, /leitura/);
+    assert.match(md, /3 consumo\(s\)/);
+  });
+
+  it("semantic_partial ganha o rótulo próprio", () => {
+    const md = renderCrossRepoSection({
+      repoSlug: "r",
+      bySymbol: [{ symbol: "x", totalConsumers: 1, repos: [], resolutions: ["semantic_partial"] }],
+      noConsumers: [],
+      errors: [],
+    }).join("\n");
+    assert.match(md, /leitura semântica parcial/);
+  });
+});

@@ -25,6 +25,8 @@ export interface SymbolConsumers {
   symbol: string;
   totalConsumers: number;
   repos: { repo: string; count: number; sample: { relativePath: string; startLine: number }[] }[];
+  /** ADR-0023 O1/D5 — profundidades distintas das leituras que sustentam a resposta. */
+  resolutions?: string[];
 }
 
 export interface CrossRepoSection {
@@ -105,10 +107,19 @@ export async function fetchCrossRepoConsumers(
         section.errors.push(`${name}: HTTP ${res.status}`);
         continue;
       }
-      const body = (await res.json()) as { data?: { totalConsumers?: number; repos?: SymbolConsumers["repos"] } };
+      const body = (await res.json()) as {
+        data?: { totalConsumers?: number; repos?: SymbolConsumers["repos"]; resolutions?: string[] };
+      };
       const total = body?.data?.totalConsumers ?? 0;
       if (total > 0) {
-        section.bySymbol.push({ symbol: name, totalConsumers: total, repos: body!.data!.repos ?? [] });
+        section.bySymbol.push({
+          symbol: name,
+          totalConsumers: total,
+          repos: body!.data!.repos ?? [],
+          ...(Array.isArray(body!.data!.resolutions) && body!.data!.resolutions.length > 0
+            ? { resolutions: body!.data!.resolutions }
+            : {}),
+        });
       } else {
         section.noConsumers.push(name);
       }
@@ -124,6 +135,15 @@ export async function fetchCrossRepoConsumers(
 }
 
 /** Bloco markdown da seção (consumido pelo renderImpactDiffMarkdown). */
+function resolutionLabel(r: string): string {
+  switch (r) {
+    case "semantic": return "leitura semântica";
+    case "semantic_partial": return "leitura semântica parcial";
+    case "syntactic": return "leitura sintática";
+    default: return r;
+  }
+}
+
 export function renderCrossRepoSection(section: CrossRepoSection): string[] {
   const L: string[] = [];
   L.push("");
@@ -132,7 +152,13 @@ export function renderCrossRepoSection(section: CrossRepoSection): string[] {
     L.push(`> Nenhum consumidor indexado para os símbolos quebrados (${section.noConsumers.join(", ") || "—"}).`);
   }
   for (const s of section.bySymbol) {
-    L.push(`- \`${s.symbol}\` — **${s.totalConsumers} consumo(s)** em ${s.repos.length} repo(s):`);
+    // ADR-0023 O1/D5 — o laudo declara a PROFUNDIDADE da leitura que sustenta
+    // o número (nunca vender largura como profundidade). Sentinel antigo sem o
+    // campo → sem rótulo (fail-soft, nunca inventa).
+    const depth = s.resolutions && s.resolutions.length > 0
+      ? ` _(${s.resolutions.map(resolutionLabel).join(" + ")})_`
+      : "";
+    L.push(`- \`${s.symbol}\` — **${s.totalConsumers} consumo(s)** em ${s.repos.length} repo(s)${depth}:`);
     for (const r of s.repos.slice(0, 5)) {
       const sample = r.sample.map((x) => `\`${x.relativePath}:${x.startLine}\``).join(", ");
       const cross = r.repo !== section.repoSlug ? " ⚠️ **outro repo**" : "";
