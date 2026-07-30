@@ -181,4 +181,64 @@ export class GitHubProvider implements IGitProvider {
       headFiles,
     };
   }
+
+  /** Ver doc na interface (IGitProvider.fetchPRDiffLight). */
+  async fetchPRDiffLight(prNumber: number): Promise<GitPRDiff> {
+    const [pr, files] = await Promise.all([
+      this.request(`/repos/${this.owner}/${this.repo}/pulls/${prNumber}`),
+      this.request(`/repos/${this.owner}/${this.repo}/pulls/${prNumber}/files?per_page=300`),
+    ]);
+
+    const pullRequest: GitPullRequest = {
+      id: pr.number,
+      title: pr.title,
+      description: pr.body || "",
+      sourceBranch: pr.head.ref,
+      targetBranch: pr.base.ref,
+      state: pr.merged_at ? "merged" : pr.state === "closed" ? "closed" : "open",
+      author: pr.user.login,
+      createdAt: pr.created_at,
+      updatedAt: pr.updated_at,
+      url: pr.html_url,
+    };
+
+    const changedFiles: GitDiffFile[] = files
+      .filter((f: any) => isSourceFile(f.filename))
+      .map((f: any) => ({
+        filePath: f.filename,
+        status: f.status === "added" ? "added" :
+                f.status === "removed" ? "removed" :
+                f.status === "renamed" ? "renamed" : "modified",
+        oldPath: f.previous_filename || undefined,
+        additions: f.additions,
+        deletions: f.deletions,
+      }));
+
+    // Conteúdo SÓ dos alterados, por SHA (não por branch — a branch head de
+    // PR mergeado costuma estar deletada). Falha individual = pula o arquivo
+    // (fail-soft, 1 linha de log — nunca o flood do fetch de árvore inteira).
+    const baseSha = pr.base.sha;
+    const headSha = pr.head.sha;
+    const fetchAt = async (sha: string, paths: string[]): Promise<GitFile[]> => {
+      const out: GitFile[] = [];
+      for (const filePath of paths) {
+        try {
+          const content = await this.fetchFileContent(sha, filePath);
+          out.push({ filePath, content });
+        } catch {
+          console.warn(`[github] fetchPRDiffLight: pulei ${filePath}@${sha.slice(0, 7)} (fetch falhou)`);
+        }
+      }
+      return out;
+    };
+
+    const basePaths = changedFiles.filter((f) => f.status !== "added").map((f) => f.oldPath ?? f.filePath);
+    const headPaths = changedFiles.filter((f) => f.status !== "removed").map((f) => f.filePath);
+    const [baseFiles, headFiles] = await Promise.all([
+      fetchAt(baseSha, basePaths),
+      fetchAt(headSha, headPaths),
+    ]);
+
+    return { pullRequest, changedFiles, baseFiles, headFiles };
+  }
 }
