@@ -72,6 +72,17 @@ export interface IGitProvider {
   fetchFileContent(branch: string, filePath: string): Promise<string>;
   fetchPullRequests(state?: "open" | "closed" | "all"): Promise<GitPullRequest[]>;
   fetchPRDiff(prNumber: number): Promise<GitPRDiff>;
+  /**
+   * Variante LEVE do fetchPRDiff pro bot de laudo (ADR-0023 O5 follow-up):
+   * baseFiles/headFiles carregam SÓ o conteúdo dos arquivos ALTERADOS
+   * (por SHA — funciona em PR mergeado com branch deletada), em vez da
+   * árvore inteira ×2. O fetchPRDiff cheio num repo do tamanho do EasyNuP
+   * (~8k arquivos) estoura a cota de 5000 req/h da API do GitHub em UMA
+   * chamada — o laudo morria em rate-limit antes de nascer. O
+   * buildUnifiedDiffFromPR só consulta os changed paths, então o shape
+   * continua o mesmo. Opcional: provider sem a variante cai no cheio.
+   */
+  fetchPRDiffLight?(prNumber: number): Promise<GitPRDiff>;
 }
 
 const SOURCE_EXTENSIONS = [

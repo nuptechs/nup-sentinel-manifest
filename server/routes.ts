@@ -2816,7 +2816,10 @@ export async function registerRoutes(
           }
           const { createGitProvider } = await import("./git/git-provider");
           const gitProvider = await createGitProvider({ provider: "github", repoUrl: project.gitRepoUrl!, token });
-          const prDiff = await gitProvider.fetchPRDiff(prNumber);
+          // Variante LEVE (só arquivos alterados, por SHA): o fetch cheio
+          // baixa a árvore inteira ×2 e estoura a cota da API num repo
+          // do tamanho do EasyNuP — o laudo morria em rate-limit.
+          const prDiff = await (gitProvider.fetchPRDiffLight?.(prNumber) ?? gitProvider.fetchPRDiff(prNumber));
           const { buildUnifiedDiffFromPR } = await import("./git/pr-unified-diff");
           const unified = buildUnifiedDiffFromPR(prDiff);
           if (!unified.trim()) {
@@ -2936,7 +2939,8 @@ export async function registerRoutes(
         }
 
         const gitProvider = await createGitProvider({ provider: "github", repoUrl, token: instToken });
-        const prDiff = await gitProvider.fetchPRDiff(prNumber);
+        // Mesma razão do webhook de repo: laudo usa a variante LEVE.
+        const prDiff = await (gitProvider.fetchPRDiffLight?.(prNumber) ?? gitProvider.fetchPRDiff(prNumber));
         const { buildUnifiedDiffFromPR } = await import("./git/pr-unified-diff");
         const unified = buildUnifiedDiffFromPR(prDiff);
         if (!unified.trim()) {
