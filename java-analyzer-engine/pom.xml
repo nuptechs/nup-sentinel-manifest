@@ -4,16 +4,22 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.permacat</groupId>
+    <!-- ADR-0023 O5 (nup-sentinel) — ENGINE JAVA ÚNICO do ecossistema:
+         este módulo absorveu o java-parser-cli do codelens (Engine B) como
+         modo CLI (`extract`). groupId renomeado na consolidação; artifactId/
+         version PRESERVADOS — o path do JAR é contrato com backend-java-client
+         (JAR_PATH) e com o COPY do Dockerfile. -->
+    <groupId>com.nuptechs.sentinel</groupId>
     <artifactId>java-analyzer-engine</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
 
     <properties>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
+        <!-- Java 21 + JavaParser 3.28.x cravados pela ADR-0023 O5 (paridade
+             com o Engine B absorvido; runtime da imagem sobe pra JRE 21). -->
+        <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <javaparser.version>3.26.2</javaparser.version>
+        <javaparser.version>3.28.1</javaparser.version>
     </properties>
 
     <dependencies>
@@ -31,6 +37,20 @@
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
             <version>2.11.0</version>
+        </dependency>
+        <!-- Jackson SÓ pro modo CLI (extract): o contrato byte-a-byte do
+             Engine B foi serializado com Jackson — Gson escaparia `<` como
+             \u003c nos tipos genéricos e quebraria a paridade. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.18.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.sun.net.httpserver</groupId>
@@ -70,10 +90,15 @@
                 <configuration>
                     <archive>
                         <manifest>
-                            <mainClass>com.permacat.analyzer.AnalyzerServer</mainClass>
+                            <mainClass>com.permacat.analyzer.Launcher</mainClass>
                         </manifest>
                     </archive>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -86,9 +111,10 @@
                             <goal>shade</goal>
                         </goals>
                         <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>com.permacat.analyzer.AnalyzerServer</mainClass>
+                                    <mainClass>com.permacat.analyzer.Launcher</mainClass>
                                 </transformer>
                             </transformers>
                         </configuration>

@@ -30,3 +30,20 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: Test
         run: npm test
+
+  # ADR-0023 O5 — o engine Java consolidado (dual-entrypoint HTTP+CLI) ganha
+  # gate próprio: antes o código Java só era validado dentro do docker build
+  # (com -DskipTests) — zero rede de segurança em PR. Roda a suíte JUnit
+  # (inclui o teste de PARIDADE byte-a-byte do contrato do modo extract) e o
+  # package (shade) completo.
+  java-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - name: Test + package
+        run: mvn -q -f java-analyzer-engine/pom.xml clean package
