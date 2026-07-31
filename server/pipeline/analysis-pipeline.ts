@@ -598,8 +598,8 @@ export class AnalysisPipeline {
       // processo); o snapshot é a fonte durável, como o `allEntitiesFromGraph`.
       // Aditivo e com teto anti-payload: acima do cap grava só o resumo (o
       // grafo do parque real cabe folgado — algumas centenas de nós).
-      const SYSTEM_GRAPH_NODE_CAP = 4000;
-      const SYSTEM_GRAPH_EDGE_CAP = 12000;
+      const SYSTEM_GRAPH_NODE_CAP = 8000;
+      const SYSTEM_GRAPH_EDGE_CAP = 20000;
       let systemGraph: { nodes: any[]; edges: any[]; truncated?: boolean } | null = null;
       if (appGraph && typeof appGraph.toJSON === "function") {
         const g = appGraph.toJSON();
