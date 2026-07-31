@@ -150,3 +150,45 @@ describe("linkViewsViaComposablesAndInline (Onda 6b-2)", () => {
     assert.equal(g.getOutgoingEdges("view:Heat")[0].metadata.via, "inline-url");
   });
 });
+
+describe("TELA = roteada no router (correção de definição) + propagação componente→tela", () => {
+  const router = { filePath: "frontend/src/router.ts",
+    content: "const r=[{path:'/vendors',component:()=>import('./pages/VendorList.vue')}];" };
+  const api = { filePath: "frontend/src/api/vendors.ts",
+    content: "export async function findVendors(){ return authFetch(`${B}/easynup/findVendors.v1`); }\n" };
+  const comp = { filePath: "frontend/src/components/vendor/VendorPicker.vue",
+    content: "<script setup>\nimport { findVendors } from '@/api/vendors';\nconst load=()=>findVendors();\n</script>" };
+  const page = { filePath: "frontend/src/pages/VendorList.vue",
+    content: "<script setup>\nimport VendorPicker from '@/components/vendor/VendorPicker.vue'\n</script>" };
+
+  it("componente NÃO vira nó TELA; a chamada dele é atribuída à página roteada que o importa", async () => {
+    const { linkViewsViaComposablesAndInline } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("wsv1:POST:/easynup/findVendors.v1", "CONTROLLER", "F", "execute", null, {}));
+    const r = linkViewsViaComposablesAndInline(g, [router, api, comp, page]);
+    assert.equal(g.getNode("view:VendorPicker"), undefined, "componente não é tela");
+    const e = g.getOutgoingEdges("view:VendorList")[0];
+    assert.ok(e, "página roteada ganhou a aresta do componente");
+    assert.equal(e.toNode, "wsv1:POST:/easynup/findVendors.v1");
+    assert.equal(e.metadata.via, "component-tree");
+    assert.ok(r.edges >= 1);
+  });
+
+  it("com router no payload, arquivo em pages/ NÃO-roteado também não vira tela", async () => {
+    const { linkViewsViaComposablesAndInline } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("wsv1:POST:/easynup/findVendors.v1", "CONTROLLER", "F", "execute", null, {}));
+    const naoRoteada = { filePath: "frontend/src/pages/contract-wizard/components/SubPainel.vue",
+      content: "const x = () => authFetch(`${B}/easynup/findVendors.v1`);" };
+    linkViewsViaComposablesAndInline(g, [router, naoRoteada]);
+    assert.equal(g.getNode("view:SubPainel"), undefined, "sub-componente de pages/ fora do router não é tela");
+  });
+
+  it("routedPageBases lê imports lazy do router; fallback /pages/ sem router", async () => {
+    const { routedPageBases, isRoutedPage } = await import("../../server/analyzers/full-stack-augment.ts");
+    const bases = routedPageBases([router]);
+    assert.ok(bases.has("VendorList"));
+    assert.equal(isRoutedPage("frontend/src/components/X.vue", bases), false);
+    assert.equal(isRoutedPage("frontend/src/pages/Y.vue", new Set()), true, "fallback sem router");
+  });
+});
