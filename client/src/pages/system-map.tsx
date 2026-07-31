@@ -208,7 +208,7 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
   // "camada de dados + vizinhança" (entidades e quem as toca — a lente de
   // arquitetura mais útil e naturalmente limitada); pequeno abre inteiro.
   const RENDER_THRESHOLD = 500;
-  const RENDER_CAP = 700;
+  const RENDER_CAP = 900;
   const isLarge = payload.nodes.length > RENDER_THRESHOLD;
   const [scope, setScope] = useState<"data" | "all">(isLarge ? "data" : "all");
 
@@ -229,12 +229,28 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
       if (entityIds.has(e.toNode)) neighborIds.add(e.fromNode);
       if (entityIds.has(e.fromNode)) neighborIds.add(e.toNode);
     }
-    // entidades sempre entram; vizinhos entram por grau até o teto
+    // entidades sempre entram; DEPOIS a camada de dados INTEIRA (todos os
+    // repositories que tocam entidade) — num sistema JPA o repository É a
+    // camada de dados e NUNCA pode ser cortado; ranquear só por grau enchia o
+    // teto de services (grau alto) e escondia ~todos os repositories (bug
+    // achado ao revisar a tela: 4 repos exibidos vs 202 reais). Só então o
+    // teto é preenchido com os services de maior grau.
     const keep = new Set<string>(entityIds);
-    const ranked = payload.nodes
-      .filter((n) => neighborIds.has(n.id) && !entityIds.has(n.id))
+    for (const n of payload.nodes) {
+      if (n.type === "REPOSITORY" && neighborIds.has(n.id)) keep.add(n.id);
+    }
+    const services = payload.nodes
+      .filter((n) => n.type === "SERVICE" && neighborIds.has(n.id) && !keep.has(n.id))
       .sort((a, b) => b.inDegree + b.outDegree - (a.inDegree + a.outDegree));
-    for (const n of ranked) {
+    for (const n of services) {
+      if (keep.size >= RENDER_CAP) break;
+      keep.add(n.id);
+    }
+    // qualquer outro vizinho (ex.: controller que toca entidade direto) até o teto
+    const rest = payload.nodes
+      .filter((n) => neighborIds.has(n.id) && !keep.has(n.id))
+      .sort((a, b) => b.inDegree + b.outDegree - (a.inDegree + a.outDegree));
+    for (const n of rest) {
       if (keep.size >= RENDER_CAP) break;
       keep.add(n.id);
     }
