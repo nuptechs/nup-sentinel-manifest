@@ -591,11 +591,36 @@ export class AnalysisPipeline {
       // decisões governam esta entrega?" sem jogar 64+ ADRs no contexto.
       const adrIndex = buildAdrIndex(fileData || []);
 
+      // Mapa do Sistema (tela System Map) — persiste o grafo COMPLETO
+      // (nós + arestas tipadas) no snapshot para o endpoint /graph servir de
+      // forma durável. O `graphCacheStore` que a análise usa é in-memory e
+      // volátil (some no restart e só existe quando o Java rodou neste
+      // processo); o snapshot é a fonte durável, como o `allEntitiesFromGraph`.
+      // Aditivo e com teto anti-payload: acima do cap grava só o resumo (o
+      // grafo do parque real cabe folgado — algumas centenas de nós).
+      const SYSTEM_GRAPH_NODE_CAP = 4000;
+      const SYSTEM_GRAPH_EDGE_CAP = 12000;
+      let systemGraph: { nodes: any[]; edges: any[]; truncated?: boolean } | null = null;
+      if (appGraph && typeof appGraph.toJSON === "function") {
+        const g = appGraph.toJSON();
+        if (g.nodes.length <= SYSTEM_GRAPH_NODE_CAP && g.edges.length <= SYSTEM_GRAPH_EDGE_CAP) {
+          systemGraph = { nodes: g.nodes, edges: g.edges };
+        } else {
+          // Nunca "trunca em silêncio": grava a flag para a tela avisar.
+          systemGraph = {
+            nodes: g.nodes.slice(0, SYSTEM_GRAPH_NODE_CAP),
+            edges: g.edges.slice(0, SYSTEM_GRAPH_EDGE_CAP),
+            truncated: true,
+          };
+        }
+      }
+
       const enrichedManifest = {
         ...manifest,
         ...(allEntitiesFromGraph.length > 0 ? { allEntitiesFromGraph } : {}),
         ...(impactEndpoints.length > 0 ? { impactEndpoints } : {}),
         ...(adrIndex.length > 0 ? { adrIndex } : {}),
+        ...(systemGraph ? { systemGraph } : {}),
       };
 
       await storage.createAnalysisSnapshot({
