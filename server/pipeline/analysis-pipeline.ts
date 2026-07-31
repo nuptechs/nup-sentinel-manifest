@@ -4,7 +4,7 @@ import { buildApplicationGraph, analyzeGraphEndpoints, reconstructGraph } from "
 import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries, wsv1NodesToCatalogEntries } from "../analyzers/graph-connector";
 import { readMultistackFlags } from "../config/multistack";
 import { extractExpressRoutes, expressRoutesToCatalogEntries, expressRoutesToImpactEndpoints } from "../analyzers/node-backend/express-routes";
-import { augmentGraphWithFullStack, linkViewsViaApiLayer } from "../analyzers/full-stack-augment";
+import { augmentGraphWithFullStack, linkViewsViaApiLayer, linkViewsViaComposablesAndInline } from "../analyzers/full-stack-augment";
 import { classifyEntriesDeterministic } from "../analyzers/deterministic-classifier";
 import { detectArchitecture } from "../analyzers/architecture-detector";
 import { generateManifest } from "../generators/manifest-generator";
@@ -201,6 +201,9 @@ export class AnalysisPipeline {
       // Onda 6b: cadeia componente→api/*.ts→URL resolvida deterministicamente
       const apiAug = linkViewsViaApiLayer(appGraph, frontendFiles);
       if (apiAug.edges > 0) this.progress("Step 3/4", `API-layer: +${apiAug.views} telas, +${apiAug.edges} arestas tela→backend`);
+      // Onda 6b-2: salto de composable + URL inline no componente
+      const compAug = linkViewsViaComposablesAndInline(appGraph, frontendFiles);
+      if (compAug.edges > 0) this.progress("Step 3/4", `Composable/inline: +${compAug.views} telas, +${compAug.edges} arestas`);
       if (fsAug.views + fsAug.routes + fsAug.edges > 0) {
         this.progress("Step 3/4", `Full-stack: +${fsAug.views} telas, +${fsAug.routes} rotas gateway, +${fsAug.edges} arestas`);
       }

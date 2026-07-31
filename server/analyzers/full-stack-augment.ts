@@ -220,3 +220,117 @@ export function linkViewsViaApiLayer(
   }
   return { views, edges };
 }
+
+// ─── Onda 6b-2 (ADR-0025): salto de COMPOSABLE + URL inline ───
+// (a) componente→composables/*.ts→api/*.ts→URL: o composable importa a api e
+// cada EXPORT dele é fatiado em bloco (mesma técnica do indexApiLayer) — só as
+// funções de api INVOCADAS no bloco contam (precisão por export, não por
+// arquivo). (b) componente com URL /easynup|/api LITERAL no próprio corpo
+// (authFetch direto) → aresta direta. Ambos determinísticos, via= rastreável.
+
+const COMPOSABLE_IMPORT_RE = /import\s*(?:type\s*)?\{([^}]+)\}\s*from\s*['"](?:@\/|\.{1,2}\/(?:\.\.\/)*)composables\/([\w-]+)['"]/g;
+const URL_RE_G = /(\/(?:easynup|api)\/[A-Za-z0-9_\-./${}:]*[A-Za-z0-9_\-.}])/g;
+
+export interface ComposableIndex { [module: string]: { [fn: string]: { url: string; via: string }[] } }
+
+export function indexComposableLayer(
+  fileData: { filePath: string; content: string }[],
+  apiIdx: ApiLayerIndex,
+): ComposableIndex {
+  const out: ComposableIndex = {};
+  for (const f of fileData) {
+    if (!/frontend\/src\/composables\/.*\.ts$/.test(f.filePath)) continue;
+    const mod = (f.filePath.split("/").pop() || "").replace(/\.ts$/, "");
+    // api fns importadas neste composable
+    const apiFns: { fn: string; url: string; via: string }[] = [];
+    let im: RegExpExecArray | null;
+    IMPORT_RE.lastIndex = 0;
+    while ((im = IMPORT_RE.exec(f.content)) !== null) {
+      const amod = apiIdx[im[2]];
+      if (!amod) continue;
+      for (const raw of im[1].split(",")) {
+        const fn = raw.trim().split(/\s+as\s+/)[0].trim();
+        if (amod[fn]) apiFns.push({ fn, url: amod[fn], via: `api/${im[2]}.${fn}` });
+      }
+    }
+    if (!apiFns.length) continue;
+    // bloco por export: só api fns invocadas no bloco
+    const marks: { name: string; at: number }[] = [];
+    let m: RegExpExecArray | null;
+    EXPORT_RE.lastIndex = 0;
+    while ((m = EXPORT_RE.exec(f.content)) !== null) marks.push({ name: m[1] || m[2], at: m.index });
+    for (let i = 0; i < marks.length; i++) {
+      const body = f.content.slice(marks[i].at, marks[i + 1]?.at ?? f.content.length);
+      const hits = apiFns.filter((a) => new RegExp("[^\\w.]" + a.fn + "\\s*\\(").test(body));
+      if (hits.length) (out[mod] = out[mod] || {})[marks[i].name] =
+        hits.map((h) => ({ url: h.url, via: `composables/${mod}.${marks[i].name}→${h.via}` }));
+    }
+  }
+  return out;
+}
+
+/** 6b-2: liga telas via composable e via URL inline. Chamar APÓS linkViewsViaApiLayer. */
+export function linkViewsViaComposablesAndInline(
+  graph: ApplicationGraph,
+  fileData: { filePath: string; content: string }[],
+): { views: number; edges: number } {
+  const apiIdx = indexApiLayer(fileData);
+  const compIdx = indexComposableLayer(fileData, apiIdx);
+  let views = 0, edges = 0;
+  const epByPath = new Map<string, string>();
+  const routeNodes: { id: string; path: string }[] = [];
+  for (const n of graph.getAllNodes()) {
+    if (n.id.startsWith("wsv1:")) epByPath.set(n.id.slice(n.id.indexOf(":", 5) + 1), n.id);
+    else if (n.type === "ROUTE") routeNodes.push({ id: n.id, path: String(n.metadata.fullPath || "") });
+  }
+  const resolveTarget = (url: string): string | null => {
+    const hit = epByPath.get(url.split("?")[0]);
+    if (hit) return hit;
+    for (const r of routeNodes) if (apiUrlMatchesRoutePath(url.split("?")[0], r.path)) return r.id;
+    return null;
+  };
+  const seen = new Set<string>();
+  const link = (component: string, sourceFile: string, target: string, via: string) => {
+    const viewId = `view:${component}`;
+    if (!graph.getNode(viewId)) {
+      graph.addNode(new GraphNode(viewId, "VIEW", component, null, null, { sourceFile, synthetic: true }));
+      views++;
+    }
+    const k = `${viewId}->${target}`;
+    if (seen.has(k) || graph.getOutgoingEdges(viewId).some((e) => e.toNode === target)) return;
+    seen.add(k);
+    graph.addEdge(new GraphEdge(viewId, target, "CALLS", {
+      synthetic: true, resolution: "syntactic-declared", convention: "api-layer", via,
+    }));
+    edges++;
+  };
+  for (const f of fileData) {
+    if (!/frontend\/src\/.*\.(vue|ts)$/.test(f.filePath)) continue;
+    if (/frontend\/src\/(api|composables)\//.test(f.filePath)) continue;
+    const component = (f.filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
+    // (a) composable hop
+    let im: RegExpExecArray | null;
+    COMPOSABLE_IMPORT_RE.lastIndex = 0;
+    while ((im = COMPOSABLE_IMPORT_RE.exec(f.content)) !== null) {
+      const cmod = compIdx[im[2]];
+      if (!cmod) continue;
+      for (const raw of im[1].split(",")) {
+        const fn = raw.trim().split(/\s+as\s+/)[0].trim();
+        if (!cmod[fn]) continue;
+        if (!new RegExp("[^\\w.]" + fn + "\\s*\\(").test(f.content)) continue;
+        for (const { url, via } of cmod[fn]) {
+          const t = resolveTarget(url);
+          if (t) link(component, f.filePath, t, via);
+        }
+      }
+    }
+    // (b) URL literal inline no componente
+    let um: RegExpExecArray | null;
+    URL_RE_G.lastIndex = 0;
+    while ((um = URL_RE_G.exec(f.content)) !== null) {
+      const t = resolveTarget(um[1]);
+      if (t) link(component, f.filePath, t, "inline-url");
+    }
+  }
+  return { views, edges };
+}

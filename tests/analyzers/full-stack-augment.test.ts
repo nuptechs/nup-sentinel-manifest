@@ -121,3 +121,32 @@ describe("linkViewsViaApiLayer (Onda 6b — cadeia componente→api/*.ts→URL)"
     assert.equal(g.getOutgoingEdges("view:Mapa")[0].toNode, "route:GET:/api/projects/:id/graph");
   });
 });
+
+describe("linkViewsViaComposablesAndInline (Onda 6b-2)", () => {
+  const api = { filePath: "frontend/src/api/vendors.ts",
+    content: "export async function findVendors() { return authFetch(`${B}/easynup/findVendors.v1`); }\nexport async function delVendor() { return authFetch(`${B}/easynup/deleteVendor.v1`); }\n" };
+  const comp = { filePath: "frontend/src/composables/useVendors.ts",
+    content: "import { findVendors, delVendor } from '@/api/vendors';\nexport function useVendors() { const load = () => findVendors(); return { load }; }\nexport function useVendorDelete() { return () => delVendor(); }\n" };
+  const page = { filePath: "frontend/src/pages/VendorList.vue",
+    content: "<script setup>\nimport { useVendors } from '@/composables/useVendors';\nconst { load } = useVendors();\n</script>" };
+  it("componente→composable→api→URL liga com via rastreável; export não usado NÃO vaza", async () => {
+    const { linkViewsViaComposablesAndInline } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("wsv1:POST:/easynup/findVendors.v1", "CONTROLLER", "F", "execute", null, {}));
+    g.addNode(new GraphNode("wsv1:POST:/easynup/deleteVendor.v1", "CONTROLLER", "D", "execute", null, {}));
+    const r = linkViewsViaComposablesAndInline(g, [api, comp, page]);
+    assert.equal(r.edges, 1, "só a URL do export INVOCADO (useVendors), não do useVendorDelete");
+    const e = g.getOutgoingEdges("view:VendorList")[0];
+    assert.equal(e.toNode, "wsv1:POST:/easynup/findVendors.v1");
+    assert.ok(String(e.metadata.via).includes("useVendors.ts".replace(".ts","")) || String(e.metadata.via).includes("useVendors"), String(e.metadata.via));
+  });
+  it("URL literal inline no componente liga direto (authFetch no corpo)", async () => {
+    const { linkViewsViaComposablesAndInline } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("wsv1:POST:/easynup/processHeatmap.v1", "CONTROLLER", "H", "execute", null, {}));
+    const pg = { filePath: "frontend/src/pages/Heat.vue", content: "const r = await authFetch(`${B}/easynup/processHeatmap.v1`);" };
+    const r = linkViewsViaComposablesAndInline(g, [pg]);
+    assert.equal(r.edges, 1);
+    assert.equal(g.getOutgoingEdges("view:Heat")[0].metadata.via, "inline-url");
+  });
+});
