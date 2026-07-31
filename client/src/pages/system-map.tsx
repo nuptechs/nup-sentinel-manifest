@@ -203,25 +203,59 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
     WRITES_ENTITY: true,
   });
 
+  // Escopo de renderização (foco-primeiro, anti-hairball — a pesquisa é
+  // unânime: nenhum líder desenha 500+ nós de uma vez). Grafo grande abre na
+  // "camada de dados + vizinhança" (entidades e quem as toca — a lente de
+  // arquitetura mais útil e naturalmente limitada); pequeno abre inteiro.
+  const RENDER_THRESHOLD = 500;
+  const RENDER_CAP = 700;
+  const isLarge = payload.nodes.length > RENDER_THRESHOLD;
+  const [scope, setScope] = useState<"data" | "all">(isLarge ? "data" : "all");
+
   const nodeById = useMemo(() => {
     const m = new Map<string, GraphNode>();
     for (const n of payload.nodes) m.set(n.id, n);
     return m;
   }, [payload]);
 
+  // Subgrafo visível conforme o escopo. "data" = entidades (a espinha do
+  // sistema JPA) + vizinhos diretos (repos/services/controllers que as tocam),
+  // ranqueado por grau e limitado ao RENDER_CAP para nunca virar hairball.
+  const scopedNodes = useMemo(() => {
+    if (scope === "all") return payload.nodes;
+    const entityIds = new Set(payload.nodes.filter((n) => n.type === "ENTITY").map((n) => n.id));
+    const neighborIds = new Set<string>();
+    for (const e of payload.edges) {
+      if (entityIds.has(e.toNode)) neighborIds.add(e.fromNode);
+      if (entityIds.has(e.fromNode)) neighborIds.add(e.toNode);
+    }
+    // entidades sempre entram; vizinhos entram por grau até o teto
+    const keep = new Set<string>(entityIds);
+    const ranked = payload.nodes
+      .filter((n) => neighborIds.has(n.id) && !entityIds.has(n.id))
+      .sort((a, b) => b.inDegree + b.outDegree - (a.inDegree + a.outDegree));
+    for (const n of ranked) {
+      if (keep.size >= RENDER_CAP) break;
+      keep.add(n.id);
+    }
+    return payload.nodes.filter((n) => keep.has(n.id));
+  }, [payload, scope]);
+
+  const scopedIds = useMemo(() => new Set(scopedNodes.map((n) => n.id)), [scopedNodes]);
+
   // Arestas agregadas por (from,to,type) com contagem → espessura (padrão
-  // Sourcetrail: troca N linhas por 1 rotulada). Também evita id duplicado.
+  // Sourcetrail: troca N linhas por 1 rotulada). Só entre nós visíveis.
   const aggEdges = useMemo(() => {
     const map = new Map<string, { source: string; target: string; rel: EdgeRelation; weight: number }>();
     for (const e of payload.edges) {
-      if (!nodeById.has(e.fromNode) || !nodeById.has(e.toNode)) continue;
+      if (!scopedIds.has(e.fromNode) || !scopedIds.has(e.toNode)) continue;
       const key = `${e.fromNode}|${e.toNode}|${e.relationType}`;
       const prev = map.get(key);
       if (prev) prev.weight += 1;
       else map.set(key, { source: e.fromNode, target: e.toNode, rel: e.relationType, weight: 1 });
     }
     return Array.from(map.values());
-  }, [payload, nodeById]);
+  }, [payload, scopedIds]);
 
   const maxInDegree = useMemo(
     () => Math.max(1, ...payload.nodes.map((n) => n.inDegree)),
@@ -239,7 +273,7 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
       container: boxRef.current,
       wheelSensitivity: 0.2,
       elements: {
-        nodes: payload.nodes.map((n) => ({
+        nodes: scopedNodes.map((n) => ({
           data: {
             id: n.id,
             label: labelOf(n),
@@ -372,7 +406,7 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
       cyRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload]);
+  }, [payload, scope]);
 
   // ref espelho da seleção (os handlers de cytoscape capturam o valor no mount)
   const selectedIdRef = useRef<string | null>(null);
@@ -474,12 +508,27 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
               </Toggle>
             ))}
           </div>
+          {isLarge && (
+            <Select value={scope} onValueChange={(v) => setScope(v as "data" | "all")}>
+              <SelectTrigger className="w-56" data-testid="select-scope">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="data">Camada de dados + vizinhança</SelectItem>
+                <SelectItem value="all">Tudo (pode ficar denso)</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
           <Button variant="outline" size="sm" onClick={fit} data-testid="button-fit">
             <Maximize2 className="mr-1 h-4 w-4" /> Ajustar
           </Button>
           <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-            <Badge variant="secondary">{payload.counts.nodes} nós</Badge>
-            <Badge variant="secondary">{payload.counts.edges} arestas</Badge>
+            <Badge variant="secondary" data-testid="badge-shown">
+              {scopedNodes.length === payload.counts.nodes
+                ? `${payload.counts.nodes} nós`
+                : `${scopedNodes.length} de ${payload.counts.nodes} nós`}
+            </Badge>
+            <Badge variant="secondary">{aggEdges.length} arestas</Badge>
             {payload.truncated && (
               <Badge variant="destructive" className="gap-1">
                 <AlertTriangle className="h-3 w-3" /> truncado
@@ -487,6 +536,13 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
             )}
           </div>
         </div>
+
+        {isLarge && scope === "data" && (
+          <div className="flex items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs text-sky-800 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            Grafo grande ({payload.counts.nodes} nós): mostrando a camada de dados e sua vizinhança direta. Use a busca ou troque o escopo para explorar o resto.
+          </div>
+        )}
 
         <Card className="relative flex-1 overflow-hidden">
           <div ref={boxRef} className="h-[72vh] w-full" data-testid="graph-canvas" />
