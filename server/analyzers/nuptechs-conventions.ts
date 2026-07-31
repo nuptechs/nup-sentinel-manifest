@@ -293,6 +293,22 @@ export function augmentGraphWithWsV1(
     if (norm && !entityIndex.has(norm)) entityIndex.set(norm, en.id);
   }
 
+  // Índice de HANDLERS reais (nós CONTROLLER do AST Java) por nome SIMPLES da
+  // classe → ids dos nós de método. Liga a SUPERFÍCIE de endpoint (o nó
+  // sintético `wsv1:<verbo>:<path>`, que carrega o path/permissão reais mas não
+  // chama nada) à CLASSE que de fato a implementa (`CONTROLLER:<fqn>.<m>(...)`,
+  // já conectada a service→repo→entidade). Sem esse elo, endpoint e código são
+  // duas ilhas — a raiz dos ~269 nós de rota isolados. Exclui os próprios nós
+  // sintéticos (metadata.synthetic) pra não ligar rota→rota. Precisão acima de
+  // recall: casa por nome de classe EXATO (WsV1 é único por operação/versão).
+  const handlerIndex = new Map<string, string[]>();
+  for (const ctrl of graph.getNodesByType("CONTROLLER")) {
+    if (ctrl.metadata && ctrl.metadata.synthetic) continue;
+    const list = handlerIndex.get(ctrl.className);
+    if (list) list.push(ctrl.id);
+    else handlerIndex.set(ctrl.className, [ctrl.id]);
+  }
+
   for (const ep of endpoints) {
     const id = `wsv1:${ep.httpMethod}:${ep.fullPath}`;
     if (!graph.getNode(id)) {
@@ -311,6 +327,22 @@ export function augmentGraphWithWsV1(
         }),
       );
       added++;
+    }
+
+    // Liga o endpoint à CLASSE handler real (endpoint→handler→service→repo→
+    // entidade fica navegável). Reusa a relação CALLS (o cliente/legenda/filtros
+    // e o class-shaper já a entendem — sem tipo de aresta novo). metadata
+    // marca a origem pra distinguir da chamada de código de verdade.
+    const handlerIds = handlerIndex.get(ep.className);
+    if (handlerIds) {
+      for (const handlerId of handlerIds) {
+        graph.addEdge(
+          new GraphEdge(id, handlerId, "CALLS", {
+            synthetic: true,
+            convention: "wsv1-handler",
+          }),
+        );
+      }
     }
 
     // Liga o endpoint à entidade pela convenção verbo+entidade.
