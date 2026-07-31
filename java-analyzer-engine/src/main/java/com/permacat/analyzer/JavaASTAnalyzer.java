@@ -65,6 +65,11 @@ public class JavaASTAnalyzer {
 
     private final SymbolMap symbolClassMap = new SymbolMap();
     private final Map<String, ClassInfo> fqnIndex = new HashMap<>();
+    // Wave 2 (interface→impl): nome SIMPLES de interface → impls do projeto que a
+    // declaram (implements/extends). Resolve o padrão DI de registro/estratégia
+    // — ex. RuleEngine injeta `List<ActionExecutor>` e chama `executor.execute()`:
+    // o alvo é a INTERFACE, e sem esse índice todas as ~22 impls ficam isoladas.
+    private final Map<String, List<ClassInfo>> implsBySimpleName = new HashMap<>();
 
     static class SymbolMap {
         private final Map<String, ClassInfo> byQualifiedName = new HashMap<>();
@@ -404,6 +409,18 @@ public class JavaASTAnalyzer {
 
             if (!cls.getExtendedTypes().isEmpty()) {
                 info.superClassName = cls.getExtendedTypes().get(0).getNameAsString();
+            }
+
+            // Wave 2: interfaces DECLARADAS pela classe (implements) + as que uma
+            // interface estende (extends). Alimenta o índice interface→impl que
+            // liga chamada-polimórfica (executor.execute()) à impl concreta.
+            for (ClassOrInterfaceType impl : cls.getImplementedTypes()) {
+                info.interfaceNames.add(impl.getNameAsString());
+            }
+            if (cls.isInterface()) {
+                for (ClassOrInterfaceType ext : cls.getExtendedTypes()) {
+                    info.interfaceNames.add(ext.getNameAsString());
+                }
             }
 
             String classLevelPath = "";
@@ -891,12 +908,68 @@ public class JavaASTAnalyzer {
         return unique;
     }
 
+    /** Wave 2: impls do projeto (que viram nó) de uma interface pelo nome simples. */
+    private List<ClassInfo> implsOf(String interfaceSimpleName) {
+        List<ClassInfo> l = implsBySimpleName.get(interfaceSimpleName);
+        return l != null ? l : Collections.emptyList();
+    }
+
+    /**
+     * Resolve o id do nó de método ALVO (não-repo) de uma chamada, no `tgt` dado.
+     * Requalifica a assinatura resolvida pro FQN do alvo (cobre o fan-out
+     * interface→impl: a assinatura vem da interface, o nó é da impl) e cai pro
+     * casamento por NOME+aridade quando não há assinatura. Retorna null se o alvo
+     * não tiver o método (impl que não sobrescreve aquele método da interface).
+     */
+    private String resolveCalleeNodeId(ClassInfo tgt, MethodCallInfo call,
+                                       Map<String, String> signatureToNodeId) {
+        String targetQualifiedName = tgt.resolvedSymbol != null
+            ? tgt.resolvedSymbol.getQualifiedName() : tgt.fqn;
+        if (call.resolvedSignature != null) {
+            String requalified = requalifySignature(call.resolvedSignature, targetQualifiedName);
+            String toId = signatureToNodeId.get(requalified);
+            if (toId != null) return toId;
+            // fan-out: a impl tem o método com o MESMO nome mas assinatura própria
+            MethodInfo byName = matchMethodByNameArity(tgt, call);
+            if (byName != null && byName.resolvedQualifiedSignature != null) {
+                toId = signatureToNodeId.get(byName.resolvedQualifiedSignature);
+                if (toId != null) return toId;
+            }
+            return signatureToNodeId.get(call.resolvedSignature);
+        }
+        MethodInfo tm = matchMethodByNameArity(tgt, call);
+        if (tm != null && tm.resolvedQualifiedSignature != null) {
+            return signatureToNodeId.get(tm.resolvedQualifiedSignature);
+        }
+        return null;
+    }
+
+    private MethodInfo matchMethodByNameArity(ClassInfo tgt, MethodCallInfo call) {
+        MethodInfo tm = null;
+        for (MethodInfo cand : tgt.methods) {
+            if (!cand.name.equals(call.methodName)) continue;
+            if (cand.parameters.size() == call.argCount) return cand;
+            if (tm == null) tm = cand;
+        }
+        return tm;
+    }
+
     private AnalysisResult buildGraph(List<String> resolutionErrors) {
         List<GraphNodeDTO> nodes = new ArrayList<>();
         List<GraphEdgeDTO> edges = new ArrayList<>();
         Set<String> nodeIds = new HashSet<>();
         Set<String> edgeKeys = new HashSet<>();
         Map<String, String> signatureToNodeId = new HashMap<>();
+
+        // Wave 2: índice interface(nome simples)→impls do projeto. Só classes que
+        // viram nó (não-entidade) entram como impl. Construído 1× por análise.
+        implsBySimpleName.clear();
+        for (ClassInfo ci : fqnIndex.values()) {
+            if (ci.isEntity) continue;
+            for (String iface : ci.interfaceNames) {
+                implsBySimpleName.computeIfAbsent(iface, k -> new ArrayList<>()).add(ci);
+            }
+        }
 
         for (ClassInfo cls : fqnIndex.values()) {
             if (cls.isEntity) {
@@ -1061,7 +1134,12 @@ public class JavaASTAnalyzer {
                         if (call.fallbackUnqualified) {
                             targetClass = cls;
                         } else if (call.fallbackScopeName != null) {
+                            // Campo injetado (DI) → var local (ex. `for (ActionExecutor
+                            // executor : ...)`) → parâmetro. O último cobre o padrão
+                            // de registro polimórfico que deixava as impls isoladas.
                             String declaredType = cls.fieldTypes.get(call.fallbackScopeName);
+                            if (declaredType == null) declaredType = method.localVarTypes.get(call.fallbackScopeName);
+                            if (declaredType == null) declaredType = method.paramTypesByName.get(call.fallbackScopeName);
                             if (declaredType != null) {
                                 targetClass = resolveTypeToClassInfo(cls, declaredType);
                             }
@@ -1103,30 +1181,28 @@ public class JavaASTAnalyzer {
                         }
                         addEdge(edges, edgeKeys, fromId, repoMethodNodeId, "CALLS", null);
                     } else {
-                        String targetQualifiedName = targetClass.resolvedSymbol != null
-                            ? targetClass.resolvedSymbol.getQualifiedName() : targetClass.fqn;
-                        String toId = null;
-                        if (call.resolvedSignature != null) {
-                            String requalified = requalifySignature(call.resolvedSignature, targetQualifiedName);
-                            toId = signatureToNodeId.get(requalified);
-                            if (toId == null) {
-                                toId = signatureToNodeId.get(call.resolvedSignature);
-                            }
+                        // Wave 2 — interface→impl fan-out: se o alvo é uma INTERFACE do
+                        // projeto (ex. ActionExecutor/ConfigContentValidator chamados via
+                        // registro polimórfico), liga a chamada a TODAS as impls concretas
+                        // (padrão CHA; F4F/JackEE). Para grafo de ARQUITETURA, ver "usa a
+                        // família toda" é o desejado; marca resolution=interface-impl p/
+                        // honestidade/filtro. Sem impls (ou alvo concreto) = 1 aresta, como antes.
+                        List<ClassInfo> targets;
+                        boolean fanout = false;
+                        if (targetClass.isInterface) {
+                            List<ClassInfo> impls = implsOf(targetClass.className);
+                            if (!impls.isEmpty()) { targets = impls; fanout = true; }
+                            else { targets = Collections.singletonList(targetClass); }
                         } else {
-                            // fallback: método do alvo por NOME (aridade quando bate)
-                            MethodInfo tm = null;
-                            for (MethodInfo cand : targetClass.methods) {
-                                if (!cand.name.equals(call.methodName)) continue;
-                                if (cand.parameters.size() == call.argCount) { tm = cand; break; }
-                                if (tm == null) tm = cand;
-                            }
-                            if (tm != null && tm.resolvedQualifiedSignature != null) {
-                                toId = signatureToNodeId.get(tm.resolvedQualifiedSignature);
-                            }
+                            targets = Collections.singletonList(targetClass);
                         }
-
-                        if (toId != null && nodeIds.contains(toId)) {
-                            addEdge(edges, edgeKeys, fromId, toId, "CALLS", null);
+                        for (ClassInfo tgt : targets) {
+                            if (tgt.isRepository) continue; // impl repo já coberto pelo ramo acima
+                            String toId = resolveCalleeNodeId(tgt, call, signatureToNodeId);
+                            if (toId != null && nodeIds.contains(toId)) {
+                                addEdge(edges, edgeKeys, fromId, toId, "CALLS",
+                                    fanout ? Map.of("resolution", "interface-impl", "via", targetClass.className) : null);
+                            }
                         }
                     }
                 }
@@ -1237,6 +1313,9 @@ public class JavaASTAnalyzer {
         // falha em tipos externos (repo.save herdado do JpaRepository etc.).
         Map<String, String> fieldTypes = new HashMap<>();
         Map<String, String> importsSimpleToFqn = new HashMap<>();
+        // Wave 2: interfaces que esta classe implementa (ou, se for interface,
+        // estende) — nomes simples. Base do índice interface→impl.
+        List<String> interfaceNames = new ArrayList<>();
     }
 
     static class MethodInfo {
