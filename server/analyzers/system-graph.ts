@@ -4,6 +4,17 @@
 // shape que o cliente consome: grau de entrada/saída por nó (proxy de
 // importância), flags derivadas e contagens por tipo. Puro e testável —
 // nenhuma dependência de storage/express.
+//
+// GRANULARIDADE (revisão 2026-07-31): o Engine A emite o grafo em nível de
+// MÉTODO (a classe E cada método dela são nós, todos com o estereótipo da
+// classe). Isso é ótimo para call-graph, mas ERRADO para um "mapa de
+// arquitetura": infla a contagem (382 "repositories" = 48 classes + métodos),
+// duplica nós (ConnectorPollProcessor 29×) e faz a CLASSE parecer isolada
+// quando as arestas estão nos métodos. Por isso o default é `level: 'class'`
+// — agrega os nós de método na classe dona e rola as arestas para
+// classe→classe (o nível correto de um mapa de sistema; CAST/JetBrains/
+// Structure101 todos agregam). `level: 'method'` preserva o grafo cru para
+// drill-down futuro.
 // ─────────────────────────────────────────────
 
 export interface RawSystemNode {
@@ -36,8 +47,11 @@ export interface ShapedNode {
   outDegree: number;
   sensitive: boolean;
   sourceFile?: string;
+  /** nº de nós (métodos + a classe) agregados — só em level=class */
+  memberCount?: number;
 }
 export interface ShapedGraph {
+  level: 'class' | 'method';
   truncated: boolean;
   counts: { nodes: number; edges: number; byType: Record<string, number> };
   nodes: ShapedNode[];
@@ -47,48 +61,117 @@ export interface ShapedGraph {
 function isSensitive(node: RawSystemNode): boolean {
   const meta = node.metadata || {};
   const sensitiveFields = (meta as Record<string, unknown>).sensitiveFields;
-  if (Array.isArray(sensitiveFields) && sensitiveFields.length > 0) return true;
-  return false;
+  return Array.isArray(sensitiveFields) && sensitiveFields.length > 0;
+}
+function sourceFileOf(node: RawSystemNode): string | undefined {
+  return typeof node.metadata?.sourceFile === 'string' ? (node.metadata.sourceFile as string) : undefined;
 }
 
 /**
- * Transforma o grafo cru do snapshot no payload da tela. Só considera arestas
- * cujos dois extremos existem entre os nós (arestas órfãs são descartadas —
- * nunca contamos grau contra nó inexistente).
+ * Chave da CLASSE dona de um nó. Id do Engine A:
+ *   classe:  `TYPE:pacote.Classe`
+ *   método:  `TYPE:pacote.Classe.metodo(args)`
+ * Remove o sufixo `.metodo(args)` quando presente (o `(` marca o método),
+ * preservando `pacote.Classe`. Sem `(` = já é a classe.
  */
-export function shapeSystemGraph(raw: RawSystemGraph): ShapedGraph {
+export function classKeyOf(nodeId: string): string {
+  const paren = nodeId.indexOf('(');
+  if (paren < 0) return nodeId;
+  const pre = nodeId.slice(0, paren); // TYPE:pacote.Classe.metodo
+  const lastDot = pre.lastIndexOf('.');
+  return lastDot > 0 ? pre.slice(0, lastDot) : pre; // tira `.metodo`
+}
+
+/** Nome curto de classe a partir da chave (`TYPE:a.b.Classe` → `Classe`). */
+function classNameFromKey(key: string): string {
+  const afterColon = key.includes(':') ? key.slice(key.indexOf(':') + 1) : key;
+  return afterColon.split('.').filter(Boolean).pop() || afterColon;
+}
+
+/**
+ * Transforma o grafo cru do snapshot no payload da tela. `level='class'`
+ * (default) agrega método→classe; `level='method'` mantém o grafo cru.
+ * Só considera arestas cujos dois extremos existem entre os nós; em class
+ * também descarta self-loops (método→método da MESMA classe não é aresta de
+ * arquitetura).
+ */
+export function shapeSystemGraph(raw: RawSystemGraph, level: 'class' | 'method' = 'class'): ShapedGraph {
+  return level === 'method' ? shapeMethodLevel(raw) : shapeClassLevel(raw);
+}
+
+function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
   const nodeIds = new Set(raw.nodes.map((n) => n.id));
   const inDegree: Record<string, number> = {};
   const outDegree: Record<string, number> = {};
   const edges: { fromNode: string; toNode: string; relationType: string }[] = [];
-
   for (const e of raw.edges || []) {
     if (!nodeIds.has(e.fromNode) || !nodeIds.has(e.toNode)) continue;
     inDegree[e.toNode] = (inDegree[e.toNode] || 0) + 1;
     outDegree[e.fromNode] = (outDegree[e.fromNode] || 0) + 1;
     edges.push({ fromNode: e.fromNode, toNode: e.toNode, relationType: e.relationType });
   }
-
   const byType: Record<string, number> = {};
   const nodes: ShapedNode[] = raw.nodes.map((n) => {
     byType[n.type] = (byType[n.type] || 0) + 1;
     return {
-      id: n.id,
-      type: n.type,
-      className: n.className,
-      methodName: n.methodName,
+      id: n.id, type: n.type, className: n.className, methodName: n.methodName,
       qualifiedSignature: n.qualifiedSignature,
-      inDegree: inDegree[n.id] || 0,
-      outDegree: outDegree[n.id] || 0,
-      sensitive: isSensitive(n),
-      sourceFile: typeof n.metadata?.sourceFile === "string" ? (n.metadata.sourceFile as string) : undefined,
+      inDegree: inDegree[n.id] || 0, outDegree: outDegree[n.id] || 0,
+      sensitive: isSensitive(n), sourceFile: sourceFileOf(n),
     };
   });
+  return { level: 'method', truncated: !!raw.truncated, counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
+}
 
-  return {
-    truncated: !!raw.truncated,
-    counts: { nodes: nodes.length, edges: edges.length, byType },
-    nodes,
-    edges,
-  };
+function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
+  interface Agg { id: string; type: string; className: string; sensitive: boolean; sourceFile?: string; members: number; }
+  const classes = new Map<string, Agg>();
+  const keyOf = new Map<string, string>();
+  for (const n of raw.nodes) {
+    const key = classKeyOf(n.id);
+    keyOf.set(n.id, key);
+    let c = classes.get(key);
+    if (!c) {
+      c = { id: key, type: n.type, className: n.className || classNameFromKey(key), sensitive: false, members: 0 };
+      classes.set(key, c);
+    }
+    c.members += 1;
+    if (isSensitive(n)) c.sensitive = true;
+    // prefere nome/arquivo do nó de CLASSE (sem parêntese); senão o 1º arquivo visto
+    if (!n.id.includes('(')) {
+      if (n.className) c.className = n.className;
+      const sf = sourceFileOf(n);
+      if (sf) c.sourceFile = sf;
+    } else if (!c.sourceFile) {
+      const sf = sourceFileOf(n);
+      if (sf) c.sourceFile = sf;
+    }
+  }
+
+  const edgeSet = new Set<string>();
+  const inDegree: Record<string, number> = {};
+  const outDegree: Record<string, number> = {};
+  const edges: { fromNode: string; toNode: string; relationType: string }[] = [];
+  for (const e of raw.edges || []) {
+    const a = keyOf.get(e.fromNode);
+    const b = keyOf.get(e.toNode);
+    if (!a || !b || a === b) continue; // self-loop (mesma classe) não é aresta de arquitetura
+    const k = `${a} ${b} ${e.relationType}`;
+    if (edgeSet.has(k)) continue;
+    edgeSet.add(k);
+    inDegree[b] = (inDegree[b] || 0) + 1;
+    outDegree[a] = (outDegree[a] || 0) + 1;
+    edges.push({ fromNode: a, toNode: b, relationType: e.relationType });
+  }
+
+  const byType: Record<string, number> = {};
+  const nodes: ShapedNode[] = Array.from(classes.values()).map((c) => {
+    byType[c.type] = (byType[c.type] || 0) + 1;
+    return {
+      id: c.id, type: c.type, className: c.className,
+      inDegree: inDegree[c.id] || 0, outDegree: outDegree[c.id] || 0,
+      sensitive: c.sensitive, sourceFile: c.sourceFile, memberCount: c.members,
+    };
+  });
+  return { level: 'class', truncated: !!raw.truncated, counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
 }

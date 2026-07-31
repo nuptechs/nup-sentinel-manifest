@@ -1494,7 +1494,8 @@ export async function registerRoutes(
         });
       }
       const { shapeSystemGraph } = await import("./analyzers/system-graph");
-      const shaped = shapeSystemGraph(systemGraph);
+      const level = req.query.level === "method" ? "method" : "class";
+      const shaped = shapeSystemGraph(systemGraph, level);
       res.json({
         projectId,
         analysisRunId: snapshots[0].analysisRunId,
