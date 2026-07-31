@@ -77,3 +77,47 @@ describe("augmentGraphWithFullStack (Onda 6)", () => {
     assert.ok(!urlMatchesRoute("/api/other/31/graph", r), "segmento literal deve bater");
   });
 });
+
+describe("linkViewsViaApiLayer (Onda 6b — cadeia componente→api/*.ts→URL)", () => {
+  const apiFile = {
+    filePath: "frontend/src/api/vendors.ts",
+    content: "export async function findVendors(q = {}) {\n  const r = await authFetch(`${API_BASE_URL}/easynup/findVendors.v1?${p}`);\n  return r.json();\n}\nexport async function orfa() { return 1; }\n",
+  };
+  const page = {
+    filePath: "frontend/src/pages/VendorWorkspacePage.vue",
+    content: "<script setup>\nimport { findVendors, orfa } from '@/api/vendors';\nconst load = async () => { const d = await findVendors({ q: 'x' }); };\n</script>",
+  };
+  it("indexa export→URL e liga VIEW→wsv1 com proveniência api-layer", async () => {
+    const { indexApiLayer, linkViewsViaApiLayer } = await import("../../server/analyzers/full-stack-augment.ts");
+    const idx = indexApiLayer([apiFile]);
+    assert.equal(idx.vendors.findVendors, "/easynup/findVendors.v1");
+    assert.equal(idx.vendors.orfa, undefined, "função sem URL não entra");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("wsv1:POST:/easynup/findVendors.v1", "CONTROLLER", "FindVendorsWsV1", "execute", null, { synthetic: true }));
+    const r = linkViewsViaApiLayer(g, [apiFile, page]);
+    assert.equal(r.views, 1);
+    assert.equal(r.edges, 1);
+    const e = g.getOutgoingEdges("view:VendorWorkspacePage")[0];
+    assert.equal(e.toNode, "wsv1:POST:/easynup/findVendors.v1");
+    assert.equal(e.metadata.resolution, "syntactic-declared");
+    assert.equal(e.metadata.via, "api/vendors.findVendors");
+  });
+  it("importada mas NÃO invocada não liga; URL sem alvo no grafo não liga", async () => {
+    const { linkViewsViaApiLayer } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("wsv1:POST:/easynup/findVendors.v1", "CONTROLLER", "X", "execute", null, {}));
+    const soImporta = { filePath: "frontend/src/pages/Outra.vue", content: "import { findVendors } from '@/api/vendors';\nconst nada = 1;" };
+    const r = linkViewsViaApiLayer(g, [apiFile, soImporta]);
+    assert.equal(r.edges, 0, "sem invocação não liga (precisão)");
+  });
+  it("URL /api/ com ${param} casa rota Express :param", async () => {
+    const { linkViewsViaApiLayer } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("route:GET:/api/projects/:id/graph", "ROUTE", "/api/projects/:id/graph", null, null, { fullPath: "/api/projects/:id/graph", synthetic: true }));
+    const api = { filePath: "frontend/src/api/graph.ts", content: "export async function getGraph(id) { return authFetch(`${B}/api/projects/${id}/graph`); }\n" };
+    const pg = { filePath: "frontend/src/pages/Mapa.vue", content: "import { getGraph } from '@/api/graph';\nconst x = () => getGraph(1);" };
+    const r = linkViewsViaApiLayer(g, [api, pg]);
+    assert.equal(r.edges, 1);
+    assert.equal(g.getOutgoingEdges("view:Mapa")[0].toNode, "route:GET:/api/projects/:id/graph");
+  });
+});

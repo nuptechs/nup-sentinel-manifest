@@ -121,3 +121,102 @@ export function augmentGraphWithFullStack(
 
   return { views, routes: routesAdded, edges };
 }
+
+// ─── Onda 6b (ADR-0025): resolvedor da CAMADA DE API do frontend ───
+// O padrão easynup: componente importa função de `frontend/src/api/*.ts`
+// (`import { findVendors } from '@/api/vendors'`) e a função contém a URL
+// (`${API_BASE_URL}/easynup/findVendors.v1`). O analisador de interações não
+// atravessa essa cadeia (2.871 interações → só 12 telas ligadas). Aqui a
+// travessia é DETERMINÍSTICA: indexa export→URL nos módulos de api, casa
+// import+invocação no componente e emite VIEW→endpoint/rota com proveniência
+// `syntactic-declared` (é sintaxe real: import + chamada + URL literal).
+
+export interface ApiLayerIndex { [module: string]: { [fn: string]: string } }
+
+const EXPORT_RE = /export\s+(?:async\s+)?(?:function\s+(\w+)|const\s+(\w+)\s*=)/g;
+const URL_RE = /(\/(?:easynup|api)\/[A-Za-z0-9_\-./${}:]*[A-Za-z0-9_\-.}])/;
+
+export function indexApiLayer(fileData: { filePath: string; content: string }[]): ApiLayerIndex {
+  const idx: ApiLayerIndex = {};
+  for (const f of fileData) {
+    if (!/frontend\/src\/api\/[\w-]+\.ts$/.test(f.filePath)) continue;
+    const mod = f.filePath.replace(/.*\/api\//, "").replace(/\.ts$/, "");
+    const marks: { name: string; at: number }[] = [];
+    let m: RegExpExecArray | null;
+    EXPORT_RE.lastIndex = 0;
+    while ((m = EXPORT_RE.exec(f.content)) !== null) marks.push({ name: m[1] || m[2], at: m.index });
+    for (let i = 0; i < marks.length; i++) {
+      const body = f.content.slice(marks[i].at, marks[i + 1]?.at ?? f.content.length);
+      const u = body.match(URL_RE);
+      if (u) (idx[mod] = idx[mod] || {})[marks[i].name] = u[1].split("?")[0];
+    }
+  }
+  return idx;
+}
+
+const IMPORT_RE = /import\s*(?:type\s*)?\{([^}]+)\}\s*from\s*['"](?:@\/|\.{1,2}\/(?:\.\.\/)*)api\/([\w-]+)['"]/g;
+
+/** URL da api (com `${…}`) casa com path de rota Express (`:param` curinga). */
+function apiUrlMatchesRoutePath(url: string, routePath: string): boolean {
+  const us = url.split("/").filter(Boolean);
+  const rs = routePath.split("/").filter(Boolean);
+  if (us.length !== rs.length || !us.length) return false;
+  for (let i = 0; i < rs.length; i++) {
+    if (rs[i].startsWith(":") || us[i].includes("${")) continue;
+    if (rs[i] !== us[i]) return false;
+  }
+  return true;
+}
+
+export function linkViewsViaApiLayer(
+  graph: ApplicationGraph,
+  fileData: { filePath: string; content: string }[],
+): { views: number; edges: number } {
+  const idx = indexApiLayer(fileData);
+  let views = 0, edges = 0;
+  if (!Object.keys(idx).length) return { views, edges };
+  // alvo por URL: wsv1 por PATH exato (qualquer método) · ROUTE por segmentos
+  const epByPath = new Map<string, string>();
+  const routeNodes: { id: string; path: string }[] = [];
+  for (const n of graph.getAllNodes()) {
+    if (n.id.startsWith("wsv1:")) epByPath.set(n.id.slice(n.id.indexOf(":", 5) + 1), n.id);
+    else if (n.type === "ROUTE") routeNodes.push({ id: n.id, path: String(n.metadata.fullPath || "") });
+  }
+  const resolveTarget = (url: string): string | null => {
+    const hit = epByPath.get(url);
+    if (hit) return hit;
+    for (const r of routeNodes) if (apiUrlMatchesRoutePath(url, r.path)) return r.id;
+    return null;
+  };
+  const seen = new Set<string>();
+  for (const f of fileData) {
+    if (!/frontend\/src\/.*\.(vue|ts)$/.test(f.filePath) || /frontend\/src\/api\//.test(f.filePath)) continue;
+    const component = (f.filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
+    let im: RegExpExecArray | null;
+    IMPORT_RE.lastIndex = 0;
+    while ((im = IMPORT_RE.exec(f.content)) !== null) {
+      const mod = idx[im[2]];
+      if (!mod) continue;
+      for (const raw of im[1].split(",")) {
+        const fn = raw.trim().split(/\s+as\s+/)[0].trim();
+        if (!mod[fn]) continue;
+        if (!new RegExp("[^\\w.]" + fn + "\\s*\\(").test(f.content)) continue; // importada mas não invocada
+        const target = resolveTarget(mod[fn]);
+        if (!target) continue;
+        const viewId = `view:${component}`;
+        if (!graph.getNode(viewId)) {
+          graph.addNode(new GraphNode(viewId, "VIEW", component, null, null, { sourceFile: f.filePath, synthetic: true }));
+          views++;
+        }
+        const k = `${viewId}->${target}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        graph.addEdge(new GraphEdge(viewId, target, "CALLS", {
+          synthetic: true, resolution: "syntactic-declared", convention: "api-layer", via: `api/${im[2]}.${fn}`,
+        }));
+        edges++;
+      }
+    }
+  }
+  return { views, edges };
+}
