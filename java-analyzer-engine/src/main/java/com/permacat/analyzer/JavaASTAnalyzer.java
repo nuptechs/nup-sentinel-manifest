@@ -77,6 +77,11 @@ public class JavaASTAnalyzer {
 
     private final SymbolMap symbolClassMap = new SymbolMap();
     private final Map<String, ClassInfo> fqnIndex = new HashMap<>();
+    // Onda 5 (ADR-0025): @interface declaradas no payload → suas meta-anotações
+    // (nomes simples). Base do fecho transitivo de estereótipos: um @DomainService
+    // meta-anotado com @Service classifica a classe como SERVICE — o modelo do
+    // Spring ("any annotation meta-annotated with @Component is a stereotype").
+    private final Map<String, Set<String>> annotationMetas = new HashMap<>();
     // Wave 2 (interface→impl): nome SIMPLES de interface → impls do projeto que a
     // declaram (implements/extends). Resolve o padrão DI de registro/estratégia
     // — ex. RuleEngine injeta `List<ActionExecutor>` e chama `executor.execute()`:
@@ -141,6 +146,11 @@ public class JavaASTAnalyzer {
                 + compilationUnits.size() + " OK, " + parseErrors + " errors, " + fqnIndex.size() + " classes found)");
 
             phaseStart = System.currentTimeMillis();
+            int reclassified = applyMetaAnnotationClosure();
+            System.out.println("[java-engine] Phase 3.2/8: Meta-annotation closure — " + (System.currentTimeMillis() - phaseStart) + "ms ("
+                + annotationMetas.size() + " @interface no payload, " + reclassified + " classes reclassificadas)");
+
+            phaseStart = System.currentTimeMillis();
             resolveSuperclassBasePaths();
             long controllersFound = fqnIndex.values().stream().filter(ci -> ci.isController).count();
             System.out.println("[java-engine] Phase 3.5/8: Resolve superclass base paths — " + (System.currentTimeMillis() - phaseStart) + "ms ("
@@ -181,6 +191,42 @@ public class JavaASTAnalyzer {
         System.out.println("[java-engine] Phase 8/8: Build graph — " + (System.currentTimeMillis() - phaseStart) + "ms");
         System.out.println("[java-engine] Total analysis time: " + ((System.currentTimeMillis() - totalStart) / 1000.0) + "s");
         return result;
+    }
+
+    /**
+     * Onda 5 (ADR-0025): fecho transitivo de meta-anotações — o modelo real do
+     * Spring ("any annotation meta-annotated with @Component is a stereotype",
+     * javadoc do @Component). Classe anotada com @X, onde @X (declarada no
+     * payload) é meta-anotada — direta ou transitivamente — com um estereótipo
+     * conhecido, é classificada como se tivesse o estereótipo. BFS com visited
+     * (ciclo de meta-anotação não trava). Só ADICIONA classificação (classe já
+     * classificada fica como está — zero regressão). Anotação de fora do payload
+     * (jar externo) não tem declaração aqui → sem efeito, conservador.
+     */
+    private int applyMetaAnnotationClosure() {
+        if (annotationMetas.isEmpty()) return 0;
+        int changed = 0;
+        for (ClassInfo info : fqnIndex.values()) {
+            if (info.classAnnotationNames == null || info.classAnnotationNames.isEmpty()) continue;
+            // expande o fecho das anotações da classe
+            Set<String> closure = new HashSet<>();
+            Deque<String> queue = new ArrayDeque<>(info.classAnnotationNames);
+            while (!queue.isEmpty()) {
+                String ann = queue.poll();
+                if (!closure.add(ann)) continue;
+                Set<String> metas = annotationMetas.get(ann);
+                if (metas != null) queue.addAll(metas);
+            }
+            boolean before = info.isService || info.isRepository || info.isEntity || info.isController;
+            if (!info.isEntity && closure.stream().anyMatch(ENTITY_ANNOTATIONS::contains)) info.isEntity = true;
+            if (!info.isRepository && closure.stream().anyMatch(REPOSITORY_ANNOTATIONS::contains)) info.isRepository = true;
+            if (!info.isController && closure.stream().anyMatch(CONTROLLER_ANNOTATIONS::contains)) info.isController = true;
+            if (!info.isService && !info.isEntity && !info.isRepository
+                && closure.stream().anyMatch(SERVICE_ANNOTATIONS::contains)) info.isService = true;
+            boolean after = info.isService || info.isRepository || info.isEntity || info.isController;
+            if (!before && after) changed++;
+        }
+        return changed;
     }
 
     private void resolveClassSymbols(List<CompilationUnit> compilationUnits, List<String> resolutionErrors) {
@@ -388,6 +434,15 @@ public class JavaASTAnalyzer {
             .map(pd -> pd.getNameAsString())
             .orElse("");
 
+        // Onda 5: registra @interface do payload e suas meta-anotações — insumo
+        // do fecho transitivo de estereótipos (applyMetaAnnotationClosure).
+        for (AnnotationDeclaration ad : cu.findAll(AnnotationDeclaration.class)) {
+            Set<String> metas = annotationMetas.computeIfAbsent(ad.getNameAsString(), k -> new HashSet<>());
+            for (AnnotationExpr meta : ad.getAnnotations()) {
+                metas.add(meta.getNameAsString());
+            }
+        }
+
         for (ClassOrInterfaceDeclaration cls : cu.findAll(ClassOrInterfaceDeclaration.class)) {
             ClassInfo info = new ClassInfo();
             info.className = cls.getNameAsString();
@@ -399,6 +454,7 @@ public class JavaASTAnalyzer {
             List<String> annotations = cls.getAnnotations().stream()
                 .map(a -> a.getNameAsString())
                 .collect(Collectors.toList());
+            info.classAnnotationNames = annotations; // Onda 5: insumo do fecho
 
             info.isService = annotations.stream().anyMatch(SERVICE_ANNOTATIONS::contains);
             info.isRepository = annotations.stream().anyMatch(REPOSITORY_ANNOTATIONS::contains);
@@ -1506,6 +1562,8 @@ public class JavaASTAnalyzer {
         List<String[]> entityAssociations = new ArrayList<>();
         // Onda 4: implementa CommandLineRunner/ApplicationRunner (run() = boot).
         boolean isRunner;
+        // Onda 5: anotações declaradas na classe (nomes simples) — insumo do fecho.
+        List<String> classAnnotationNames = new ArrayList<>();
     }
 
     static class MethodInfo {
