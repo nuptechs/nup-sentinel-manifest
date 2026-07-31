@@ -56,12 +56,21 @@ export interface ShapedNode {
    */
   entryPoint?: string[];
 }
+export interface ShapedEdge {
+  fromNode: string;
+  toNode: string;
+  relationType: string;
+  /** T1 (ADR-0025): proveniência da aresta (compiler|syntactic-*|interface-impl|convention-name) */
+  resolution?: string;
+  /** aresta de convenção (wsv1-handler/wsv1-name) — não é chamada de código observada */
+  synthetic?: boolean;
+}
 export interface ShapedGraph {
   level: 'class' | 'method';
   truncated: boolean;
   counts: { nodes: number; edges: number; byType: Record<string, number> };
   nodes: ShapedNode[];
-  edges: { fromNode: string; toNode: string; relationType: string }[];
+  edges: ShapedEdge[];
 }
 
 function isSensitive(node: RawSystemNode): boolean {
@@ -71,6 +80,12 @@ function isSensitive(node: RawSystemNode): boolean {
 }
 function sourceFileOf(node: RawSystemNode): string | undefined {
   return typeof node.metadata?.sourceFile === 'string' ? (node.metadata.sourceFile as string) : undefined;
+}
+function edgeProvenance(e: RawSystemEdge): { resolution?: string; synthetic?: boolean } {
+  const m = e.metadata || {};
+  const resolution = typeof (m as Record<string, unknown>).resolution === 'string' ? ((m as Record<string, unknown>).resolution as string) : undefined;
+  const synthetic = (m as Record<string, unknown>).synthetic === true ? true : undefined;
+  return { ...(resolution ? { resolution } : {}), ...(synthetic ? { synthetic } : {}) };
 }
 function entryPointOf(node: RawSystemNode): string | undefined {
   const ep = node.metadata?.entryPoint;
@@ -113,12 +128,12 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
   const nodeIds = new Set(raw.nodes.map((n) => n.id));
   const inDegree: Record<string, number> = {};
   const outDegree: Record<string, number> = {};
-  const edges: { fromNode: string; toNode: string; relationType: string }[] = [];
+  const edges: ShapedEdge[] = [];
   for (const e of raw.edges || []) {
     if (!nodeIds.has(e.fromNode) || !nodeIds.has(e.toNode)) continue;
     inDegree[e.toNode] = (inDegree[e.toNode] || 0) + 1;
     outDegree[e.fromNode] = (outDegree[e.fromNode] || 0) + 1;
-    edges.push({ fromNode: e.fromNode, toNode: e.toNode, relationType: e.relationType });
+    edges.push({ fromNode: e.fromNode, toNode: e.toNode, relationType: e.relationType, ...edgeProvenance(e) });
   }
   const byType: Record<string, number> = {};
   const nodes: ShapedNode[] = raw.nodes.map((n) => {
@@ -165,7 +180,7 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
   const edgeSet = new Set<string>();
   const inDegree: Record<string, number> = {};
   const outDegree: Record<string, number> = {};
-  const edges: { fromNode: string; toNode: string; relationType: string }[] = [];
+  const edges: ShapedEdge[] = [];
   for (const e of raw.edges || []) {
     const a = keyOf.get(e.fromNode);
     const b = keyOf.get(e.toNode);
@@ -175,7 +190,7 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
     edgeSet.add(k);
     inDegree[b] = (inDegree[b] || 0) + 1;
     outDegree[a] = (outDegree[a] || 0) + 1;
-    edges.push({ fromNode: a, toNode: b, relationType: e.relationType });
+    edges.push({ fromNode: a, toNode: b, relationType: e.relationType, ...edgeProvenance(e) });
   }
 
   const byType: Record<string, number> = {};

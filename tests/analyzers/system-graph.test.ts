@@ -120,3 +120,33 @@ describe("shapeSystemGraph — ADR-0025 Ondas 3+4 (ASSOCIATES + entryPoint)", ()
     assert.deepEqual(tick.entryPoint, ["Scheduled"]);
   });
 });
+
+describe("shapeSystemGraph — T1 proveniência exposta nas arestas (ADR-0025)", () => {
+  it("resolution/synthetic da metadata crua fluem pro shape (class e method)", () => {
+    const raw = {
+      nodes: [
+        { id: "CONTROLLER:d.Ws.handle()", type: "CONTROLLER" },
+        { id: "SERVICE:d.Svc.faz()", type: "SERVICE" },
+      ],
+      edges: [
+        { fromNode: "CONTROLLER:d.Ws.handle()", toNode: "SERVICE:d.Svc.faz()", relationType: "CALLS",
+          metadata: { resolution: "interface-impl", synthetic: true } },
+      ],
+    };
+    for (const level of ["class", "method"] as const) {
+      const g = shapeSystemGraph(raw, level);
+      assert.equal(g.edges[0].resolution, "interface-impl", `${level}: resolution flui`);
+      assert.equal(g.edges[0].synthetic, true, `${level}: synthetic flui`);
+    }
+  });
+
+  it("aresta sem metadata segue sem os campos (payload enxuto, sem regressão)", () => {
+    const raw = {
+      nodes: [{ id: "SERVICE:d.A.m()", type: "SERVICE" }, { id: "SERVICE:d.B.n()", type: "SERVICE" }],
+      edges: [{ fromNode: "SERVICE:d.A.m()", toNode: "SERVICE:d.B.n()", relationType: "CALLS" }],
+    };
+    const g = shapeSystemGraph(raw, "method");
+    assert.equal(g.edges[0].resolution, undefined);
+    assert.equal(g.edges[0].synthetic, undefined);
+  });
+});
