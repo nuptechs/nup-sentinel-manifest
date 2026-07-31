@@ -44,13 +44,15 @@ import {
   Route as RouteIcon,
   Container,
   Clock,
+  Monitor,
+  Waypoints,
 } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 cytoscape.use(elk as any);
 
 // ── Tipos do payload /api/projects/:id/graph ──────────────────────────
-type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY";
+type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE";
 type EdgeRelation = "CALLS" | "READS_ENTITY" | "WRITES_ENTITY" | "ASSOCIATES";
 
 interface GraphNode {
@@ -89,6 +91,8 @@ const LAYER: Record<
   NodeType,
   { label: string; color: string; shape: string; icon: React.ComponentType<{ className?: string; style?: React.CSSProperties }> }
 > = {
+  VIEW: { label: "Tela", color: "#ec4899", shape: "round-tag", icon: Monitor },
+  ROUTE: { label: "Rota gateway", color: "#64748b", shape: "diamond", icon: Waypoints },
   CONTROLLER: { label: "Controller", color: "#6366f1", shape: "round-rectangle", icon: RouteIcon },
   SERVICE: { label: "Service", color: "#0ea5e9", shape: "ellipse", icon: ServerCog },
   REPOSITORY: { label: "Repository", color: "#14b8a6", shape: "hexagon", icon: Container },

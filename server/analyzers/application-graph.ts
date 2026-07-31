@@ -1,4 +1,6 @@
-export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY";
+// VIEW/ROUTE (ADR-0025 Onda 6): camadas de tela (frontend) e rota do gateway
+// Node — o grafo passa a contar a cadeia inteira do clique ao dado.
+export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE";
 // ASSOCIATES (ADR-0025 Onda 3a): associação JPA entidade→entidade
 // (@OneToMany/@ManyToOne/…) — como o pai alcança a filha sem repositório.
 export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY" | "ASSOCIATES";
