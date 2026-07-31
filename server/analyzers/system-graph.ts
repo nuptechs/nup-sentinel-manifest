@@ -49,6 +49,12 @@ export interface ShapedNode {
   sourceFile?: string;
   /** nº de nós (métodos + a classe) agregados — só em level=class */
   memberCount?: number;
+  /**
+   * ADR-0025 Onda 4 — gatilhos de fundo (@Scheduled/@EventListener/runner…)
+   * presentes no nó (method-level) ou em qualquer membro (class-level).
+   * Root LEGÍTIMO: a tela mostra badge e a saúde não o conta como "isolado".
+   */
+  entryPoint?: string[];
 }
 export interface ShapedGraph {
   level: 'class' | 'method';
@@ -65,6 +71,10 @@ function isSensitive(node: RawSystemNode): boolean {
 }
 function sourceFileOf(node: RawSystemNode): string | undefined {
   return typeof node.metadata?.sourceFile === 'string' ? (node.metadata.sourceFile as string) : undefined;
+}
+function entryPointOf(node: RawSystemNode): string | undefined {
+  const ep = node.metadata?.entryPoint;
+  return typeof ep === 'string' && ep ? ep : undefined;
 }
 
 /**
@@ -113,18 +123,20 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
   const byType: Record<string, number> = {};
   const nodes: ShapedNode[] = raw.nodes.map((n) => {
     byType[n.type] = (byType[n.type] || 0) + 1;
+    const ep = entryPointOf(n);
     return {
       id: n.id, type: n.type, className: n.className, methodName: n.methodName,
       qualifiedSignature: n.qualifiedSignature,
       inDegree: inDegree[n.id] || 0, outDegree: outDegree[n.id] || 0,
       sensitive: isSensitive(n), sourceFile: sourceFileOf(n),
+      ...(ep ? { entryPoint: [ep] } : {}),
     };
   });
   return { level: 'method', truncated: !!raw.truncated, counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
 }
 
 function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
-  interface Agg { id: string; type: string; className: string; sensitive: boolean; sourceFile?: string; members: number; }
+  interface Agg { id: string; type: string; className: string; sensitive: boolean; sourceFile?: string; members: number; entryPoints: Set<string>; }
   const classes = new Map<string, Agg>();
   const keyOf = new Map<string, string>();
   for (const n of raw.nodes) {
@@ -132,11 +144,13 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
     keyOf.set(n.id, key);
     let c = classes.get(key);
     if (!c) {
-      c = { id: key, type: n.type, className: n.className || classNameFromKey(key), sensitive: false, members: 0 };
+      c = { id: key, type: n.type, className: n.className || classNameFromKey(key), sensitive: false, members: 0, entryPoints: new Set() };
       classes.set(key, c);
     }
     c.members += 1;
     if (isSensitive(n)) c.sensitive = true;
+    const ep = entryPointOf(n);
+    if (ep) c.entryPoints.add(ep); // Onda 4: qualquer método-gatilho marca a classe
     // prefere nome/arquivo do nó de CLASSE (sem parêntese); senão o 1º arquivo visto
     if (!n.id.includes('(')) {
       if (n.className) c.className = n.className;
@@ -171,6 +185,7 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
       id: c.id, type: c.type, className: c.className,
       inDegree: inDegree[c.id] || 0, outDegree: outDegree[c.id] || 0,
       sensitive: c.sensitive, sourceFile: c.sourceFile, memberCount: c.members,
+      ...(c.entryPoints.size ? { entryPoint: Array.from(c.entryPoints) } : {}),
     };
   });
   return { level: 'class', truncated: !!raw.truncated, counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };

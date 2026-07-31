@@ -1,5 +1,7 @@
 export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY";
-export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY";
+// ASSOCIATES (ADR-0025 Onda 3a): associação JPA entidade→entidade
+// (@OneToMany/@ManyToOne/…) — como o pai alcança a filha sem repositório.
+export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY" | "ASSOCIATES";
 
 /**
  * True when an endpoint path is malformed and should NOT be reported as a real

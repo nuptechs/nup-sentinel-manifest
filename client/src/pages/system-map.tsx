@@ -43,6 +43,7 @@ import {
   Database,
   Route as RouteIcon,
   Container,
+  Clock,
 } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -50,7 +51,7 @@ cytoscape.use(elk as any);
 
 // ── Tipos do payload /api/projects/:id/graph ──────────────────────────
 type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY";
-type EdgeRelation = "CALLS" | "READS_ENTITY" | "WRITES_ENTITY";
+type EdgeRelation = "CALLS" | "READS_ENTITY" | "WRITES_ENTITY" | "ASSOCIATES";
 
 interface GraphNode {
   id: string;
@@ -62,6 +63,8 @@ interface GraphNode {
   outDegree: number;
   sensitive?: boolean;
   sourceFile?: string;
+  /** ADR-0025 Onda 4: gatilhos de fundo (@Scheduled/…) — root legítimo */
+  entryPoint?: string[];
 }
 interface GraphEdge {
   fromNode: string;
@@ -95,6 +98,7 @@ const REL: Record<EdgeRelation, { label: string; color: string }> = {
   CALLS: { label: "chama", color: "#94a3b8" },
   READS_ENTITY: { label: "lê", color: "#38bdf8" },
   WRITES_ENTITY: { label: "escreve", color: "#fb923c" },
+  ASSOCIATES: { label: "associa", color: "#c084fc" },
 };
 
 function labelOf(n: GraphNode): string {
@@ -201,6 +205,7 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
     CALLS: true,
     READS_ENTITY: true,
     WRITES_ENTITY: true,
+    ASSOCIATES: true,
   });
 
   // Escopo de renderização (foco-primeiro, anti-hairball — a pesquisa é
@@ -606,6 +611,16 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
                   {selected.sensitive && (
                     <Badge variant="destructive" className="gap-1">
                       <AlertTriangle className="h-3 w-3" /> sensível
+                    </Badge>
+                  )}
+                  {selected.entryPoint && selected.entryPoint.length > 0 && (
+                    <Badge
+                      variant="outline"
+                      className="gap-1"
+                      title={`Root legítimo — acionado por ${selected.entryPoint.join(", ")}, não por código do sistema`}
+                      data-testid="badge-entry-point"
+                    >
+                      <Clock className="h-3 w-3" /> gatilho de fundo
                     </Badge>
                   )}
                 </div>
