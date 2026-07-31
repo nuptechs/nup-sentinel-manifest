@@ -4,6 +4,7 @@ import { buildApplicationGraph, analyzeGraphEndpoints, reconstructGraph } from "
 import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries, wsv1NodesToCatalogEntries } from "../analyzers/graph-connector";
 import { readMultistackFlags } from "../config/multistack";
 import { extractExpressRoutes, expressRoutesToCatalogEntries, expressRoutesToImpactEndpoints } from "../analyzers/node-backend/express-routes";
+import { augmentGraphWithFullStack } from "../analyzers/full-stack-augment";
 import { classifyEntriesDeterministic } from "../analyzers/deterministic-classifier";
 import { detectArchitecture } from "../analyzers/architecture-detector";
 import { generateManifest } from "../generators/manifest-generator";
@@ -190,6 +191,15 @@ export class AnalysisPipeline {
           "Consistency",
           `${gatewayCovered} chamadas cobertas por ${gatewayPrefixes.length} prefixos de gateway (A)`
         );
+      }
+
+      // ADR-0025 Onda 6 — camadas VIEW (telas) e ROUTE (gateway) entram no
+      // grafo persistido (a cadeia clique→dado vira navegável no System Map).
+      // Idempotente: no cache-hit de backend o grafo cacheado é só-Java e o
+      // augment re-roda; addNode/addEdge dedupam.
+      const fsAug = augmentGraphWithFullStack(appGraph, frontendInteractions, extractExpressRoutes(frontendFiles));
+      if (fsAug.views + fsAug.routes + fsAug.edges > 0) {
+        this.progress("Step 3/4", `Full-stack: +${fsAug.views} telas, +${fsAug.routes} rotas gateway, +${fsAug.edges} arestas`);
       }
 
       let catalogEntryData = this.connectGraph(
