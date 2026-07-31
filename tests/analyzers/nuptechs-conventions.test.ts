@@ -229,6 +229,48 @@ describe("augmentGraphWithWsV1 + analyzeEndpoints", () => {
   });
 });
 
+describe("augmentGraphWithWsV1 — liga endpoint→handler (CALLS) e mata a ilha de rotas", () => {
+  it("liga o nó de rota sintético à CLASSE handler real do AST (endpoint→handler)", () => {
+    const graph = new ApplicationGraph();
+    // handler real do AST Java (nível de método), como o engine emite
+    const handlerId = "CONTROLLER:easynup.services.web.contracts.exportAnalysis.v1.ExportAnalysisWsV1.handle(ExportAnalysisParamsV1)";
+    graph.addNode(
+      new GraphNode(handlerId, "CONTROLLER", "ExportAnalysisWsV1", "handle", handlerId.replace("CONTROLLER:", "")),
+    );
+    augmentGraphWithWsV1(graph, [
+      javaFile("src/main/java/easynup/services/web/analyzesSummaries/exportAnalysis/v1/ExportAnalysisWsV1.java"),
+    ]);
+    const routeId = "wsv1:POST:/easynup/exportAnalysis.v1";
+    assert.ok(graph.getNode(routeId), "nó de rota criado");
+    const out = graph.getOutgoingEdges(routeId);
+    const handlerEdge = out.find((e) => e.toNode === handlerId && e.relationType === "CALLS");
+    assert.ok(handlerEdge, "aresta CALLS rota→handler existe");
+    assert.equal(handlerEdge!.metadata.convention, "wsv1-handler");
+  });
+
+  it("NÃO liga rota→rota (exclui nós sintéticos do índice de handlers)", () => {
+    const graph = new ApplicationGraph();
+    augmentGraphWithWsV1(graph, [
+      javaFile("src/main/java/easynup/services/web/contracts/findContract/v1/FindContractWsV1.java"),
+    ]);
+    const routeId = "wsv1:POST:/easynup/findContract.v1";
+    // única aresta de saída possível é a entidade (findContract→Contract),
+    // jamais uma auto-aresta rota→rota
+    const out = graph.getOutgoingEdges(routeId);
+    assert.ok(out.every((e) => e.toNode !== routeId), "sem auto-aresta rota→rota");
+  });
+
+  it("sem handler no AST (classe fora do payload) → rota fica sem elo de handler, não quebra", () => {
+    const graph = new ApplicationGraph();
+    const added = augmentGraphWithWsV1(graph, [
+      javaFile("src/main/java/easynup/services/web/x/processHeatmap/v1/ProcessHeatmapWsV1.java"),
+    ]);
+    assert.equal(added, 1);
+    const out = graph.getOutgoingEdges("wsv1:POST:/easynup/processHeatmap.v1");
+    assert.ok(out.every((e) => e.metadata.convention !== "wsv1-handler"), "nenhum elo de handler quando o handler não está no grafo");
+  });
+});
+
 describe("fluxo ponta-a-ponta: WsV1 resolve real, typo é flagrado", () => {
   it("chamada real mapeia; typo fica não-mapeado → flagrado", () => {
     const graph = new ApplicationGraph();
