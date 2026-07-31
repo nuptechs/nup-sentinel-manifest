@@ -46,13 +46,15 @@ import {
   Clock,
   Monitor,
   Waypoints,
+  Puzzle,
+  Braces,
 } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 cytoscape.use(elk as any);
 
 // ── Tipos do payload /api/projects/:id/graph ──────────────────────────
-type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE";
+type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE" | "COMPONENT" | "COMPOSABLE";
 type EdgeRelation = "CALLS" | "READS_ENTITY" | "WRITES_ENTITY" | "ASSOCIATES";
 
 interface GraphNode {
@@ -92,6 +94,8 @@ const LAYER: Record<
   { label: string; color: string; shape: string; icon: React.ComponentType<{ className?: string; style?: React.CSSProperties }> }
 > = {
   VIEW: { label: "Tela", color: "#ec4899", shape: "round-tag", icon: Monitor },
+  COMPONENT: { label: "Componente", color: "#fb7185", shape: "tag", icon: Puzzle },
+  COMPOSABLE: { label: "Composable", color: "#a78bfa", shape: "rhomboid", icon: Braces },
   ROUTE: { label: "Rota gateway", color: "#64748b", shape: "diamond", icon: Waypoints },
   CONTROLLER: { label: "Controller", color: "#6366f1", shape: "round-rectangle", icon: RouteIcon },
   SERVICE: { label: "Service", color: "#0ea5e9", shape: "ellipse", icon: ServerCog },

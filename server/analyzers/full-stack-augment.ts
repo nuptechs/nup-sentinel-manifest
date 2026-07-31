@@ -238,7 +238,7 @@ export function linkViewsViaApiLayer(
 const COMPOSABLE_IMPORT_RE = /import\s*(?:type\s*)?\{([^}]+)\}\s*from\s*['"](?:@\/|\.{1,2}\/(?:\.\.\/)*)composables\/([\w-]+)['"]/g;
 const URL_RE_G = /(\/(?:easynup|api)\/[A-Za-z0-9_\-./${}:]*[A-Za-z0-9_\-.}])/g;
 
-export interface ComposableIndex { [module: string]: { [fn: string]: { url: string; via: string }[] } }
+export interface ComposableIndex { [module: string]: { [fn: string]: { url: string; via: string; filePath?: string }[] } }
 
 export function indexComposableLayer(
   fileData: { filePath: string; content: string }[],
@@ -270,20 +270,35 @@ export function indexComposableLayer(
       const body = f.content.slice(marks[i].at, marks[i + 1]?.at ?? f.content.length);
       const hits = apiFns.filter((a) => new RegExp("[^\\w.]" + a.fn + "\\s*\\(").test(body));
       if (hits.length) (out[mod] = out[mod] || {})[marks[i].name] =
-        hits.map((h) => ({ url: h.url, via: `composables/${mod}.${marks[i].name}→${h.via}` }));
+        hits.map((h) => ({ url: h.url, via: `composables/${mod}.${marks[i].name}→${h.via}`, filePath: f.filePath }));
     }
   }
   return out;
 }
 
-/** 6b-2: liga telas via composable e via URL inline. Chamar APÓS linkViewsViaApiLayer. */
+/**
+ * CADEIA FRONTEND MATERIALIZADA (correção de fronteira, 2026-08-01 — pergunta
+ * do dono "composable não seria outra camada?"): em vez de ACHATAR a cadeia
+ * numa aresta tela→endpoint (perdendo a estrutura — assimétrico com o backend,
+ * que modela Controller/Service/Repository), as camadas intermediárias viram
+ * NÓS de 1ª classe e a agregação vira papel da LENTE (mesma lição do
+ * método×classe do PR #83):
+ *   TELA (view:, roteada) → COMPONENTE (component:, .vue não-roteado) →
+ *   COMPOSABLE (composable:<mod>.<fn>, por FUNÇÃO exportada — por módulo
+ *   reintroduziria o vazamento que o 6b-2 matou) → endpoint/rota.
+ * Módulo de api NÃO vira camada (função de api ≈ 1:1 endpoint — coluna
+ * redundante); fica como proveniência via=. Só entra intermediário que
+ * ALCANÇA backend (poda ramo morto — componente puramente visual não é ruído).
+ */
 export function linkViewsViaComposablesAndInline(
   graph: ApplicationGraph,
   fileData: { filePath: string; content: string }[],
-): { views: number; edges: number } {
+): { views: number; components: number; composables: number; edges: number } {
   const apiIdx = indexApiLayer(fileData);
   const compIdx = indexComposableLayer(fileData, apiIdx);
-  let views = 0, edges = 0;
+  const routed = routedPageBases(fileData);
+  let views = 0, components = 0, composables = 0, edges = 0;
+
   const epByPath = new Map<string, string>();
   const routeNodes: { id: string; path: string }[] = [];
   for (const n of graph.getAllNodes()) {
@@ -291,83 +306,158 @@ export function linkViewsViaComposablesAndInline(
     else if (n.type === "ROUTE") routeNodes.push({ id: n.id, path: String(n.metadata.fullPath || "") });
   }
   const resolveTarget = (url: string): string | null => {
-    const hit = epByPath.get(url.split("?")[0]);
+    const clean = url.split("?")[0];
+    const hit = epByPath.get(clean);
     if (hit) return hit;
-    for (const r of routeNodes) if (apiUrlMatchesRoutePath(url.split("?")[0], r.path)) return r.id;
+    for (const r of routeNodes) if (apiUrlMatchesRoutePath(clean, r.path)) return r.id;
     return null;
   };
-  const seen = new Set<string>();
-  const routed = routedPageBases(fileData);
-  const targetsByBase = new Map<string, Set<string>>();
-  const collect = (base: string, target: string) => {
-    if (!targetsByBase.has(base)) targetsByBase.set(base, new Set());
-    targetsByBase.get(base)!.add(target);
-  };
-  const link = (component: string, sourceFile: string, target: string, via: string) => {
-    const viewId = `view:${component}`;
-    if (!graph.getNode(viewId)) {
-      graph.addNode(new GraphNode(viewId, "VIEW", component, null, null, { sourceFile, synthetic: true }));
-      views++;
-    }
-    const k = `${viewId}->${target}`;
-    if (seen.has(k) || graph.getOutgoingEdges(viewId).some((e) => e.toNode === target)) return;
-    seen.add(k);
-    graph.addEdge(new GraphEdge(viewId, target, "CALLS", {
-      synthetic: true, resolution: "syntactic-declared", convention: "api-layer", via,
-    }));
+  const addEdgeOnce = (from: string, to: string, meta: Record<string, unknown>) => {
+    if (graph.getOutgoingEdges(from).some((e) => e.toNode === to)) return;
+    graph.addEdge(new GraphEdge(from, to, "CALLS", { synthetic: true, resolution: "syntactic-declared", ...meta }));
     edges++;
   };
+
+  // ── camada COMPOSABLE: nó por função exportada que alcança backend ──
+  const composableTargets = new Map<string, { targets: { t: string; via: string }[]; filePath?: string }>();
+  for (const mod of Object.keys(compIdx)) {
+    for (const fn of Object.keys(compIdx[mod])) {
+      const targets: { t: string; via: string }[] = [];
+      let fp: string | undefined;
+      for (const { url, via, filePath } of compIdx[mod][fn]) {
+        const t = resolveTarget(url);
+        if (t) { targets.push({ t, via }); fp = fp || filePath; }
+      }
+      if (targets.length) composableTargets.set(`${mod}.${fn}`, { targets, filePath: fp });
+    }
+  }
+  const mintComposable = (key: string): string => {
+    const id = `composable:${key}`;
+    if (!graph.getNode(id)) {
+      const info = composableTargets.get(key)!;
+      graph.addNode(new GraphNode(id, "COMPOSABLE", key, null, null, {
+        sourceFile: info.filePath, synthetic: true,
+      }));
+      composables++;
+      for (const { t, via } of info.targets) addEdgeOnce(id, t, { convention: "api-layer", via });
+    }
+    return id;
+  };
+
+  // ── por arquivo: alvos DIRETOS (api-import + inline) e usos de composable ──
+  interface FileFacts { base: string; filePath: string; isVue: boolean; direct: { t: string; via: string }[]; composableKeys: string[]; vueImports: string[]; }
+  const facts = new Map<string, FileFacts>();
   for (const f of fileData) {
     if (!/frontend\/src\/.*\.(vue|ts)$/.test(f.filePath)) continue;
     if (/frontend\/src\/(api|composables)\//.test(f.filePath)) continue;
-    const component = (f.filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
-    const page = isRoutedPage(f.filePath, routed);
-    const hit = (t: string, via: string) => page ? link(component, f.filePath, t, via) : collect(component, t);
-    // (a0) api DIRETO — pro NÃO-roteado (o linkViewsViaApiLayer agora só cobre telas)
-    if (!page) {
-      let ia: RegExpExecArray | null;
-      IMPORT_RE.lastIndex = 0;
-      while ((ia = IMPORT_RE.exec(f.content)) !== null) {
-        const amod = apiIdx[ia[2]];
-        if (!amod) continue;
-        for (const raw of ia[1].split(",")) {
-          const fn = raw.trim().split(/\s+as\s+/)[0].trim();
-          if (!amod[fn]) continue;
-          if (!new RegExp("[^\\w.]" + fn + "\\s*\\(").test(f.content)) continue;
-          const t = resolveTarget(amod[fn]);
-          if (t) collect(component, t);
-        }
-      }
-    }
-    // (a) composable hop
-    let im: RegExpExecArray | null;
-    COMPOSABLE_IMPORT_RE.lastIndex = 0;
-    while ((im = COMPOSABLE_IMPORT_RE.exec(f.content)) !== null) {
-      const cmod = compIdx[im[2]];
-      if (!cmod) continue;
-      for (const raw of im[1].split(",")) {
+    const base = (f.filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
+    const ff: FileFacts = { base, filePath: f.filePath, isVue: f.filePath.endsWith(".vue"), direct: [], composableKeys: [], vueImports: [] };
+    // api direto
+    let ia: RegExpExecArray | null;
+    IMPORT_RE.lastIndex = 0;
+    while ((ia = IMPORT_RE.exec(f.content)) !== null) {
+      const amod = apiIdx[ia[2]];
+      if (!amod) continue;
+      for (const raw of ia[1].split(",")) {
         const fn = raw.trim().split(/\s+as\s+/)[0].trim();
-        if (!cmod[fn]) continue;
+        if (!amod[fn]) continue;
         if (!new RegExp("[^\\w.]" + fn + "\\s*\\(").test(f.content)) continue;
-        for (const { url, via } of cmod[fn]) {
-          const t = resolveTarget(url);
-          if (t) hit(t, via);
-        }
+        const t = resolveTarget(amod[fn]);
+        if (t) ff.direct.push({ t, via: `api/${ia[2]}.${fn}` });
       }
     }
-    // (b) URL literal inline
+    // inline
     let um: RegExpExecArray | null;
     URL_RE_G.lastIndex = 0;
     while ((um = URL_RE_G.exec(f.content)) !== null) {
       const t = resolveTarget(um[1]);
-      if (t) hit(t, "inline-url");
+      if (t) ff.direct.push({ t, via: "inline-url" });
+    }
+    // composables usados (import + invocação)
+    let im: RegExpExecArray | null;
+    COMPOSABLE_IMPORT_RE.lastIndex = 0;
+    while ((im = COMPOSABLE_IMPORT_RE.exec(f.content)) !== null) {
+      for (const raw of im[1].split(",")) {
+        const fn = raw.trim().split(/\s+as\s+/)[0].trim();
+        const key = `${im[2]}.${fn}`;
+        if (!composableTargets.has(key)) continue;
+        if (!new RegExp("[^\\w.]" + fn + "\\s*\\(").test(f.content)) continue;
+        ff.composableKeys.push(key);
+      }
+    }
+    // imports de .vue (árvore de componentes)
+    let vm: RegExpExecArray | null;
+    VUE_IMPORT_RE.lastIndex = 0;
+    while ((vm = VUE_IMPORT_RE.exec(f.content)) !== null) {
+      const b = (vm[1].split("/").pop() || "").replace(/\.vue$/, "");
+      if (b && b !== base) ff.vueImports.push(b);
+    }
+    facts.set(base, ff);
+  }
+
+  // ── quais componentes ALCANÇAM backend (fixpoint bottom-up, anti-ciclo) ──
+  const reaching = new Map<string, boolean>();
+  const reaches = (base: string, seen: Set<string>): boolean => {
+    if (reaching.has(base)) return reaching.get(base)!;
+    if (seen.has(base)) return false;
+    seen.add(base);
+    const ff = facts.get(base);
+    if (!ff) { reaching.set(base, false); return false; }
+    let ok = ff.direct.length > 0 || ff.composableKeys.length > 0;
+    if (!ok) for (const child of ff.vueImports) {
+      if (isRoutedPage((facts.get(child)?.filePath) || "", routed)) continue;
+      if (reaches(child, seen)) { ok = true; break; }
+    }
+    reaching.set(base, ok);
+    return ok;
+  };
+
+  const mintComponent = (base: string): string | null => {
+    const ff = facts.get(base);
+    if (!ff || !ff.isVue) return null;
+    const id = `component:${base}`;
+    if (!graph.getNode(id)) {
+      graph.addNode(new GraphNode(id, "COMPONENT", base, null, null, { sourceFile: ff.filePath, synthetic: true }));
+      components++;
+      for (const { t, via } of ff.direct) addEdgeOnce(id, t, { convention: "api-layer", via });
+      for (const key of ff.composableKeys) addEdgeOnce(id, mintComposable(key), { convention: "frontend-chain" });
+      for (const child of ff.vueImports) {
+        const cf = facts.get(child);
+        if (!cf || isRoutedPage(cf.filePath, routed)) continue;
+        if (reaches(child, new Set())) {
+          const cid = mintComponent(child);
+          if (cid) addEdgeOnce(id, cid, { convention: "frontend-chain" });
+        }
+      }
+    }
+    return id;
+  };
+
+  // ── TELAS (roteadas): próprias chamadas + componentes + composables ──
+  for (const ff of Array.from(facts.values())) {
+    if (!isRoutedPage(ff.filePath, routed)) continue;
+    const hasChain = ff.direct.length || ff.composableKeys.length ||
+      ff.vueImports.some((c) => { const cf = facts.get(c); return cf && !isRoutedPage(cf.filePath, routed) && reaches(c, new Set()); });
+    if (!hasChain) continue;
+    const viewId = `view:${ff.base}`;
+    if (!graph.getNode(viewId)) {
+      graph.addNode(new GraphNode(viewId, "VIEW", ff.base, null, null, { sourceFile: ff.filePath, synthetic: true }));
+      views++;
+    }
+    for (const { t, via } of ff.direct) addEdgeOnce(viewId, t, { convention: "api-layer", via });
+    for (const key of ff.composableKeys) addEdgeOnce(viewId, mintComposable(key), { convention: "frontend-chain" });
+    for (const child of ff.vueImports) {
+      const cf = facts.get(child);
+      if (!cf || isRoutedPage(cf.filePath, routed)) continue;
+      if (reaches(child, new Set())) {
+        const cid = mintComponent(child);
+        if (cid) addEdgeOnce(viewId, cid, { convention: "frontend-chain" });
+      }
     }
   }
-  // (c) componentes → telas que os importam (árvore de imports .vue)
-  const prop = propagateComponentTargets(graph, fileData, targetsByBase, routed);
-  return { views: views + prop.views, edges: edges + prop.edges };
-}
 
+  return { views, components, composables, edges };
+}
 // ─── TELA = componente ROTEADO (correção de definição, 2026-07-31) ───
 // O usuário provou a inconsistência: a camada "TELA" mintava QUALQUER arquivo
 // de frontend que chama backend (301 nós — componentes/painéis/composables
@@ -403,70 +493,4 @@ export function isRoutedPage(filePath: string, routed: Set<string>): boolean {
   const base = (filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
   if (routed.size > 0) return routed.has(base);
   return /\/pages\//.test(filePath) && filePath.endsWith(".vue");
-}
-
-/**
- * Atribui as chamadas de COMPONENTES às TELAS que os importam (fixpoint sobre
- * a árvore de imports .vue). `targetsByBase` = alvos já resolvidos por arquivo
- * NÃO-roteado. Emite aresta tela→alvo com via=component:<Nome>. Puro.
- */
-export function propagateComponentTargets(
-  graph: ApplicationGraph,
-  fileData: { filePath: string; content: string }[],
-  targetsByBase: Map<string, Set<string>>,
-  routed: Set<string>,
-): { edges: number; views: number } {
-  // grafo de imports: base do arquivo → bases .vue importadas
-  const importsOf = new Map<string, string[]>();
-  const fileByBase = new Map<string, { filePath: string; content: string }>();
-  for (const f of fileData) {
-    if (!/frontend\/src\/.*\.vue$/.test(f.filePath)) continue;
-    const base = (f.filePath.split("/").pop() || "").replace(/\.vue$/, "");
-    fileByBase.set(base, f);
-    const imps: string[] = [];
-    let m: RegExpExecArray | null;
-    VUE_IMPORT_RE.lastIndex = 0;
-    while ((m = VUE_IMPORT_RE.exec(f.content)) !== null) {
-      const b = (m[1].split("/").pop() || "").replace(/\.vue$/, "");
-      if (b && b !== base) imps.push(b);
-    }
-    importsOf.set(base, imps);
-  }
-  // fixpoint: alvos de componente sobem pelos imports (≤4 níveis, anti-ciclo)
-  const resolved = new Map<string, Set<string>>();
-  const resolve = (base: string, depth: number, seen: Set<string>): Set<string> => {
-    if (resolved.has(base)) return resolved.get(base)!;
-    const out = new Set<string>(targetsByBase.get(base) || []);
-    if (depth < 4 && !seen.has(base)) {
-      seen.add(base);
-      for (const child of importsOf.get(base) || []) {
-        if (routed.size > 0 ? routed.has(child) : false) continue; // tela não propaga pra cima
-        for (const t of Array.from(resolve(child, depth + 1, seen))) out.add(t);
-      }
-    }
-    resolved.set(base, out);
-    return out;
-  };
-  let edges = 0, views = 0;
-  for (const [base, f] of Array.from(fileByBase.entries())) {
-    if (!isRoutedPage(f.filePath, routed)) continue;
-    const targets = new Set<string>();
-    for (const child of importsOf.get(base) || []) {
-      for (const t of Array.from(resolve(child, 1, new Set([base])))) targets.add(t);
-    }
-    if (!targets.size) continue;
-    const viewId = `view:${base}`;
-    if (!graph.getNode(viewId)) {
-      graph.addNode(new GraphNode(viewId, "VIEW", base, null, null, { sourceFile: f.filePath, synthetic: true }));
-      views++;
-    }
-    for (const t of Array.from(targets)) {
-      if (graph.getOutgoingEdges(viewId).some((e) => e.toNode === t)) continue;
-      graph.addEdge(new GraphEdge(viewId, t, "CALLS", {
-        synthetic: true, resolution: "syntactic-declared", convention: "api-layer", via: "component-tree",
-      }));
-      edges++;
-    }
-  }
-  return { edges, views };
 }
