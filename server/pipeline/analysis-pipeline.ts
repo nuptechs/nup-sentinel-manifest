@@ -4,7 +4,7 @@ import { buildApplicationGraph, analyzeGraphEndpoints, reconstructGraph } from "
 import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries, wsv1NodesToCatalogEntries } from "../analyzers/graph-connector";
 import { readMultistackFlags } from "../config/multistack";
 import { extractExpressRoutes, expressRoutesToCatalogEntries, expressRoutesToImpactEndpoints } from "../analyzers/node-backend/express-routes";
-import { augmentGraphWithFullStack, linkViewsViaApiLayer, linkViewsViaComposablesAndInline } from "../analyzers/full-stack-augment";
+import { augmentGraphWithFullStack, linkViewsViaApiLayer, linkViewsViaComposablesAndInline, frontendInventory } from "../analyzers/full-stack-augment";
 import { classifyEntriesDeterministic } from "../analyzers/deterministic-classifier";
 import { detectArchitecture } from "../analyzers/architecture-detector";
 import { generateManifest } from "../generators/manifest-generator";
@@ -616,7 +616,9 @@ export class AnalysisPipeline {
       // grafo do parque real cabe folgado — algumas centenas de nós).
       const SYSTEM_GRAPH_NODE_CAP = 8000;
       const SYSTEM_GRAPH_EDGE_CAP = 20000;
-      let systemGraph: { nodes: any[]; edges: any[]; truncated?: boolean } | null = null;
+      let systemGraph: { nodes: any[]; edges: any[]; truncated?: boolean; inventory?: unknown } | null = null;
+      // Reconciliação: inventário do código (denominador honesto dos chips)
+      const feInventory = frontendInventory(fileData || []);
       if (appGraph && typeof appGraph.toJSON === "function") {
         const g = appGraph.toJSON();
         if (g.nodes.length <= SYSTEM_GRAPH_NODE_CAP && g.edges.length <= SYSTEM_GRAPH_EDGE_CAP) {
@@ -630,6 +632,7 @@ export class AnalysisPipeline {
           };
         }
       }
+      if (systemGraph) systemGraph.inventory = feInventory;
 
       const enrichedManifest = {
         ...manifest,

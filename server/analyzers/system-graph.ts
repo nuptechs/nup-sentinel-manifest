@@ -35,6 +35,8 @@ export interface RawSystemGraph {
   nodes: RawSystemNode[];
   edges: RawSystemEdge[];
   truncated?: boolean;
+  /** Reconciliação: inventário do CÓDIGO (denominador dos chips FE). */
+  inventory?: unknown;
 }
 
 export interface ShapedNode {
@@ -68,6 +70,7 @@ export interface ShapedEdge {
 export interface ShapedGraph {
   level: 'class' | 'method';
   truncated: boolean;
+  inventory?: unknown;
   counts: { nodes: number; edges: number; byType: Record<string, number> };
   nodes: ShapedNode[];
   edges: ShapedEdge[];
@@ -147,7 +150,7 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
       ...(ep ? { entryPoint: [ep] } : {}),
     };
   });
-  return { level: 'method', truncated: !!raw.truncated, counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
+  return { level: 'method', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
 }
 
 function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
@@ -203,5 +206,5 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
       ...(c.entryPoints.size ? { entryPoint: Array.from(c.entryPoints) } : {}),
     };
   });
-  return { level: 'class', truncated: !!raw.truncated, counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
+  return { level: 'class', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
 }

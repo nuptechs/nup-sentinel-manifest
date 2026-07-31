@@ -595,3 +595,32 @@ export function isRoutedPage(filePath: string, routed: Set<string>): boolean {
   if (routed.size > 0) return routed.has(base);
   return /\/pages\//.test(filePath) && filePath.endsWith(".vue");
 }
+
+// ─── INVENTÁRIO do frontend (reconciliação, 2026-08-01) ───
+// O mapa poda ramo morto (só quem ALCANÇA backend vira nó) — correto para
+// arquitetura, mas o chip "43 composables" sem o denominador é meia-verdade
+// (o dono provou: outro agente contou 199 funções no CÓDIGO). Um sistema
+// superior a um agente ad-hoc entrega OS DOIS números + o resíduo: inventário
+// (quantos existem) × participação (quantos tocam backend). Puro.
+export interface FrontendInventory {
+  routedPages: number;       // telas no router.ts
+  vueComponents: number;     // .vue NÃO-roteados (components/ + co-locados)
+  composableFiles: number;   // arquivos em composables/
+  composableFns: number;     // funções exportadas nesses arquivos
+}
+
+export function frontendInventory(fileData: { filePath: string; content: string }[]): FrontendInventory {
+  const routed = routedPageBases(fileData);
+  let vueComponents = 0, composableFiles = 0, composableFns = 0;
+  for (const f of fileData) {
+    if (/frontend\/src\/.*\.vue$/.test(f.filePath)) {
+      if (!isRoutedPage(f.filePath, routed)) vueComponents++;
+    } else if (/frontend\/src\/composables\/.*\.ts$/.test(f.filePath)) {
+      composableFiles++;
+      let m: RegExpExecArray | null;
+      EXPORT_RE.lastIndex = 0;
+      while ((m = EXPORT_RE.exec(f.content)) !== null) composableFns++;
+    }
+  }
+  return { routedPages: routed.size, vueComponents, composableFiles, composableFns };
+}

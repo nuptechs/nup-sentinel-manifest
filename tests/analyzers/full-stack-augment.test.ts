@@ -251,3 +251,21 @@ describe("BACKEND NODE materializado + composables indiretos (além-fronteira)",
     assert.equal(idx.useHeat.useHeat[0].url, "/easynup/processHeatmap.v1", "inline em composable ok");
   });
 });
+
+describe("frontendInventory — reconciliação inventário × participação", () => {
+  it("conta telas roteadas, .vue não-roteados e funções de composable do CÓDIGO", async () => {
+    const { frontendInventory } = await import("../../server/analyzers/full-stack-augment.ts");
+    const inv = frontendInventory([
+      { filePath: "frontend/src/router.ts", content: "import('./pages/A.vue');import('./pages/B.vue')" },
+      { filePath: "frontend/src/pages/A.vue", content: "" },
+      { filePath: "frontend/src/pages/B.vue", content: "" },
+      { filePath: "frontend/src/components/X.vue", content: "" },
+      { filePath: "frontend/src/pages/sub/components/Y.vue", content: "" },
+      { filePath: "frontend/src/composables/useA.ts", content: "export function useA(){}\nexport function useB(){}\n" },
+    ]);
+    assert.equal(inv.routedPages, 2);
+    assert.equal(inv.vueComponents, 2, "X + Y (co-locado) — roteadas fora");
+    assert.equal(inv.composableFiles, 1);
+    assert.equal(inv.composableFns, 2);
+  });
+});
