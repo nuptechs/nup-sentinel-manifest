@@ -1472,6 +1472,40 @@ export async function registerRoutes(
     }
   });
 
+  // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
+  // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
+  // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
+  // .systemGraph (populado no saveSnapshot). Snapshot antigo sem o campo →
+  // 404 nomeado pedindo re-análise (nunca grafo vazio fingindo sucesso).
+  app.get("/api/projects/:projectId/graph", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const systemGraph = manifest.systemGraph;
+      if (!systemGraph || !Array.isArray(systemGraph.nodes)) {
+        return res.status(404).json({
+          message: "This snapshot predates the system graph — re-run the analysis to populate the System Map.",
+          code: "GRAPH_NOT_IN_SNAPSHOT",
+        });
+      }
+      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const shaped = shapeSystemGraph(systemGraph);
+      res.json({
+        projectId,
+        analysisRunId: snapshots[0].analysisRunId,
+        ...shaped,
+      });
+    } catch (error) {
+      console.error("Error serving system graph:", error);
+      res.status(500).json({ message: "Failed to load system graph" });
+    }
+  });
+
   // ADR-070 Onda 2 / Propósito 2 — impacto de um DIFF/entrega: "o fornecedor
   // entregou estes N arquivos, o que foi impactado?". Agrega o blast radius de
   // cada arquivo mudado. Body: { files: string[] }.
