@@ -62,6 +62,18 @@ public class JavaASTAnalyzer {
         "findById", "findAll", "findOne", "getById", "getReferenceById",
         "getOne", "existsById", "count", "findAllById"
     );
+    // Onda 3a (ADR-0025): associações JPA no fonte da entidade → aresta ASSOCIATES
+    private static final Set<String> ASSOCIATION_ANNOTATIONS = Set.of(
+        "OneToMany", "ManyToOne", "OneToOne", "ManyToMany", "Embedded", "ElementCollection"
+    );
+    // Onda 4 (ADR-0025): gatilhos de fundo — roots legítimos, não "isolados"
+    private static final Set<String> ENTRY_POINT_ANNOTATIONS = Set.of(
+        "Scheduled", "EventListener", "TransactionalEventListener", "KafkaListener",
+        "RabbitListener", "SqsListener", "JmsListener", "PostConstruct"
+    );
+    private static final Set<String> RUNNER_INTERFACES = Set.of(
+        "CommandLineRunner", "ApplicationRunner"
+    );
 
     private final SymbolMap symbolClassMap = new SymbolMap();
     private final Map<String, ClassInfo> fqnIndex = new HashMap<>();
@@ -422,6 +434,9 @@ public class JavaASTAnalyzer {
                     info.interfaceNames.add(ext.getNameAsString());
                 }
             }
+            // Onda 4: CommandLineRunner/ApplicationRunner = entry-point da classe
+            // (o método run() é acionado pelo boot do Spring, não por código nosso).
+            info.isRunner = info.interfaceNames.stream().anyMatch(RUNNER_INTERFACES::contains);
 
             String classLevelPath = "";
             for (AnnotationExpr ann : cls.getAnnotations()) {
@@ -433,6 +448,7 @@ public class JavaASTAnalyzer {
 
             if (info.isEntity) {
                 extractEntityFields(cls, info);
+                collectEntityAssociations(cls, info);
             }
 
             // Fallback sintático (ADR-0018): imports do CU (simples → FQN) e o
@@ -543,6 +559,104 @@ public class JavaASTAnalyzer {
         }
     }
 
+    /**
+     * Onda 3a (ADR-0025): associações JPA declaradas nos CAMPOS da entidade
+     * (@OneToMany/@ManyToOne/@OneToOne/@ManyToMany/@Embedded/@ElementCollection).
+     * O tipo-alvo é o argumento genérico quando coleção (List<Filha> → Filha;
+     * Map<K,V> → V) ou o tipo declarado. Resolve pra ClassInfo no buildGraph
+     * (import→pacote→nome único — precisão acima de recall).
+     */
+    private void collectEntityAssociations(ClassOrInterfaceDeclaration cls, ClassInfo info) {
+        for (FieldDeclaration field : cls.getFields()) {
+            String kind = null;
+            for (AnnotationExpr ann : field.getAnnotations()) {
+                if (ASSOCIATION_ANNOTATIONS.contains(ann.getNameAsString())) {
+                    kind = ann.getNameAsString();
+                    break;
+                }
+            }
+            if (kind == null) continue;
+            for (VariableDeclarator vd : field.getVariables()) {
+                String t = vd.getTypeAsString();
+                int lt = t.indexOf('<');
+                if (lt > 0) {
+                    int gt = t.lastIndexOf('>');
+                    t = t.substring(lt + 1, gt > lt ? gt : t.length());
+                    int comma = t.lastIndexOf(',');
+                    if (comma > 0) t = t.substring(comma + 1); // Map<K,V> → V
+                }
+                info.entityAssociations.add(new String[]{ t.trim(), kind });
+            }
+        }
+    }
+
+    /** Valor string de @Query("…") — single-member ou value= (senão null). */
+    private String extractAnnotationStringValue(AnnotationExpr ann) {
+        if (ann instanceof SingleMemberAnnotationExpr) {
+            var v = ((SingleMemberAnnotationExpr) ann).getMemberValue();
+            if (v.isStringLiteralExpr()) return v.asStringLiteralExpr().getValue();
+        } else if (ann instanceof NormalAnnotationExpr) {
+            for (MemberValuePair pair : ((NormalAnnotationExpr) ann).getPairs()) {
+                if (pair.getNameAsString().equals("value") && pair.getValue().isStringLiteralExpr()) {
+                    return pair.getValue().asStringLiteralExpr().getValue();
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Onda 3b: literais JPQL passados a em.createQuery("…") no corpo do método. */
+    private void collectJpqlLiterals(BlockStmt body, MethodInfo mi) {
+        body.accept(new VoidVisitorAdapter<Void>() {
+            @Override
+            public void visit(MethodCallExpr callExpr, Void arg) {
+                super.visit(callExpr, arg);
+                if (!callExpr.getNameAsString().equals("createQuery")) return;
+                if (callExpr.getArguments().isEmpty()) return;
+                var first = callExpr.getArguments().get(0);
+                if (first.isStringLiteralExpr()) {
+                    mi.jpqlStrings.add(first.asStringLiteralExpr().getValue());
+                }
+            }
+        }, null);
+    }
+
+    private static final java.util.regex.Pattern JPQL_FROM =
+        java.util.regex.Pattern.compile("(?i)\\bfrom\\s+([A-Za-z_][A-Za-z0-9_]*)");
+    private static final java.util.regex.Pattern JPQL_UPDATE =
+        java.util.regex.Pattern.compile("(?i)^\\s*update\\s+([A-Za-z_][A-Za-z0-9_]*)");
+    private static final java.util.regex.Pattern JPQL_JOIN_ENTITY =
+        java.util.regex.Pattern.compile("\\bjoin\\s+(?:fetch\\s+)?([A-Z][A-Za-z0-9_]*)\\b");
+
+    static class JpqlFacts {
+        String op; // "read" | "write"
+        List<String> entities = new ArrayList<>();
+    }
+
+    /**
+     * Onda 3b: extrai da string JPQL a operação (update/delete = write; senão read)
+     * e os NOMES DE ENTIDADE — o token após FROM (incl. "delete from X"), o alvo de
+     * UPDATE e joins de ENTIDADE ("join Payment p"; "join u.roles" é path de
+     * associação — minúsculo/com ponto — e fica fora, conservador). Query dinâmica
+     * concatenada não chega aqui (só literais) — limite honesto declarado na ADR.
+     */
+    JpqlFacts parseJpql(String jpql) {
+        JpqlFacts f = new JpqlFacts();
+        String s = jpql == null ? "" : jpql.trim();
+        boolean isWrite = s.regionMatches(true, 0, "update", 0, 6)
+            || s.regionMatches(true, 0, "delete", 0, 6);
+        f.op = isWrite ? "write" : "read";
+        Set<String> seen = new LinkedHashSet<>();
+        var mu = JPQL_UPDATE.matcher(s);
+        if (mu.find()) seen.add(mu.group(1));
+        var mf = JPQL_FROM.matcher(s);
+        while (mf.find()) seen.add(mf.group(1));
+        var mj = JPQL_JOIN_ENTITY.matcher(s);
+        while (mj.find()) seen.add(mj.group(1));
+        f.entities.addAll(seen);
+        return f;
+    }
+
     private SecurityAnnotation extractSecurityAnnotation(AnnotationExpr ann) {
         String type = ann.getNameAsString();
         String expression = "";
@@ -643,6 +757,19 @@ public class JavaASTAnalyzer {
                 if (SECURITY_ANNOTATIONS.contains(annName)) {
                     mi.securityAnnotations.add(extractSecurityAnnotation(ann));
                 }
+                // Onda 4: gatilho de fundo (@Scheduled/@EventListener/@KafkaListener…)
+                if (ENTRY_POINT_ANNOTATIONS.contains(annName)) {
+                    mi.entryPointKind = annName;
+                }
+                // Onda 3b: JPQL declarado em @Query no método (repositórios)
+                if (annName.equals("Query")) {
+                    String jpql = extractAnnotationStringValue(ann);
+                    if (jpql != null) mi.jpqlStrings.add(jpql);
+                }
+            }
+            // Onda 4: run() de CommandLineRunner/ApplicationRunner é acionado pelo boot
+            if (info.isRunner && mi.name.equals("run") && mi.entryPointKind == null) {
+                mi.entryPointKind = "ApplicationRunner";
             }
 
             if (method.getBody().isPresent()) {
@@ -650,6 +777,7 @@ public class JavaASTAnalyzer {
                 extractMethodCalls(body, mi);
                 detectEntityMutations(body, mi);
                 detectProgrammaticSecurity(body, mi);
+                collectJpqlLiterals(body, mi); // Onda 3b: em.createQuery("…")
             }
 
             info.methods.add(mi);
@@ -1005,6 +1133,23 @@ public class JavaASTAnalyzer {
             }
         }
 
+        // Onda 3a (ADR-0025): associações JPA entidade→entidade. Fecha a ilha das
+        // entidades-FILHAS (ReferenceTableRow, SlaTemplateIndicator, attachments…)
+        // que não têm JpaRepository próprio — o pai as alcança por cascade.
+        for (ClassInfo cls : fqnIndex.values()) {
+            if (!cls.isEntity || cls.entityAssociations.isEmpty()) continue;
+            String fromId = resolvedEntityNodeId(cls);
+            if (!nodeIds.contains(fromId)) continue;
+            for (String[] assoc : cls.entityAssociations) {
+                ClassInfo target = resolveTypeToClassInfo(cls, assoc[0]);
+                if (target == null || !target.isEntity || target == cls) continue;
+                String toId = resolvedEntityNodeId(target);
+                if (!nodeIds.contains(toId) || toId.equals(fromId)) continue;
+                addEdge(edges, edgeKeys, fromId, toId, "ASSOCIATES",
+                    Map.of("kind", assoc[1], "resolution", "syntactic-declared"));
+            }
+        }
+
         for (ClassInfo cls : fqnIndex.values()) {
             if (cls.isEntity) continue;
 
@@ -1029,7 +1174,24 @@ public class JavaASTAnalyzer {
                     String entityNodeId = resolvedEntityNodeId(entityInfo);
                     if (nodeIds.contains(entityNodeId)) {
                         addEdge(edges, edgeKeys, repoNode.id, entityNodeId, "READS_ENTITY",
-                            Map.of("operation", "read"));
+                            Map.of("operation", "read", "resolution", "syntactic-resolved"));
+                    }
+                }
+
+                // Onda 3b (ADR-0025): @Query JPQL nos métodos do repositório —
+                // alcança entidades ALÉM da do genérico (joins/updates/deletes).
+                for (MethodInfo m : cls.methods) {
+                    for (String jpql : m.jpqlStrings) {
+                        JpqlFacts f = parseJpql(jpql);
+                        for (String ent : f.entities) {
+                            ClassInfo entCi = resolveTypeToClassInfo(cls, ent);
+                            if (entCi == null || !entCi.isEntity) continue;
+                            String entityNodeId = resolvedEntityNodeId(entCi);
+                            if (!nodeIds.contains(entityNodeId)) continue;
+                            addEdge(edges, edgeKeys, repoNode.id, entityNodeId,
+                                "write".equals(f.op) ? "WRITES_ENTITY" : "READS_ENTITY",
+                                Map.of("operation", "jpql", "resolution", "syntactic-declared"));
+                        }
                     }
                 }
             }
@@ -1046,6 +1208,11 @@ public class JavaASTAnalyzer {
                 }
                 meta.put("returnType", method.returnType);
                 meta.put("parameters", method.parameters);
+                // Onda 4: gatilho de fundo — a tela/shaper distinguem "root
+                // legítimo" (cron/evento/boot) de "isolado injustificado".
+                if (method.entryPointKind != null) {
+                    meta.put("entryPoint", method.entryPointKind);
+                }
 
                 List<SecurityAnnotation> allSecAnn = new ArrayList<>(cls.securityAnnotations);
                 allSecAnn.addAll(method.securityAnnotations);
@@ -1090,6 +1257,21 @@ public class JavaASTAnalyzer {
                 String fromId = nodeType + ":" + method.resolvedQualifiedSignature;
                 if (!nodeIds.contains(fromId)) continue;
 
+                // Onda 3b (ADR-0025): em.createQuery("…") no corpo do método —
+                // persistência sem repositório vira aresta método→entidade.
+                for (String jpql : method.jpqlStrings) {
+                    JpqlFacts f = parseJpql(jpql);
+                    for (String ent : f.entities) {
+                        ClassInfo entCi = resolveTypeToClassInfo(cls, ent);
+                        if (entCi == null || !entCi.isEntity) continue;
+                        String entityNodeId = resolvedEntityNodeId(entCi);
+                        if (!nodeIds.contains(entityNodeId)) continue;
+                        addEdge(edges, edgeKeys, fromId, entityNodeId,
+                            "write".equals(f.op) ? "WRITES_ENTITY" : "READS_ENTITY",
+                            Map.of("operation", "jpql", "resolution", "syntactic-declared"));
+                    }
+                }
+
                 for (MethodCallInfo call : method.methodCalls) {
                     ClassInfo targetClass = symbolClassMap.get(call.resolvedDeclaringType);
                     if (targetClass == null && call.resolvedScopeType != null) {
@@ -1117,9 +1299,9 @@ public class JavaASTAnalyzer {
                                     String entityNodeId = resolvedEntityNodeId(entArg);
                                     if (nodeIds.contains(entityNodeId)) {
                                         if (isWriteOp(argOp)) {
-                                            addEdge(edges, edgeKeys, fromId, entityNodeId, "WRITES_ENTITY", Map.of("operation", argOp));
+                                            addEdge(edges, edgeKeys, fromId, entityNodeId, "WRITES_ENTITY", Map.of("operation", argOp, "resolution", "syntactic-declared"));
                                         } else {
-                                            addEdge(edges, edgeKeys, fromId, entityNodeId, "READS_ENTITY", Map.of("operation", argOp));
+                                            addEdge(edges, edgeKeys, fromId, entityNodeId, "READS_ENTITY", Map.of("operation", argOp, "resolution", "syntactic-declared"));
                                         }
                                     }
                                 }
@@ -1172,14 +1354,17 @@ public class JavaASTAnalyzer {
                                 if (nodeIds.contains(entityNodeId)) {
                                     String op = detectPersistenceOp(call.methodName);
                                     if (isWriteOp(op)) {
-                                        addEdge(edges, edgeKeys, repoMethodNodeId, entityNodeId, "WRITES_ENTITY", Map.of("operation", op));
+                                        addEdge(edges, edgeKeys, repoMethodNodeId, entityNodeId, "WRITES_ENTITY", Map.of("operation", op, "resolution", "syntactic-declared"));
                                     } else {
-                                        addEdge(edges, edgeKeys, repoMethodNodeId, entityNodeId, "READS_ENTITY", Map.of("operation", op != null ? op : "read"));
+                                        addEdge(edges, edgeKeys, repoMethodNodeId, entityNodeId, "READS_ENTITY", Map.of("operation", op != null ? op : "read", "resolution", "syntactic-declared"));
                                     }
                                 }
                             }
                         }
-                        addEdge(edges, edgeKeys, fromId, repoMethodNodeId, "CALLS", null);
+                        // T1 (ADR-0025): proveniência por aresta — resolvido pelo
+                        // solver vs. ligado pelo tipo DECLARADO (fallback ADR-0018).
+                        addEdge(edges, edgeKeys, fromId, repoMethodNodeId, "CALLS",
+                            Map.of("resolution", call.resolvedSignature != null ? "syntactic-resolved" : "syntactic-declared"));
                     } else {
                         // Wave 2 — interface→impl fan-out: se o alvo é uma INTERFACE do
                         // projeto (ex. ActionExecutor/ConfigContentValidator chamados via
@@ -1201,7 +1386,8 @@ public class JavaASTAnalyzer {
                             String toId = resolveCalleeNodeId(tgt, call, signatureToNodeId);
                             if (toId != null && nodeIds.contains(toId)) {
                                 addEdge(edges, edgeKeys, fromId, toId, "CALLS",
-                                    fanout ? Map.of("resolution", "interface-impl", "via", targetClass.className) : null);
+                                    fanout ? Map.of("resolution", "interface-impl", "via", targetClass.className)
+                                           : Map.of("resolution", call.resolvedSignature != null ? "syntactic-resolved" : "syntactic-declared"));
                             }
                         }
                     }
@@ -1253,7 +1439,7 @@ public class JavaASTAnalyzer {
 
         for (String entityNodeId : entityNodeIds) {
             if (nodeIds.contains(entityNodeId)) {
-                addEdge(edges, edgeKeys, fromId, entityNodeId, "WRITES_ENTITY", Map.of("operation", "state_change"));
+                addEdge(edges, edgeKeys, fromId, entityNodeId, "WRITES_ENTITY", Map.of("operation", "state_change", "resolution", "syntactic-declared"));
             }
         }
     }
@@ -1316,6 +1502,10 @@ public class JavaASTAnalyzer {
         // Wave 2: interfaces que esta classe implementa (ou, se for interface,
         // estende) — nomes simples. Base do índice interface→impl.
         List<String> interfaceNames = new ArrayList<>();
+        // Onda 3a: associações JPA [tipoAlvoSimples, kind] declaradas nos campos.
+        List<String[]> entityAssociations = new ArrayList<>();
+        // Onda 4: implementa CommandLineRunner/ApplicationRunner (run() = boot).
+        boolean isRunner;
     }
 
     static class MethodInfo {
@@ -1332,6 +1522,10 @@ public class JavaASTAnalyzer {
         List<MethodCallInfo> methodCalls = new ArrayList<>();
         boolean hasEntityMutations;
         List<SecurityAnnotation> securityAnnotations = new ArrayList<>();
+        // Onda 4: tipo do gatilho de fundo (@Scheduled/@EventListener/…), ou null.
+        String entryPointKind;
+        // Onda 3b: literais JPQL (@Query no método + em.createQuery no corpo).
+        List<String> jpqlStrings = new ArrayList<>();
     }
 
     static class MethodCallInfo {

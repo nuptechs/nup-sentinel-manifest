@@ -81,3 +81,42 @@ describe("shapeSystemGraph — level=method (grafo cru preservado p/ drill-down)
     assert.equal(g.counts.edges, 1);
   });
 });
+
+describe("shapeSystemGraph — ADR-0025 Ondas 3+4 (ASSOCIATES + entryPoint)", () => {
+  it("aresta ASSOCIATES entidade→entidade rola pro class-level (filha conectada)", () => {
+    const raw = {
+      nodes: [
+        { id: "ENTITY:d.ReferenceTable", type: "ENTITY" },
+        { id: "ENTITY:d.ReferenceTableRow", type: "ENTITY" },
+      ],
+      edges: [
+        { fromNode: "ENTITY:d.ReferenceTable", toNode: "ENTITY:d.ReferenceTableRow", relationType: "ASSOCIATES" },
+      ],
+    };
+    const g = shapeSystemGraph(raw, "class");
+    assert.equal(g.counts.edges, 1);
+    assert.equal(g.edges[0].relationType, "ASSOCIATES");
+    const filha = g.nodes.find((n) => n.id.endsWith("Row"))!;
+    assert.equal(filha.inDegree, 1, "filha deixou de ser isolada");
+  });
+
+  it("entryPoint do MÉTODO agrega na CLASSE (class-level) e passa cru no method-level", () => {
+    const raw = {
+      nodes: [
+        { id: "SERVICE:d.AutoScheduler", type: "SERVICE" },
+        { id: "SERVICE:d.AutoScheduler.tick()", type: "SERVICE", metadata: { entryPoint: "Scheduled" } },
+        { id: "SERVICE:d.Normal.faz()", type: "SERVICE" },
+      ],
+      edges: [],
+    };
+    const cls = shapeSystemGraph(raw, "class");
+    const sched = cls.nodes.find((n) => n.id.endsWith("AutoScheduler"))!;
+    assert.deepEqual(sched.entryPoint, ["Scheduled"], "classe herda o gatilho do método");
+    const normal = cls.nodes.find((n) => n.id.endsWith("Normal"))!;
+    assert.equal(normal.entryPoint, undefined, "classe comum sem marca");
+
+    const met = shapeSystemGraph(raw, "method");
+    const tick = met.nodes.find((n) => n.id.includes("tick"))!;
+    assert.deepEqual(tick.entryPoint, ["Scheduled"]);
+  });
+});

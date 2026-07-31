@@ -75,8 +75,11 @@ class InterfaceImplResolutionTest {
         List<GraphEdgeDTO> toDoIt = callsFrom(r, "Caller.m").stream()
             .filter(e -> e.toNode.contains("Helper.doIt")).toList();
         assertEquals(1, toDoIt.size(), "chamada concreta = exatamente 1 aresta");
-        assertNull(toDoIt.get(0).metadata.get("resolution"),
-            "chamada concreta não deve carregar metadata de fan-out (sem regressão)");
+        // T1 (ADR-0025): toda aresta carrega proveniência — mas chamada concreta
+        // NUNCA leva a marca de fan-out (interface-impl/via).
+        assertNotEquals("interface-impl", toDoIt.get(0).metadata.get("resolution"),
+            "chamada concreta não é fan-out");
+        assertNull(toDoIt.get(0).metadata.get("via"), "sem via em chamada concreta");
     }
 
     @Test
