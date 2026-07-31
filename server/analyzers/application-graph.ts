@@ -1,6 +1,9 @@
 // VIEW/ROUTE (ADR-0025 Onda 6): camadas de tela (frontend) e rota do gateway
 // Node — o grafo passa a contar a cadeia inteira do clique ao dado.
-export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE";
+// COMPONENT/COMPOSABLE (2026-08-01): camadas intermediárias do frontend como
+// nós de 1ª classe — tela→componente→composable→endpoint. Agregação é papel
+// da LENTE (lição do método×classe), não do modelo.
+export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE" | "COMPONENT" | "COMPOSABLE";
 // ASSOCIATES (ADR-0025 Onda 3a): associação JPA entidade→entidade
 // (@OneToMany/@ManyToOne/…) — como o pai alcança a filha sem repositório.
 export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY" | "ASSOCIATES";

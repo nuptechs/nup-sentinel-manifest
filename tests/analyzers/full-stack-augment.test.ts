@@ -129,16 +129,20 @@ describe("linkViewsViaComposablesAndInline (Onda 6b-2)", () => {
     content: "import { findVendors, delVendor } from '@/api/vendors';\nexport function useVendors() { const load = () => findVendors(); return { load }; }\nexport function useVendorDelete() { return () => delVendor(); }\n" };
   const page = { filePath: "frontend/src/pages/VendorList.vue",
     content: "<script setup>\nimport { useVendors } from '@/composables/useVendors';\nconst { load } = useVendors();\n</script>" };
-  it("componente→composable→api→URL liga com via rastreável; export não usado NÃO vaza", async () => {
+  it("CADEIA materializada: tela→composable(fn)→endpoint; export não usado NÃO vira nó", async () => {
     const { linkViewsViaComposablesAndInline } = await import("../../server/analyzers/full-stack-augment.ts");
     const g = new ApplicationGraph();
     g.addNode(new GraphNode("wsv1:POST:/easynup/findVendors.v1", "CONTROLLER", "F", "execute", null, {}));
     g.addNode(new GraphNode("wsv1:POST:/easynup/deleteVendor.v1", "CONTROLLER", "D", "execute", null, {}));
-    const r = linkViewsViaComposablesAndInline(g, [api, comp, page]);
-    assert.equal(r.edges, 1, "só a URL do export INVOCADO (useVendors), não do useVendorDelete");
-    const e = g.getOutgoingEdges("view:VendorList")[0];
-    assert.equal(e.toNode, "wsv1:POST:/easynup/findVendors.v1");
-    assert.ok(String(e.metadata.via).includes("useVendors.ts".replace(".ts","")) || String(e.metadata.via).includes("useVendors"), String(e.metadata.via));
+    linkViewsViaComposablesAndInline(g, [api, comp, page]);
+    const pe = g.getOutgoingEdges("view:VendorList")[0];
+    assert.equal(pe.toNode, "composable:useVendors.useVendors", "tela aponta pro COMPOSABLE (camada real)");
+    const ce = g.getOutgoingEdges("composable:useVendors.useVendors")[0];
+    assert.equal(ce.toNode, "wsv1:POST:/easynup/findVendors.v1", "composable aponta pro endpoint");
+    assert.ok(String(ce.metadata.via).includes("useVendors"));
+    assert.equal(g.getNode("composable:useVendors.useVendorDelete"), undefined, "export não invocado não vira nó");
+    const node = g.getNode("composable:useVendors.useVendors")!;
+    assert.equal(node.type, "COMPOSABLE");
   });
   it("URL literal inline no componente liga direto (authFetch no corpo)", async () => {
     const { linkViewsViaComposablesAndInline } = await import("../../server/analyzers/full-stack-augment.ts");
@@ -167,11 +171,13 @@ describe("TELA = roteada no router (correção de definição) + propagação co
     g.addNode(new GraphNode("wsv1:POST:/easynup/findVendors.v1", "CONTROLLER", "F", "execute", null, {}));
     const r = linkViewsViaComposablesAndInline(g, [router, api, comp, page]);
     assert.equal(g.getNode("view:VendorPicker"), undefined, "componente não é tela");
-    const e = g.getOutgoingEdges("view:VendorList")[0];
-    assert.ok(e, "página roteada ganhou a aresta do componente");
-    assert.equal(e.toNode, "wsv1:POST:/easynup/findVendors.v1");
-    assert.equal(e.metadata.via, "component-tree");
-    assert.ok(r.edges >= 1);
+    const compNode = g.getNode("component:VendorPicker")!;
+    assert.equal(compNode.type, "COMPONENT", "componente é CAMADA própria");
+    const pe = g.getOutgoingEdges("view:VendorList")[0];
+    assert.equal(pe.toNode, "component:VendorPicker", "tela → componente");
+    const ce = g.getOutgoingEdges("component:VendorPicker")[0];
+    assert.equal(ce.toNode, "wsv1:POST:/easynup/findVendors.v1", "componente → endpoint (api direta dele)");
+    assert.ok(r.components >= 1 && r.edges >= 2);
   });
 
   it("com router no payload, arquivo em pages/ NÃO-roteado também não vira tela", async () => {
