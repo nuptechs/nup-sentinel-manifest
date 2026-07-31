@@ -13,11 +13,13 @@
 import { ApplicationGraph, GraphNode, GraphEdge } from "./application-graph";
 import type { FrontendInteraction } from "./frontend-analyzer";
 import type { ExpressRoute } from "./node-backend/express-routes";
+import { toSnakeCase } from "./nuptechs-conventions";
 
 export interface FullStackAugmentResult {
   views: number;
   routes: number;
   edges: number;
+  nodeModules?: number;
 }
 
 /** Normaliza um path Express (`/api/x/:id`) em segmentos comparáveis. */
@@ -58,6 +60,51 @@ export function augmentGraphWithFullStack(
   };
 
   // ROUTE — rotas Express do gateway (nó por método+path; carrega permissão).
+  // BACKEND NODE MATERIALIZADO (2026-08-01 — "rota → nada" era o maior buraco
+  // do mapa): o extractor JÁ resolve a cadeia interna do handler (callChain
+  // ["file::fn",...]) + tabelas Drizzle (entitiesTouched) + operações
+  // (persistenceOperations) — e tudo era DESCARTADO. Agora:
+  //   ROUTE → node:<módulo> (SERVICE runtime=node, por ARQUIVO — análogo à
+  //   classe) → ... → tabela: casa com a ENTIDADE Java pelo nome físico da
+  //   tabela (snake_case — MESMO Postgres) ou minta `table:<nome>` ENTITY
+  //   drizzleOnly. Relação READS/WRITES pelo persistenceOperations real.
+  const entityByTable = new Map<string, string>();
+  for (const n of graph.getNodesByType("ENTITY")) {
+    entityByTable.set(toSnakeCase(n.className), n.id);
+  }
+  let nodeModules = 0;
+  const mintNodeModule = (fileFn: string): string | null => {
+    const file = fileFn.split("::")[0];
+    if (!file) return null;
+    const id = `node:${file}`;
+    if (!graph.getNode(id)) {
+      const base = (file.split("/").pop() || file).replace(/\.(js|ts)$/, "");
+      graph.addNode(new GraphNode(id, "SERVICE", base, null, null, {
+        sourceFile: file, runtime: "node", synthetic: true,
+      }));
+      nodeModules++;
+    }
+    return id;
+  };
+  const dataEdge = (fromId: string, r: ExpressRoute) => {
+    const ops = r.persistenceOperations || [];
+    const isWrite = ops.some((o) => /write|insert|update|delete|upsert/i.test(o));
+    for (const table of r.entitiesTouched || []) {
+      let target = entityByTable.get(table);
+      if (!target) {
+        target = `table:${table}`;
+        if (!graph.getNode(target)) {
+          graph.addNode(new GraphNode(target, "ENTITY", table, null, null, {
+            drizzleOnly: true, synthetic: true,
+          }));
+        }
+      }
+      graph.addEdge(new GraphEdge(fromId, target, isWrite ? "WRITES_ENTITY" : "READS_ENTITY", {
+        synthetic: true, resolution: "syntactic-declared", operation: "drizzle",
+        ops: ops.join(","),
+      }));
+    }
+  };
   const routeNodeByKey = new Map<string, { id: string; route: ExpressRoute }>();
   for (const r of routes || []) {
     if (!r?.path || !r.method || r.method === "ALL") continue;
@@ -75,6 +122,19 @@ export function augmentGraphWithFullStack(
       routesAdded++;
     }
     routeNodeByKey.set(id, { id, route: r });
+    // cadeia interna do handler → módulos Node encadeados
+    const chain = (r.callChain || []).map(mintNodeModule).filter((x): x is string => !!x);
+    let prev = id;
+    for (const hop of chain) {
+      if (hop !== prev) {
+        graph.addEdge(new GraphEdge(prev, hop, "CALLS", {
+          synthetic: true, resolution: "syntactic-declared", convention: "node-chain",
+        }));
+        prev = hop;
+      }
+    }
+    // toque de dados sai do FIM da cadeia (ou da própria rota se same-file)
+    dataEdge(prev, r);
   }
 
   // VIEW — telas/componentes com interação HTTP; aresta pro backend mapeado
@@ -124,7 +184,7 @@ export function augmentGraphWithFullStack(
     }
   }
 
-  return { views, routes: routesAdded, edges };
+  return { views, routes: routesAdded, edges, nodeModules };
 }
 
 // ─── Onda 6b (ADR-0025): resolvedor da CAMADA DE API do frontend ───
@@ -245,6 +305,7 @@ export function indexComposableLayer(
   apiIdx: ApiLayerIndex,
 ): ComposableIndex {
   const out: ComposableIndex = {};
+  const pendingChildren: { mod: string; fn: string; filePath: string; kids: string[] }[] = [];
   for (const f of fileData) {
     if (!/frontend\/src\/composables\/.*\.ts$/.test(f.filePath)) continue;
     const mod = (f.filePath.split("/").pop() || "").replace(/\.ts$/, "");
@@ -260,18 +321,58 @@ export function indexComposableLayer(
         if (amod[fn]) apiFns.push({ fn, url: amod[fn], via: `api/${im[2]}.${fn}` });
       }
     }
-    if (!apiFns.length) continue;
-    // bloco por export: só api fns invocadas no bloco
+    // bloco por export: api fns invocadas + URL inline + composables FILHOS
     const marks: { name: string; at: number }[] = [];
     let m: RegExpExecArray | null;
     EXPORT_RE.lastIndex = 0;
     while ((m = EXPORT_RE.exec(f.content)) !== null) marks.push({ name: m[1] || m[2], at: m.index });
+    // composables importados por ESTE composable (cadeia indireta — 68 dos 81
+    // composables do easynup não importam api direto; chamam OUTRO composable)
+    const childImports: { fn: string; key: string }[] = [];
+    let ci: RegExpExecArray | null;
+    COMPOSABLE_IMPORT_RE.lastIndex = 0;
+    while ((ci = COMPOSABLE_IMPORT_RE.exec(f.content)) !== null) {
+      for (const raw of ci[1].split(",")) {
+        const fn = raw.trim().split(/\s+as\s+/)[0].trim();
+        if (fn) childImports.push({ fn, key: `${ci[2]}.${fn}` });
+      }
+    }
     for (let i = 0; i < marks.length; i++) {
       const body = f.content.slice(marks[i].at, marks[i + 1]?.at ?? f.content.length);
-      const hits = apiFns.filter((a) => new RegExp("[^\\w.]" + a.fn + "\\s*\\(").test(body));
-      if (hits.length) (out[mod] = out[mod] || {})[marks[i].name] =
-        hits.map((h) => ({ url: h.url, via: `composables/${mod}.${marks[i].name}→${h.via}`, filePath: f.filePath }));
+      const entries: { url: string; via: string; filePath?: string }[] = [];
+      for (const a of apiFns) {
+        if (new RegExp("[^\\w.]" + a.fn + "\\s*\\(").test(body)) {
+          entries.push({ url: a.url, via: `composables/${mod}.${marks[i].name}→${a.via}`, filePath: f.filePath });
+        }
+      }
+      let um: RegExpExecArray | null;
+      URL_RE_G.lastIndex = 0;
+      while ((um = URL_RE_G.exec(body)) !== null) {
+        entries.push({ url: um[1], via: `composables/${mod}.${marks[i].name}:inline`, filePath: f.filePath });
+      }
+      if (entries.length) (out[mod] = out[mod] || {})[marks[i].name] = entries;
+      const kids = childImports.filter((c) => new RegExp("[^\\w.]" + c.fn + "\\s*\\(").test(body));
+      if (kids.length) pendingChildren.push({ mod, fn: marks[i].name, filePath: f.filePath, kids: kids.map((k) => k.key) });
     }
+  }
+  // fixpoint (≤3 passadas): composable herda os alvos dos composables FILHOS
+  for (let pass = 0; pass < 3; pass++) {
+    let changed = false;
+    for (const pc of pendingChildren) {
+      const mine = (out[pc.mod] = out[pc.mod] || {});
+      const have = new Set((mine[pc.fn] || []).map((e) => e.url));
+      for (const key of pc.kids) {
+        const dot = key.lastIndexOf(".");
+        const kidEntries = out[key.slice(0, dot)]?.[key.slice(dot + 1)] || [];
+        for (const e of kidEntries) {
+          if (have.has(e.url)) continue;
+          have.add(e.url);
+          (mine[pc.fn] = mine[pc.fn] || []).push({ url: e.url, via: `composables/${pc.mod}.${pc.fn}→${e.via}`, filePath: pc.filePath });
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
   }
   return out;
 }

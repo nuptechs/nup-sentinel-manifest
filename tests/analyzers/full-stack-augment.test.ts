@@ -198,3 +198,56 @@ describe("TELA = roteada no router (correção de definição) + propagação co
     assert.equal(isRoutedPage("frontend/src/pages/Y.vue", new Set()), true, "fallback sem router");
   });
 });
+
+describe("BACKEND NODE materializado + composables indiretos (além-fronteira)", () => {
+  it("callChain vira módulos Node encadeados e o toque Drizzle casa com a ENTIDADE Java pela tabela", async () => {
+    const { augmentGraphWithFullStack } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("ENTITY:easynup.Notification", "ENTITY", "Notification", null, null, {}));
+    augmentGraphWithFullStack(g, [], [
+      route("POST", "/api/notifications/send", {
+        callChain: ["services/gateway/src/routes/notifications.js::handler", "packages/core/src/repositories/notification.repository.js::create"],
+        entitiesTouched: ["notification"], persistenceOperations: ["write"],
+      } as never),
+    ]);
+    const r1 = g.getOutgoingEdges("route:POST:/api/notifications/send");
+    assert.equal(r1[0].toNode, "node:services/gateway/src/routes/notifications.js", "rota → 1º módulo da cadeia");
+    const hop = g.getOutgoingEdges(r1[0].toNode);
+    assert.equal(hop[0].toNode, "node:packages/core/src/repositories/notification.repository.js", "cadeia encadeada");
+    const data = g.getOutgoingEdges(hop[0].toNode)[0];
+    assert.equal(data.toNode, "ENTITY:easynup.Notification", "tabela drizzle CASA com a entidade Java (mesmo Postgres)");
+    assert.equal(data.relationType, "WRITES_ENTITY", "persistenceOperations=write → WRITES");
+    const mod = g.getNode(r1[0].toNode)!;
+    assert.equal(mod.type, "SERVICE");
+    assert.equal(mod.metadata.runtime, "node", "camada SERVICE, runtime node");
+  });
+
+  it("tabela sem entidade Java vira nó ENTITY drizzleOnly (gateway-only não é invisível)", async () => {
+    const { augmentGraphWithFullStack } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    augmentGraphWithFullStack(g, [], [
+      route("GET", "/api/sessions/list", { entitiesTouched: ["gateway_session"], persistenceOperations: ["read"], callChain: [] } as never),
+    ]);
+    const t = g.getNode("table:gateway_session")!;
+    assert.equal(t.type, "ENTITY");
+    assert.equal(t.metadata.drizzleOnly, true);
+    assert.equal(g.getOutgoingEdges("route:GET:/api/sessions/list")[0].relationType, "READS_ENTITY");
+  });
+
+  it("composable INDIRETO (chama outro composable) e URL inline em composable alcançam o endpoint", async () => {
+    const { indexComposableLayer, indexApiLayer } = await import("../../server/analyzers/full-stack-augment.ts");
+    const api = { filePath: "frontend/src/api/vendors.ts", content: "export async function findVendors(){ return authFetch(`${B}/easynup/findVendors.v1`); }\n" };
+    const base = { filePath: "frontend/src/composables/useVendorsBase.ts",
+      content: "import { findVendors } from '@/api/vendors';\nexport function useVendorsBase(){ return () => findVendors(); }\n" };
+    const wrapper = { filePath: "frontend/src/composables/useVendorScreen.ts",
+      content: "import { useVendorsBase } from '@/composables/useVendorsBase';\nexport function useVendorScreen(){ const b = useVendorsBase(); return b; }\n" };
+    const inline = { filePath: "frontend/src/composables/useHeat.ts",
+      content: "export function useHeat(){ return () => authFetch(`${B}/easynup/processHeatmap.v1`); }\n" };
+    const idx = indexComposableLayer([base, wrapper, inline], indexApiLayer([api, base, wrapper, inline]));
+    assert.ok(idx.useVendorsBase.useVendorsBase, "direto ok");
+    assert.ok(idx.useVendorScreen.useVendorScreen, "INDIRETO herdou o alvo via fixpoint");
+    assert.equal(idx.useVendorScreen.useVendorScreen[0].url, "/easynup/findVendors.v1");
+    assert.ok(String(idx.useVendorScreen.useVendorScreen[0].via).includes("useVendorScreen"));
+    assert.equal(idx.useHeat.useHeat[0].url, "/easynup/processHeatmap.v1", "inline em composable ok");
+  });
+});
