@@ -197,7 +197,7 @@ export class AnalysisPipeline {
       // grafo persistido (a cadeia clique→dado vira navegável no System Map).
       // Idempotente: no cache-hit de backend o grafo cacheado é só-Java e o
       // augment re-roda; addNode/addEdge dedupam.
-      const fsAug = augmentGraphWithFullStack(appGraph, frontendInteractions, extractExpressRoutes(frontendFiles));
+      const fsAug = augmentGraphWithFullStack(appGraph, frontendInteractions, extractExpressRoutes(frontendFiles), frontendFiles);
       // Onda 6b: cadeia componente→api/*.ts→URL resolvida deterministicamente
       const apiAug = linkViewsViaApiLayer(appGraph, frontendFiles);
       if (apiAug.edges > 0) this.progress("Step 3/4", `API-layer: +${apiAug.views} telas, +${apiAug.edges} arestas tela→backend`);

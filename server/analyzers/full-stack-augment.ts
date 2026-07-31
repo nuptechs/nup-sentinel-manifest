@@ -42,7 +42,9 @@ export function augmentGraphWithFullStack(
   graph: ApplicationGraph,
   interactions: FrontendInteraction[],
   routes: ExpressRoute[],
+  fileData: { filePath: string; content: string }[] = [],
 ): FullStackAugmentResult {
+  const routedSet = routedPageBases(fileData);
   let views = 0;
   let routesAdded = 0;
   let edges = 0;
@@ -80,6 +82,9 @@ export function augmentGraphWithFullStack(
   const viewIds = new Set<string>();
   for (const it of interactions || []) {
     if (it.interactionCategory !== "HTTP") continue;
+    // TELA = roteada (correção de definição): interação de COMPONENTE não
+    // minta nó "view:" — a atribuição vem pela árvore de imports (6b).
+    if (it.sourceFile && !isRoutedPage(it.sourceFile, routedSet)) continue;
     const component = it.component || "UnknownView";
     const viewId = `view:${component}`;
     if (!viewIds.has(viewId) && !graph.getNode(viewId)) {
@@ -189,8 +194,10 @@ export function linkViewsViaApiLayer(
     return null;
   };
   const seen = new Set<string>();
+  const routed = routedPageBases(fileData);
   for (const f of fileData) {
     if (!/frontend\/src\/.*\.(vue|ts)$/.test(f.filePath) || /frontend\/src\/api\//.test(f.filePath)) continue;
+    if (!isRoutedPage(f.filePath, routed)) continue; // TELA = roteada; componente vai via propagação
     const component = (f.filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
     let im: RegExpExecArray | null;
     IMPORT_RE.lastIndex = 0;
@@ -290,6 +297,12 @@ export function linkViewsViaComposablesAndInline(
     return null;
   };
   const seen = new Set<string>();
+  const routed = routedPageBases(fileData);
+  const targetsByBase = new Map<string, Set<string>>();
+  const collect = (base: string, target: string) => {
+    if (!targetsByBase.has(base)) targetsByBase.set(base, new Set());
+    targetsByBase.get(base)!.add(target);
+  };
   const link = (component: string, sourceFile: string, target: string, via: string) => {
     const viewId = `view:${component}`;
     if (!graph.getNode(viewId)) {
@@ -308,6 +321,24 @@ export function linkViewsViaComposablesAndInline(
     if (!/frontend\/src\/.*\.(vue|ts)$/.test(f.filePath)) continue;
     if (/frontend\/src\/(api|composables)\//.test(f.filePath)) continue;
     const component = (f.filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
+    const page = isRoutedPage(f.filePath, routed);
+    const hit = (t: string, via: string) => page ? link(component, f.filePath, t, via) : collect(component, t);
+    // (a0) api DIRETO — pro NÃO-roteado (o linkViewsViaApiLayer agora só cobre telas)
+    if (!page) {
+      let ia: RegExpExecArray | null;
+      IMPORT_RE.lastIndex = 0;
+      while ((ia = IMPORT_RE.exec(f.content)) !== null) {
+        const amod = apiIdx[ia[2]];
+        if (!amod) continue;
+        for (const raw of ia[1].split(",")) {
+          const fn = raw.trim().split(/\s+as\s+/)[0].trim();
+          if (!amod[fn]) continue;
+          if (!new RegExp("[^\\w.]" + fn + "\\s*\\(").test(f.content)) continue;
+          const t = resolveTarget(amod[fn]);
+          if (t) collect(component, t);
+        }
+      }
+    }
     // (a) composable hop
     let im: RegExpExecArray | null;
     COMPOSABLE_IMPORT_RE.lastIndex = 0;
@@ -320,17 +351,122 @@ export function linkViewsViaComposablesAndInline(
         if (!new RegExp("[^\\w.]" + fn + "\\s*\\(").test(f.content)) continue;
         for (const { url, via } of cmod[fn]) {
           const t = resolveTarget(url);
-          if (t) link(component, f.filePath, t, via);
+          if (t) hit(t, via);
         }
       }
     }
-    // (b) URL literal inline no componente
+    // (b) URL literal inline
     let um: RegExpExecArray | null;
     URL_RE_G.lastIndex = 0;
     while ((um = URL_RE_G.exec(f.content)) !== null) {
       const t = resolveTarget(um[1]);
-      if (t) link(component, f.filePath, t, "inline-url");
+      if (t) hit(t, "inline-url");
     }
   }
-  return { views, edges };
+  // (c) componentes → telas que os importam (árvore de imports .vue)
+  const prop = propagateComponentTargets(graph, fileData, targetsByBase, routed);
+  return { views: views + prop.views, edges: edges + prop.edges };
+}
+
+// ─── TELA = componente ROTEADO (correção de definição, 2026-07-31) ───
+// O usuário provou a inconsistência: a camada "TELA" mintava QUALQUER arquivo
+// de frontend que chama backend (301 nós — componentes/painéis/composables
+// viravam "tela"), enquanto a contagem correta de telas do easynup é a do
+// router (154 rotas / 143 arquivos roteados). Definição dura daqui em diante:
+//   TELA  = .vue importado pelo router.ts (fonte da verdade)
+//   resto = COMPONENTE — as chamadas dele são ATRIBUÍDAS às telas que o
+//           importam (travessia da árvore de imports .vue, fixpoint ≤4 níveis)
+// Fallback sem router no payload: /pages/ no path (compat com testes/payloads
+// parciais). Nada de nó "view:" pra não-roteado — o mapa fala a MESMA língua
+// que o código.
+
+const ROUTER_VUE_RE = /['"]([^'"]+\.vue)['"]/g;
+const VUE_IMPORT_RE = /import\s+\w+\s+from\s+['"]([^'"]+\.vue)['"]/g;
+
+/** Set de BASENAMES (sem .vue) roteados pelo router.ts do payload. */
+export function routedPageBases(fileData: { filePath: string; content: string }[]): Set<string> {
+  const bases = new Set<string>();
+  for (const f of fileData) {
+    if (!/frontend\/src\/router\.(ts|js)$/.test(f.filePath)) continue;
+    let m: RegExpExecArray | null;
+    ROUTER_VUE_RE.lastIndex = 0;
+    while ((m = ROUTER_VUE_RE.exec(f.content)) !== null) {
+      const base = (m[1].split("/").pop() || "").replace(/\.vue$/, "");
+      if (base) bases.add(base);
+    }
+  }
+  return bases;
+}
+
+/** Arquivo é TELA? (roteado; fallback /pages/ quando o payload não tem router) */
+export function isRoutedPage(filePath: string, routed: Set<string>): boolean {
+  const base = (filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
+  if (routed.size > 0) return routed.has(base);
+  return /\/pages\//.test(filePath) && filePath.endsWith(".vue");
+}
+
+/**
+ * Atribui as chamadas de COMPONENTES às TELAS que os importam (fixpoint sobre
+ * a árvore de imports .vue). `targetsByBase` = alvos já resolvidos por arquivo
+ * NÃO-roteado. Emite aresta tela→alvo com via=component:<Nome>. Puro.
+ */
+export function propagateComponentTargets(
+  graph: ApplicationGraph,
+  fileData: { filePath: string; content: string }[],
+  targetsByBase: Map<string, Set<string>>,
+  routed: Set<string>,
+): { edges: number; views: number } {
+  // grafo de imports: base do arquivo → bases .vue importadas
+  const importsOf = new Map<string, string[]>();
+  const fileByBase = new Map<string, { filePath: string; content: string }>();
+  for (const f of fileData) {
+    if (!/frontend\/src\/.*\.vue$/.test(f.filePath)) continue;
+    const base = (f.filePath.split("/").pop() || "").replace(/\.vue$/, "");
+    fileByBase.set(base, f);
+    const imps: string[] = [];
+    let m: RegExpExecArray | null;
+    VUE_IMPORT_RE.lastIndex = 0;
+    while ((m = VUE_IMPORT_RE.exec(f.content)) !== null) {
+      const b = (m[1].split("/").pop() || "").replace(/\.vue$/, "");
+      if (b && b !== base) imps.push(b);
+    }
+    importsOf.set(base, imps);
+  }
+  // fixpoint: alvos de componente sobem pelos imports (≤4 níveis, anti-ciclo)
+  const resolved = new Map<string, Set<string>>();
+  const resolve = (base: string, depth: number, seen: Set<string>): Set<string> => {
+    if (resolved.has(base)) return resolved.get(base)!;
+    const out = new Set<string>(targetsByBase.get(base) || []);
+    if (depth < 4 && !seen.has(base)) {
+      seen.add(base);
+      for (const child of importsOf.get(base) || []) {
+        if (routed.size > 0 ? routed.has(child) : false) continue; // tela não propaga pra cima
+        for (const t of Array.from(resolve(child, depth + 1, seen))) out.add(t);
+      }
+    }
+    resolved.set(base, out);
+    return out;
+  };
+  let edges = 0, views = 0;
+  for (const [base, f] of Array.from(fileByBase.entries())) {
+    if (!isRoutedPage(f.filePath, routed)) continue;
+    const targets = new Set<string>();
+    for (const child of importsOf.get(base) || []) {
+      for (const t of Array.from(resolve(child, 1, new Set([base])))) targets.add(t);
+    }
+    if (!targets.size) continue;
+    const viewId = `view:${base}`;
+    if (!graph.getNode(viewId)) {
+      graph.addNode(new GraphNode(viewId, "VIEW", base, null, null, { sourceFile: f.filePath, synthetic: true }));
+      views++;
+    }
+    for (const t of Array.from(targets)) {
+      if (graph.getOutgoingEdges(viewId).some((e) => e.toNode === t)) continue;
+      graph.addEdge(new GraphEdge(viewId, t, "CALLS", {
+        synthetic: true, resolution: "syntactic-declared", convention: "api-layer", via: "component-tree",
+      }));
+      edges++;
+    }
+  }
+  return { edges, views };
 }
