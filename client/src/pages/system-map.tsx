@@ -48,14 +48,18 @@ import {
   Waypoints,
   Puzzle,
   Braces,
+  Grid3x3,
+  Network,
+  GitFork,
+  Shapes,
 } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 cytoscape.use(elk as any);
 
 // ── Tipos do payload /api/projects/:id/graph ──────────────────────────
-type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE" | "COMPONENT" | "COMPOSABLE";
-type EdgeRelation = "CALLS" | "READS_ENTITY" | "WRITES_ENTITY" | "ASSOCIATES";
+type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE" | "COMPONENT" | "COMPOSABLE" | "INTERFACE" | "SUPERTYPE";
+type EdgeRelation = "CALLS" | "READS_ENTITY" | "WRITES_ENTITY" | "ASSOCIATES" | "EXTENDS" | "IMPLEMENTS";
 
 interface GraphNode {
   id: string;
@@ -69,6 +73,9 @@ interface GraphNode {
   sourceFile?: string;
   /** ADR-0025 Onda 4: gatilhos de fundo (@Scheduled/…) — root legítimo */
   entryPoint?: string[];
+  /** ADR-0026 CM1: faceta canônica (camada/stack) — para a vista Matriz. */
+  layer?: string;
+  stack?: string;
 }
 interface GraphEdge {
   fromNode: string;
@@ -80,6 +87,8 @@ interface GraphPayload {
   analysisRunId: number;
   truncated: boolean;
   counts: { nodes: number; edges: number; byType: Record<string, number> };
+  byLayer?: Record<string, number>;
+  byStack?: Record<string, number>;
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
@@ -101,21 +110,28 @@ const LAYER: Record<
   SERVICE: { label: "Service", color: "#0ea5e9", shape: "ellipse", icon: ServerCog },
   REPOSITORY: { label: "Repository", color: "#14b8a6", shape: "hexagon", icon: Container },
   ENTITY: { label: "Entity", color: "#f59e0b", shape: "barrel", icon: Database },
+  INTERFACE: { label: "Interface", color: "#22d3ee", shape: "round-diamond", icon: GitFork },
+  SUPERTYPE: { label: "Supertipo", color: "#94a3b8", shape: "round-hexagon", icon: Shapes },
 };
 const REL: Record<EdgeRelation, { label: string; color: string }> = {
   CALLS: { label: "chama", color: "#94a3b8" },
   READS_ENTITY: { label: "lê", color: "#38bdf8" },
   WRITES_ENTITY: { label: "escreve", color: "#fb923c" },
   ASSOCIATES: { label: "associa", color: "#c084fc" },
+  EXTENDS: { label: "estende", color: "#22d3ee" },
+  IMPLEMENTS: { label: "implementa", color: "#2dd4bf" },
 };
 
 function labelOf(n: GraphNode): string {
   return n.className || n.qualifiedSignature || n.id;
 }
 
+type ViewMode = "graph" | "matrix";
+
 export default function SystemMapPage() {
   const { data: projects } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
   const [projectId, setProjectId] = useState<number | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("graph");
 
   useEffect(() => {
     if (projectId == null && projects && projects.length > 0) {
@@ -142,21 +158,46 @@ export default function SystemMapPage() {
             O que o Sentinel leu: camadas, dependências e quem escreve em cada entidade.
           </p>
         </div>
-        <Select
-          value={projectId != null ? String(projectId) : undefined}
-          onValueChange={(v) => setProjectId(Number(v))}
-        >
-          <SelectTrigger className="w-64" data-testid="select-project">
-            <SelectValue placeholder="Selecione um projeto" />
-          </SelectTrigger>
-          <SelectContent>
-            {(projects || []).map((p) => (
-              <SelectItem key={p.id} value={String(p.id)}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-3">
+          {/* Seletor de VISTA (AT2): mesmo modelo, várias maneiras de ler.
+              Grafo (node-link, seguir caminho) × Matriz (DSM, estrutura de
+              conjunto densa — lei Ghoniem/Fekete). */}
+          <div className="flex rounded-md border p-0.5" data-testid="view-mode">
+            <Button
+              variant={viewMode === "graph" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setViewMode("graph")}
+              data-testid="view-graph"
+            >
+              <Network className="h-4 w-4" /> Grafo
+            </Button>
+            <Button
+              variant={viewMode === "matrix" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setViewMode("matrix")}
+              data-testid="view-matrix"
+            >
+              <Grid3x3 className="h-4 w-4" /> Matriz
+            </Button>
+          </div>
+          <Select
+            value={projectId != null ? String(projectId) : undefined}
+            onValueChange={(v) => setProjectId(Number(v))}
+          >
+            <SelectTrigger className="w-64" data-testid="select-project">
+              <SelectValue placeholder="Selecione um projeto" />
+            </SelectTrigger>
+            <SelectContent>
+              {(projects || []).map((p) => (
+                <SelectItem key={p.id} value={String(p.id)}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {graphQuery.isLoading && <MapSkeleton />}
@@ -165,7 +206,10 @@ export default function SystemMapPage() {
         <GraphEmptyOrError error={graphQuery.error as Error} />
       )}
 
-      {graphQuery.data && <GraphCanvas payload={graphQuery.data} />}
+      {graphQuery.data && viewMode === "graph" && <GraphCanvas payload={graphQuery.data} />}
+      {graphQuery.data && viewMode === "matrix" && projectId != null && (
+        <MatrixView projectId={projectId} payload={graphQuery.data} />
+      )}
     </div>
   );
 }
@@ -214,6 +258,8 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
     READS_ENTITY: true,
     WRITES_ENTITY: true,
     ASSOCIATES: true,
+    EXTENDS: true,
+    IMPLEMENTS: true,
   });
 
   // Escopo de renderização (foco-primeiro, anti-hairball — a pesquisa é
@@ -720,6 +766,170 @@ function IsolateList({
           })}
         </ul>
       )}
+    </div>
+  );
+}
+
+// ── Vista MATRIZ (DSM / Levelized Structure Map) — AT2 ────────────────
+// A leitura de ESTRUTURA DE CONJUNTO (lei Ghoniem/Fekete: matriz supera
+// node-link acima de ~20 nós). Camada×camada (do `layer` canônico CM1) + bandas
+// de nível (partição LSM do /dsm) + tangles (ciclos) + saúde. Um modelo, N vistas.
+const LAYER_ORDER = ["presentation", "api", "domain", "data", "infra"] as const;
+const LAYER_META: Record<string, { label: string; color: string }> = {
+  presentation: { label: "Apresentação", color: "#ec4899" },
+  api: { label: "API", color: "#6366f1" },
+  domain: { label: "Domínio", color: "#0ea5e9" },
+  data: { label: "Dados", color: "#f59e0b" },
+  infra: { label: "Infra", color: "#94a3b8" },
+};
+
+interface DsmPayload {
+  partitions: { level: number; nodes: string[] }[];
+  cycles: string[][];
+  levelizable: boolean;
+  stats: { nodes: number; edges: number; levels: number; cycleCount: number; nodesInCycles: number; feedbackEdges: number; feedbackPct: number };
+}
+
+function shortName(id: string): string {
+  const afterColon = id.includes(":") ? id.slice(id.indexOf(":") + 1) : id;
+  const base = afterColon.split("(")[0];
+  return base.split(".").filter(Boolean).pop() || base;
+}
+
+function StatCard({ label, value, warn }: { label: string; value: number | string; warn?: boolean }) {
+  return (
+    <div className={`rounded-lg border px-4 py-3 ${warn ? "border-amber-500/40 bg-amber-500/5" : ""}`}>
+      <div className={`text-2xl font-semibold tabular-nums ${warn ? "text-amber-600 dark:text-amber-400" : ""}`}>{value}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+function MatrixView({ projectId, payload }: { projectId: number; payload: GraphPayload }) {
+  const dsmQuery = useQuery<DsmPayload>({
+    queryKey: [`/api/projects/${projectId}/dsm`],
+    retry: false,
+  });
+
+  const { matrix, layerCounts } = useMemo(() => {
+    const idLayer = new Map<string, string>();
+    const layerCounts: Record<string, number> = {};
+    for (const n of payload.nodes) {
+      const l = n.layer && LAYER_META[n.layer] ? n.layer : "—";
+      idLayer.set(n.id, l);
+      layerCounts[l] = (layerCounts[l] || 0) + 1;
+    }
+    const cols = [...LAYER_ORDER, "—"];
+    const matrix: Record<string, Record<string, number>> = {};
+    for (const a of cols) { matrix[a] = {}; for (const b of cols) matrix[a][b] = 0; }
+    for (const e of payload.edges) {
+      const a = idLayer.get(e.fromNode); const b = idLayer.get(e.toNode);
+      if (!a || !b) continue;
+      matrix[a][b] += 1;
+    }
+    return { matrix, layerCounts };
+  }, [payload]);
+
+  const cols = [...LAYER_ORDER, "—"] as string[];
+  const idx = (l: string) => (LAYER_ORDER as readonly string[]).indexOf(l);
+
+  return (
+    <div className="flex-1 overflow-auto space-y-6" data-testid="matrix-view">
+      {dsmQuery.data && (
+        <div className="flex flex-wrap gap-3">
+          <StatCard label="Camadas descobertas" value={dsmQuery.data.stats.levels} />
+          <StatCard label="Ciclos (tangles)" value={dsmQuery.data.stats.cycleCount} warn={dsmQuery.data.stats.cycleCount > 0} />
+          <StatCard label="Nós em ciclo" value={dsmQuery.data.stats.nodesInCycles} warn={dsmQuery.data.stats.nodesInCycles > 0} />
+          <StatCard label="Feedback" value={`${dsmQuery.data.stats.feedbackEdges} (${dsmQuery.data.stats.feedbackPct}%)`} warn={dsmQuery.data.stats.feedbackPct > 0} />
+        </div>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2"><Grid3x3 className="h-4 w-4" /> Dependência entre camadas (DSM)</CardTitle>
+        </CardHeader>
+        <CardContent className="overflow-x-auto">
+          <table className="text-sm border-collapse">
+            <thead>
+              <tr>
+                <th className="p-2 text-left text-xs text-muted-foreground whitespace-nowrap">de ↓ / para →</th>
+                {cols.map((c) => (
+                  <th key={c} className="p-2 text-xs font-medium" style={{ color: LAYER_META[c]?.color }}>
+                    {LAYER_META[c]?.label || "outros"}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {cols.map((from) => (
+                <tr key={from}>
+                  <td className="p-2 text-xs font-medium whitespace-nowrap" style={{ color: LAYER_META[from]?.color }}>
+                    {LAYER_META[from]?.label || "outros"} <span className="text-muted-foreground">({layerCounts[from] || 0})</span>
+                  </td>
+                  {cols.map((to) => {
+                    const v = matrix[from]?.[to] || 0;
+                    const upward = idx(from) >= 0 && idx(to) >= 0 && idx(from) > idx(to);
+                    const diag = from === to;
+                    const bg = v === 0 ? "transparent" : upward ? "rgba(239,68,68,0.14)" : diag ? "rgba(148,163,184,0.10)" : "rgba(34,197,94,0.10)";
+                    return (
+                      <td key={to} className="p-2 text-center tabular-nums"
+                          style={{ background: bg, color: upward && v ? "#ef4444" : undefined, fontWeight: v ? 500 : 400 }}
+                          title={upward && v ? "dependência para cima — possível violação de camada" : undefined}>
+                        {v || "·"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-3 text-xs text-muted-foreground">
+            Verde = sentido esperado (apresentação→api→domínio→dados). <span className="text-red-500">Vermelho = para cima</span> (possível violação). Cinza = intra-camada.
+          </p>
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        {dsmQuery.data && (
+          <Card>
+            <CardHeader><CardTitle className="text-base flex items-center gap-2"><Shapes className="h-4 w-4" /> Camadas niveladas (LSM)</CardTitle></CardHeader>
+            <CardContent className="space-y-1.5">
+              {dsmQuery.data.partitions.map((p) => (
+                <div key={p.level} className="flex items-center gap-2">
+                  <span className="w-16 text-xs text-muted-foreground">nível {p.level}</span>
+                  <div className="h-4 rounded bg-primary/70" style={{ width: `${Math.min(100, Math.max(3, (p.nodes.length / Math.max(1, dsmQuery.data!.stats.nodes)) * 100 * 4))}%` }} />
+                  <span className="text-xs tabular-nums">{p.nodes.length}</span>
+                </div>
+              ))}
+              <p className="text-xs text-muted-foreground pt-1">
+                {dsmQuery.data.levelizable ? "Grafo nivelável (sem ciclos): as camadas emergiram sozinhas." : "Ciclos impedem a nivelação total (ver tangles)."}
+              </p>
+            </CardContent>
+          </Card>
+        )}
+        {dsmQuery.data && (
+          <Card>
+            <CardHeader><CardTitle className="text-base flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber-500" /> Ciclos (tangles) — {dsmQuery.data.cycles.length}</CardTitle></CardHeader>
+            <CardContent>
+              {dsmQuery.data.cycles.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Nenhum ciclo — arquitetura acíclica.</p>
+              ) : (
+                <ul className="space-y-2 max-h-64 overflow-auto">
+                  {[...dsmQuery.data.cycles].sort((a, b) => b.length - a.length).slice(0, 12).map((c, i) => (
+                    <li key={i} className="text-sm">
+                      <Badge variant="outline" className="mr-2">{c.length} nós</Badge>
+                      <span className="text-muted-foreground">{c.slice(0, 4).map(shortName).join(" ↔ ")}{c.length > 4 ? " …" : ""}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+        )}
+      </div>
+
+      {dsmQuery.isLoading && <Skeleton className="h-40 w-full" />}
+      {dsmQuery.isError && <p className="text-sm text-muted-foreground">Sem DSM para este projeto (reanalise necessária).</p>}
     </div>
   );
 }
