@@ -1535,6 +1535,25 @@ export async function registerRoutes(
     } catch (e) { console.error("facts/check error:", e); res.status(500).json({ message: "Failed to check claim" }); }
   });
 
+  // DSM / Levelized Structure Map (ADR-0026 AT1) — a leitura de ESTRUTURA DE
+  // CONJUNTO para sistema denso: partição automática em camadas niveladas
+  // (block-triangular), tangles (ciclos) e % de arestas de feedback. Lê o
+  // systemGraph persistido, shape class-level. Snapshot antigo → 404 nomeado.
+  app.get("/api/projects/:projectId/dsm", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snaps = await storage.getAnalysisSnapshots(projectId);
+      if (!snaps.length) return res.status(404).json({ message: "Sem analise ainda." });
+      const sg = ((snaps[0].manifestJson as any) || {}).systemGraph;
+      if (!sg?.nodes) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
+      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { computeDsm } = await import("./analyzers/dsm");
+      const shaped = shapeSystemGraph(sg, "class");
+      res.json({ projectId, analysisRunId: snaps[0].analysisRunId, ...computeDsm(shaped) });
+    } catch (e) { console.error("dsm error:", e); res.status(500).json({ message: "Failed to build DSM" }); }
+  });
+
   app.get("/api/projects/:projectId/graph", async (req, res) => {
     try {
       const projectId = parseInt(req.params.projectId);

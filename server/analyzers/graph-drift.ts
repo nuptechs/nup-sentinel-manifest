@@ -20,8 +20,8 @@ export interface GraphDrift {
 
 const edgeKey = (e: ShapedEdge) => `${e.fromNode}->${e.toNode}:${e.relationType}`;
 
-/** SCCs (Tarjan iterativo) ≥2 do subgrafo dado (id→[ids]). Puro. */
-function sccs(nodeIds: string[], adj: Map<string, string[]>): string[][] {
+/** SCCs (Tarjan iterativo) ≥2 do subgrafo dado (id→[ids]). Puro. Reusado pelo DSM (AT1). */
+export function sccs(nodeIds: string[], adj: Map<string, string[]>): string[][] {
   const index = new Map<string, number>(), low = new Map<string, number>(), onStack = new Set<string>();
   const stack: string[] = []; let counter = 0; const out: string[][] = [];
   for (const start of nodeIds) {
