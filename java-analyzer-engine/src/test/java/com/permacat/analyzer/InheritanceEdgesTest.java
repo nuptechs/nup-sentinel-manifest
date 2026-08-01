@@ -78,6 +78,22 @@ class InheritanceEdgesTest {
     }
 
     @Test
+    void supertipoDePacoteDeProjetoEmOutroModuloEhMintadoComoExterno_EXT1b() {
+        // BaseEntity NÃO está no fonte analisado (mora em cloudsupport, outro
+        // módulo do produto) — mas é tipo real do projeto: minta como externo.
+        AnalysisResult r = new JavaASTAnalyzer().analyze(files(
+            "t/Order.java",
+                "package t;\nimport jakarta.persistence.Entity;\nimport cloudsupport.persistence.BaseEntity;\n@Entity\npublic class Order extends BaseEntity { private String code; }\n"
+        ));
+        List<GraphEdgeDTO> ext = edgesOf(r, "EXTENDS");
+        assertTrue(ext.stream().anyMatch(e ->
+                e.fromNode.contains("Order") && e.toNode.equals("SUPERTYPE:cloudsupport.persistence.BaseEntity")),
+            "extends BaseEntity de outro módulo do PROJETO vira EXTENDS p/ supertipo externo; arestas=" + ext.stream().map(e -> e.fromNode + "->" + e.toNode).toList());
+        GraphNodeDTO base = r.nodes.stream().filter(n -> n.id.equals("SUPERTYPE:cloudsupport.persistence.BaseEntity")).findFirst().orElseThrow();
+        assertEquals(Boolean.TRUE, base.metadata.get("external"), "supertipo de outro módulo marcado external");
+    }
+
+    @Test
     void tipoDeFrameworkNaoLiga_precisao() {
         AnalysisResult r = sample();
         assertFalse(r.edges.stream().anyMatch(e -> e.toNode.contains("JpaRepository")),
