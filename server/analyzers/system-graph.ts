@@ -17,6 +17,8 @@
 // drill-down futuro.
 // ─────────────────────────────────────────────
 
+import { classifyNode, type ClassifiableNode } from "./canonical-model";
+
 export interface RawSystemNode {
   id: string;
   type: string;
@@ -57,6 +59,18 @@ export interface ShapedNode {
    * Root LEGÍTIMO: a tela mostra badge e a saúde não o conta como "isolado".
    */
   entryPoint?: string[];
+  /**
+   * ADR-0026 CM1 — camada de PAPEL canônico (faceta stack-agnóstica, aditiva).
+   * `role` projeta byte-a-byte de volta ao `type` legado; `layer`/`stack`/
+   * `roleEvidence`/`roleConfidence` são valor NOVO derivado de evidência
+   * independente (path/metadata). Ausentes quando o tipo do produtor está fora
+   * do vocabulário ativo do CM1 (ex.: módulo Node — coberto em CM2).
+   */
+  role?: string;
+  layer?: string;
+  stack?: string;
+  roleEvidence?: string;
+  roleConfidence?: string;
 }
 export interface ShapedEdge {
   fromNode: string;
@@ -72,6 +86,9 @@ export interface ShapedGraph {
   truncated: boolean;
   inventory?: unknown;
   counts: { nodes: number; edges: number; byType: Record<string, number> };
+  /** ADR-0026 CM1 — distribuições canônicas (aditivas): por camada e por stack. */
+  byLayer?: Record<string, number>;
+  byStack?: Record<string, number>;
   nodes: ShapedNode[];
   edges: ShapedEdge[];
 }
@@ -93,6 +110,23 @@ function edgeProvenance(e: RawSystemEdge): { resolution?: string; synthetic?: bo
 function entryPointOf(node: RawSystemNode): string | undefined {
   const ep = node.metadata?.entryPoint;
   return typeof ep === 'string' && ep ? ep : undefined;
+}
+
+/**
+ * ADR-0026 CM1 — anexa a faceta canônica (aditiva) e acumula as distribuições
+ * por camada/stack. Retorna {} quando o tipo está fora do vocabulário ativo do
+ * CM1 (nó não recebe faceta; nunca chuta).
+ */
+function canonicalFacet(
+  node: ClassifiableNode,
+  byLayer: Record<string, number>,
+  byStack: Record<string, number>,
+): Pick<ShapedNode, 'role' | 'layer' | 'stack' | 'roleEvidence' | 'roleConfidence'> | Record<string, never> {
+  const f = classifyNode(node);
+  if (!f) return {};
+  byLayer[f.layer] = (byLayer[f.layer] || 0) + 1;
+  byStack[f.stack] = (byStack[f.stack] || 0) + 1;
+  return { role: f.role, layer: f.layer, stack: f.stack, roleEvidence: f.evidence, roleConfidence: f.confidence };
 }
 
 /**
@@ -139,6 +173,8 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
     edges.push({ fromNode: e.fromNode, toNode: e.toNode, relationType: e.relationType, ...edgeProvenance(e) });
   }
   const byType: Record<string, number> = {};
+  const byLayer: Record<string, number> = {};
+  const byStack: Record<string, number> = {};
   const nodes: ShapedNode[] = raw.nodes.map((n) => {
     byType[n.type] = (byType[n.type] || 0) + 1;
     const ep = entryPointOf(n);
@@ -148,9 +184,10 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
       inDegree: inDegree[n.id] || 0, outDegree: outDegree[n.id] || 0,
       sensitive: isSensitive(n), sourceFile: sourceFileOf(n),
       ...(ep ? { entryPoint: [ep] } : {}),
+      ...canonicalFacet(n, byLayer, byStack),
     };
   });
-  return { level: 'method', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
+  return { level: 'method', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, byLayer, byStack, nodes, edges };
 }
 
 function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
@@ -197,6 +234,8 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
   }
 
   const byType: Record<string, number> = {};
+  const byLayer: Record<string, number> = {};
+  const byStack: Record<string, number> = {};
   const nodes: ShapedNode[] = Array.from(classes.values()).map((c) => {
     byType[c.type] = (byType[c.type] || 0) + 1;
     return {
@@ -204,7 +243,8 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
       inDegree: inDegree[c.id] || 0, outDegree: outDegree[c.id] || 0,
       sensitive: c.sensitive, sourceFile: c.sourceFile, memberCount: c.members,
       ...(c.entryPoints.size ? { entryPoint: Array.from(c.entryPoints) } : {}),
+      ...canonicalFacet({ id: c.id, type: c.type, className: c.className, sourceFile: c.sourceFile }, byLayer, byStack),
     };
   });
-  return { level: 'class', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, nodes, edges };
+  return { level: 'class', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, byLayer, byStack, nodes, edges };
 }
