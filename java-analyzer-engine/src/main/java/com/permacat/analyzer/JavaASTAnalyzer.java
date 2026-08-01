@@ -41,6 +41,23 @@ public class JavaASTAnalyzer {
     private static final Set<String> ENTITY_ANNOTATIONS = Set.of(
         "Entity", "Table", "Document"
     );
+    // ADR-0026 EXT1b — prefixos de pacote de FRAMEWORK/JDK: um supertipo cujo
+    // import começa com um destes NÃO é mintado (é ruído: Object/Serializable/
+    // JpaRepository/etc.). Qualquer outro pacote (cloudsupport./easynup./
+    // com.nuptechs./…) é PROJETO → supertipo externo mintável (BaseEntity mora
+    // no módulo cloudsupport, fora do fonte analisado, mas é tipo real do produto).
+    private static final List<String> FRAMEWORK_PACKAGE_PREFIXES = List.of(
+        "java.", "javax.", "jakarta.", "org.springframework", "org.hibernate",
+        "com.fasterxml", "lombok", "org.slf4j", "org.apache", "com.google",
+        "reactor.", "org.junit", "org.mockito", "org.jetbrains", "kotlin.",
+        "org.reactivestreams", "io.micrometer", "io.swagger", "org.aspectj"
+    );
+
+    private static boolean isFrameworkPackage(String fqn) {
+        if (fqn == null) return true;
+        for (String p : FRAMEWORK_PACKAGE_PREFIXES) if (fqn.startsWith(p)) return true;
+        return false;
+    }
     private static final Set<String> MAPPING_ANNOTATIONS = Set.of(
         "RequestMapping", "GetMapping", "PostMapping", "PutMapping",
         "DeleteMapping", "PatchMapping"
@@ -1096,15 +1113,32 @@ public class JavaASTAnalyzer {
      * ADR-0026 EXT1 — resolve um supertipo/interface (nome simples) para o id do
      * nó ALVO, mintando um nó INTERFACE/SUPERTYPE quando o tipo pertence ao código
      * analisado mas ainda não é nó (base class / interface de contrato). Retorna
-     * null quando o tipo é EXTERNO (framework: JpaRepository, Serializable,
-     * Object…) — precisão acima de recall: nunca minta tipo que não é do projeto.
-     * Controller/Service são método-only hoje (sem nó de classe) → null nesta
-     * fatia (a fatia de nós-de-classe os cobrirá).
+     * Framework/JDK (JpaRepository, Serializable, Object…) NUNCA é mintado —
+     * precisão. Mas supertipo de PACOTE DO PROJETO que mora em outro módulo (ex.:
+     * `cloudsupport.persistence.BaseEntity`, estendido por 177 entidades) É
+     * mintado como EXTERNO (`external:true`) — é tipo real do produto, não ruído
+     * (EXT1b). Controller/Service são método-only hoje → null nesta fatia.
+     * @param asInterface dica de contexto p/ tipo externo (superclasse=false,
+     *   interface=true), já que o tipo não-analisado não diz se é interface.
      */
     private String resolveOrMintSupertypeNode(ClassInfo caller, String simpleType,
+                                              boolean asInterface,
                                               List<GraphNodeDTO> nodes, Set<String> nodeIds) {
         ClassInfo target = resolveTypeToClassInfo(caller, simpleType);
-        if (target == null || target == caller) return null;
+        if (target == caller) return null;
+        if (target == null) {
+            // EXT1b — tipo não-analisado: minta se for pacote de PROJETO (via import).
+            String fqn = caller.importsSimpleToFqn.get(simpleType);
+            if (fqn == null || isFrameworkPackage(fqn)) return null; // framework/implícito → não minta
+            String nodeType = asInterface ? "INTERFACE" : "SUPERTYPE";
+            String id = nodeType + ":" + fqn;
+            if (nodeIds.add(id)) {
+                GraphNodeDTO n = new GraphNodeDTO(nodeType, simpleType, null, fqn);
+                n.metadata.put("external", true); // tipo de outro módulo, não analisado aqui
+                nodes.add(n);
+            }
+            return id;
+        }
         if (target.isEntity) {
             String id = resolvedEntityNodeId(target);
             return nodeIds.contains(id) ? id : null;
@@ -1509,14 +1543,14 @@ public class JavaASTAnalyzer {
             }
             if (!nodeIds.contains(fromId)) continue;
             if (cls.superClassName != null) {
-                String toId = resolveOrMintSupertypeNode(cls, cls.superClassName, nodes, nodeIds);
+                String toId = resolveOrMintSupertypeNode(cls, cls.superClassName, false, nodes, nodeIds);
                 if (toId != null && !toId.equals(fromId)) {
                     addEdge(edges, edgeKeys, fromId, toId, "EXTENDS",
                         Map.of("resolution", "syntactic-declared"));
                 }
             }
             for (String iface : cls.interfaceNames) {
-                String toId = resolveOrMintSupertypeNode(cls, iface, nodes, nodeIds);
+                String toId = resolveOrMintSupertypeNode(cls, iface, true, nodes, nodeIds);
                 if (toId != null && !toId.equals(fromId)) {
                     addEdge(edges, edgeKeys, fromId, toId, "IMPLEMENTS",
                         Map.of("resolution", "syntactic-declared"));
