@@ -52,6 +52,7 @@ import {
   Network,
   GitFork,
   Shapes,
+  Layers,
 } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -126,7 +127,7 @@ function labelOf(n: GraphNode): string {
   return n.className || n.qualifiedSignature || n.id;
 }
 
-type ViewMode = "graph" | "matrix";
+type ViewMode = "graph" | "matrix" | "layers";
 
 export default function SystemMapPage() {
   const { data: projects } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
@@ -181,6 +182,15 @@ export default function SystemMapPage() {
             >
               <Grid3x3 className="h-4 w-4" /> Matriz
             </Button>
+            <Button
+              variant={viewMode === "layers" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setViewMode("layers")}
+              data-testid="view-layers"
+            >
+              <Layers className="h-4 w-4" /> Camadas
+            </Button>
           </div>
           <Select
             value={projectId != null ? String(projectId) : undefined}
@@ -210,6 +220,7 @@ export default function SystemMapPage() {
       {graphQuery.data && viewMode === "matrix" && projectId != null && (
         <MatrixView projectId={projectId} payload={graphQuery.data} />
       )}
+      {graphQuery.data && viewMode === "layers" && <LayersFlowView payload={graphQuery.data} />}
     </div>
   );
 }
@@ -930,6 +941,156 @@ function MatrixView({ projectId, payload }: { projectId: number; payload: GraphP
 
       {dsmQuery.isLoading && <Skeleton className="h-40 w-full" />}
       {dsmQuery.isError && <p className="text-sm text-muted-foreground">Sem DSM para este projeto (reanalise necessária).</p>}
+    </div>
+  );
+}
+
+// ── Vista CAMADAS (fluxo clique→dado em colunas) — AT3 ────────────────
+// A leitura "de fora pra dentro": Tela→Componente→Composable→Rota→Módulo Node→
+// Endpoint→Controller→Service→Repository→Entity, com o RECORTE EXECUTIVO
+// (top-N por importância por coluna — a mesma ideia de foco-primeiro anti-hairball
+// da tela; ~180 nós do grafo inteiro). Arestas bezier coloridas por relação.
+// SVG puro (sem cytoscape) — 1 modelo, mais uma maneira de ler.
+const FLOW_COLS: { key: string; label: string; cap: number; color: string }[] = [
+  { key: "VIEW", label: "Tela", cap: 24, color: "#ec4899" },
+  { key: "COMPONENT", label: "Componente", cap: 12, color: "#fb7185" },
+  { key: "COMPOSABLE", label: "Composable", cap: 6, color: "#a78bfa" },
+  { key: "ROUTE", label: "Rota gateway", cap: 8, color: "#64748b" },
+  { key: "NODEMOD", label: "Módulo Node", cap: 8, color: "#475569" },
+  { key: "ENDPOINT", label: "Endpoint", cap: 36, color: "#818cf8" },
+  { key: "CONTROLLER", label: "Controller", cap: 24, color: "#6366f1" },
+  { key: "SERVICE", label: "Service", cap: 36, color: "#0ea5e9" },
+  { key: "REPOSITORY", label: "Repository", cap: 8, color: "#14b8a6" },
+  { key: "ENTITY", label: "Entity", cap: 36, color: "#f59e0b" },
+  { key: "TIPO", label: "Interface/Supertipo", cap: 8, color: "#22d3ee" },
+];
+
+function flowColKey(n: GraphNode): string {
+  if (n.id.startsWith("wsv1:")) return "ENDPOINT";
+  if (n.id.startsWith("node:")) return "NODEMOD";
+  if (n.type === "INTERFACE" || n.type === "SUPERTYPE") return "TIPO";
+  return n.type;
+}
+function trunc(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function LayersFlowView({ payload }: { payload: GraphPayload }) {
+  const COL_W = 150, ROW_H = 22, TOP = 54, LEFT = 20, DOT = 4;
+
+  const layout = useMemo(() => {
+    const byCol = new Map<string, GraphNode[]>();
+    const totalByCol: Record<string, number> = {};
+    for (const n of payload.nodes) {
+      const k = flowColKey(n);
+      totalByCol[k] = (totalByCol[k] || 0) + 1;
+      (byCol.get(k) || byCol.set(k, []).get(k)!).push(n);
+    }
+    const deg = (n: GraphNode) => (n.inDegree || 0) + (n.outDegree || 0);
+    const activeCols = FLOW_COLS.filter((c) => (byCol.get(c.key) || []).length > 0);
+    const pos = new Map<string, { x: number; y: number; color: string }>();
+    const cols = activeCols.map((c, ci) => {
+      const picked = (byCol.get(c.key) || []).slice().sort((a, b) => deg(b) - deg(a)).slice(0, c.cap);
+      const x = LEFT + ci * COL_W;
+      const nodes = picked.map((n, ri) => {
+        const y = TOP + ri * ROW_H;
+        pos.set(n.id, { x, y, color: c.color });
+        return { id: n.id, label: trunc(labelOf(n), 15), y, deg: deg(n), sensitive: n.sensitive };
+      });
+      return { ...c, x, total: totalByCol[c.key] || 0, sel: picked.length, nodes };
+    });
+    const edges: { d: string; color: string }[] = [];
+    for (const e of payload.edges) {
+      const a = pos.get(e.fromNode), b = pos.get(e.toNode);
+      if (!a || !b || a === b) continue;
+      const x1 = a.x + DOT, x2 = b.x - DOT, mx = (x1 + x2) / 2;
+      edges.push({ d: `M${x1},${a.y} C${mx},${a.y} ${mx},${b.y} ${x2},${b.y}`, color: (REL[e.relationType]?.color) || "#94a3b8" });
+    }
+    const maxRows = Math.max(1, ...cols.map((c) => c.nodes.length));
+    const width = LEFT + cols.length * COL_W + 40;
+    const height = TOP + maxRows * ROW_H + 20;
+    // contagens p/ sidebar
+    const relCounts: Record<string, number> = {};
+    const resCounts: Record<string, number> = {};
+    for (const e of payload.edges) {
+      relCounts[e.relationType] = (relCounts[e.relationType] || 0) + 1;
+      const r = (e as unknown as { resolution?: string }).resolution || "convenção/sintética";
+      resCounts[r] = (resCounts[r] || 0) + 1;
+    }
+    const selTotal = cols.reduce((s, c) => s + c.sel, 0);
+    return { cols, edges, width, height, relCounts, resCounts, totalByCol, selTotal };
+  }, [payload]);
+
+  const RES_LABEL: Record<string, string> = {
+    "compiler": "compilador", "syntactic-resolved": "código resolvido",
+    "syntactic-declared": "tipo declarado", "interface-impl": "fan-out interface",
+    "convention-name": "convenção", "convenção/sintética": "convenção/sintética",
+  };
+
+  return (
+    <div className="flex flex-1 gap-4 overflow-hidden" data-testid="layers-view">
+      {/* sidebar */}
+      <div className="w-56 shrink-0 space-y-4 overflow-y-auto pr-1 text-sm">
+        <div>
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Camadas</div>
+          {layout.cols.map((c) => (
+            <div key={c.key} className="flex items-center justify-between py-0.5">
+              <span className="flex items-center gap-2">
+                <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: c.color }} /> {c.label}
+              </span>
+              <span className="text-xs text-muted-foreground tabular-nums">{c.sel} de {c.total}</span>
+            </div>
+          ))}
+        </div>
+        <div>
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Relações</div>
+          {Object.entries(layout.relCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+            <div key={k} className="flex items-center justify-between py-0.5">
+              <span className="flex items-center gap-2">
+                <span className="inline-block h-2 w-4 rounded-sm" style={{ background: REL[k as EdgeRelation]?.color || "#94a3b8" }} /> {REL[k as EdgeRelation]?.label || k}
+              </span>
+              <span className="text-xs text-muted-foreground tabular-nums">{v}</span>
+            </div>
+          ))}
+        </div>
+        <div>
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Confiança da aresta</div>
+          {Object.entries(layout.resCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+            <div key={k} className="flex items-center justify-between py-0.5 text-xs">
+              <span>{RES_LABEL[k] || k}</span>
+              <span className="text-muted-foreground tabular-nums">{v}</span>
+            </div>
+          ))}
+        </div>
+        <div className="rounded-md border bg-muted/40 p-2 text-xs text-muted-foreground">
+          <b className="text-foreground">Recorte executivo:</b> os nós mais importantes de cada camada (grau) + suas ligações — {layout.selTotal} de {payload.nodes.length} do grafo.
+        </div>
+      </div>
+
+      {/* canvas SVG */}
+      <div className="flex-1 overflow-auto rounded-lg border bg-card">
+        <svg width={layout.width} height={layout.height} className="min-w-full">
+          {/* arestas atrás */}
+          <g opacity={0.4}>
+            {layout.edges.map((e, i) => (
+              <path key={i} d={e.d} fill="none" stroke={e.color} strokeWidth={0.7} />
+            ))}
+          </g>
+          {/* colunas */}
+          {layout.cols.map((c) => (
+            <g key={c.key}>
+              <text x={c.x} y={26} fontSize={11} fontWeight={600} fill={c.color}>{c.label.toUpperCase()}</text>
+              <text x={c.x} y={40} fontSize={10} fill="currentColor" className="text-muted-foreground">{c.sel}/{c.total}</text>
+              {c.nodes.map((n) => (
+                <g key={n.id}>
+                  <circle cx={c.x} cy={n.y} r={DOT} fill={c.color} stroke={n.sensitive ? "#ef4444" : "none"} strokeWidth={n.sensitive ? 1.5 : 0} />
+                  <text x={c.x + 8} y={n.y + 3} fontSize={10} fill="currentColor">{n.label}</text>
+                </g>
+              ))}
+            </g>
+          ))}
+        </svg>
+      </div>
     </div>
   );
 }
