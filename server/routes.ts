@@ -1477,6 +1477,35 @@ export async function registerRoutes(
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
   // .systemGraph (populado no saveSnapshot). Snapshot antigo sem o campo →
   // 404 nomeado pedindo re-análise (nunca grafo vazio fingindo sucesso).
+  // Máquina do tempo do grafo (ADR-0025 Obra 3): diff dos DOIS últimos snapshots.
+  app.get("/api/projects/:projectId/graph-drift", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snaps = await storage.getLastTwoSnapshots(projectId);
+      if (snaps.length < 2) {
+        return res.status(404).json({ code: "NEED_TWO_SNAPSHOTS", message: "Precisa de ≥2 análises com grafo p/ comparar no tempo." });
+      }
+      const currG = ((snaps[0].manifestJson as any) || {}).systemGraph;
+      const prevG = ((snaps[1].manifestJson as any) || {}).systemGraph;
+      if (!currG?.nodes || !prevG?.nodes) {
+        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Um dos snapshots precede o system graph." });
+      }
+      const { computeGraphDrift, driftToFindings } = await import("./analyzers/graph-drift");
+      const drift = computeGraphDrift(prevG, currG);
+      res.json({
+        projectId,
+        from: { analysisRunId: snaps[1].analysisRunId, at: snaps[1].createdAt },
+        to: { analysisRunId: snaps[0].analysisRunId, at: snaps[0].createdAt },
+        drift,
+        findings: driftToFindings(drift, { projectId: String(projectId) }),
+      });
+    } catch (error) {
+      console.error("Error computing graph drift:", error);
+      res.status(500).json({ message: "Failed to compute graph drift" });
+    }
+  });
+
   app.get("/api/projects/:projectId/graph", async (req, res) => {
     try {
       const projectId = parseInt(req.params.projectId);
