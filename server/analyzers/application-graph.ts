@@ -3,10 +3,15 @@
 // COMPONENT/COMPOSABLE (2026-08-01): camadas intermediárias do frontend como
 // nós de 1ª classe — tela→componente→composable→endpoint. Agregação é papel
 // da LENTE (lição do método×classe), não do modelo.
-export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE" | "COMPONENT" | "COMPOSABLE";
+// INTERFACE/SUPERTYPE (ADR-0026 EXT1): supertipo/interface do próprio código
+// mintado como nó p/ ancorar a herança (a base class / contrato que a subclasse
+// estende ou implementa).
+export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE" | "COMPONENT" | "COMPOSABLE" | "INTERFACE" | "SUPERTYPE";
 // ASSOCIATES (ADR-0025 Onda 3a): associação JPA entidade→entidade
 // (@OneToMany/@ManyToOne/…) — como o pai alcança a filha sem repositório.
-export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY" | "ASSOCIATES";
+// EXTENDS/IMPLEMENTS (ADR-0026 EXT1): herança — subclasse→superclasse e
+// classe→interface (a relação nº1 de arquitetura que antes era descartada).
+export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY" | "ASSOCIATES" | "EXTENDS" | "IMPLEMENTS";
 
 /**
  * True when an endpoint path is malformed and should NOT be reported as a real

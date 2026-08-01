@@ -1092,6 +1092,42 @@ public class JavaASTAnalyzer {
         return unique;
     }
 
+    /**
+     * ADR-0026 EXT1 — resolve um supertipo/interface (nome simples) para o id do
+     * nó ALVO, mintando um nó INTERFACE/SUPERTYPE quando o tipo pertence ao código
+     * analisado mas ainda não é nó (base class / interface de contrato). Retorna
+     * null quando o tipo é EXTERNO (framework: JpaRepository, Serializable,
+     * Object…) — precisão acima de recall: nunca minta tipo que não é do projeto.
+     * Controller/Service são método-only hoje (sem nó de classe) → null nesta
+     * fatia (a fatia de nós-de-classe os cobrirá).
+     */
+    private String resolveOrMintSupertypeNode(ClassInfo caller, String simpleType,
+                                              List<GraphNodeDTO> nodes, Set<String> nodeIds) {
+        ClassInfo target = resolveTypeToClassInfo(caller, simpleType);
+        if (target == null || target == caller) return null;
+        if (target.isEntity) {
+            String id = resolvedEntityNodeId(target);
+            return nodeIds.contains(id) ? id : null;
+        }
+        if (target.isRepository) {
+            String id = resolvedClassNodeId("REPOSITORY", target);
+            return nodeIds.contains(id) ? id : null;
+        }
+        if (target.isController || target.isService) {
+            return null; // método-only hoje — sem nó de classe p/ ancorar a aresta
+        }
+        String nodeType = target.isInterface ? "INTERFACE" : "SUPERTYPE";
+        String id = resolvedClassNodeId(nodeType, target);
+        if (nodeIds.add(id)) {
+            GraphNodeDTO n = new GraphNodeDTO(nodeType, target.className, null,
+                target.resolvedSymbol != null ? target.resolvedSymbol.getQualifiedName() : target.fqn);
+            n.metadata.put("sourceFile", target.sourceFile);
+            n.metadata.put("synthetic", true);
+            nodes.add(n);
+        }
+        return id;
+    }
+
     /** Wave 2: impls do projeto (que viram nó) de uma interface pelo nome simples. */
     private List<ClassInfo> implsOf(String interfaceSimpleName) {
         List<ClassInfo> l = implsBySimpleName.get(interfaceSimpleName);
@@ -1451,6 +1487,39 @@ public class JavaASTAnalyzer {
 
                 if (method.hasEntityMutations) {
                     handleEntityMutations(fromId, cls, edges, nodeIds, edgeKeys);
+                }
+            }
+        }
+
+        // ADR-0026 EXT1 — HERANÇA como aresta de 1ª classe (EXTENDS/IMPLEMENTS).
+        // Roda depois de todos os nós existirem. Fonte = nós de CLASSE que já
+        // existem (ENTITY, REPOSITORY). O supertipo/interface é resolvido ao
+        // próprio código e mintado (INTERFACE/SUPERTYPE) se ainda não for nó — a
+        // herança deixa de ser esparsa. Dado (superClassName/interfaceNames) já
+        // era coletado e antes DESCARTADO. Controller/Service (método-only) ficam
+        // p/ a fatia de nós-de-classe.
+        for (ClassInfo cls : fqnIndex.values()) {
+            String fromId;
+            if (cls.isEntity) {
+                fromId = resolvedEntityNodeId(cls);
+            } else if (cls.isRepository && !cls.isController && !cls.isService) {
+                fromId = resolvedClassNodeId("REPOSITORY", cls);
+            } else {
+                continue;
+            }
+            if (!nodeIds.contains(fromId)) continue;
+            if (cls.superClassName != null) {
+                String toId = resolveOrMintSupertypeNode(cls, cls.superClassName, nodes, nodeIds);
+                if (toId != null && !toId.equals(fromId)) {
+                    addEdge(edges, edgeKeys, fromId, toId, "EXTENDS",
+                        Map.of("resolution", "syntactic-declared"));
+                }
+            }
+            for (String iface : cls.interfaceNames) {
+                String toId = resolveOrMintSupertypeNode(cls, iface, nodes, nodeIds);
+                if (toId != null && !toId.equals(fromId)) {
+                    addEdge(edges, edgeKeys, fromId, toId, "IMPLEMENTS",
+                        Map.of("resolution", "syntactic-declared"));
                 }
             }
         }
