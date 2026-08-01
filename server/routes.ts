@@ -1506,6 +1506,35 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/projects/:projectId/facts", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snaps = await storage.getAnalysisSnapshots(projectId);
+      if (!snaps.length) return res.status(404).json({ message: "Sem analise ainda." });
+      const sg = ((snaps[0].manifestJson as any) || {}).systemGraph;
+      if (!sg?.nodes) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
+      const { buildFactSheet } = await import("./analyzers/fact-sheet");
+      res.json({ projectId, ...buildFactSheet(sg, { analysisRunId: snaps[0].analysisRunId, snapshotAt: snaps[0].createdAt }) });
+    } catch (e) { console.error("facts error:", e); res.status(500).json({ message: "Failed to build fact sheet" }); }
+  });
+
+  app.post("/api/projects/:projectId/facts/check", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const { metric, value } = req.body || {};
+      if (typeof metric !== "string" || typeof value !== "number") return res.status(400).json({ message: "Body: { metric, value }" });
+      const snaps = await storage.getAnalysisSnapshots(projectId);
+      if (!snaps.length) return res.status(404).json({ message: "Sem analise ainda." });
+      const sg = ((snaps[0].manifestJson as any) || {}).systemGraph;
+      if (!sg?.nodes) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
+      const { buildFactSheet, checkClaim } = await import("./analyzers/fact-sheet");
+      const sheet = buildFactSheet(sg, { analysisRunId: snaps[0].analysisRunId, snapshotAt: snaps[0].createdAt });
+      res.json({ projectId, ...checkClaim(sheet, metric, value) });
+    } catch (e) { console.error("facts/check error:", e); res.status(500).json({ message: "Failed to check claim" }); }
+  });
+
   app.get("/api/projects/:projectId/graph", async (req, res) => {
     try {
       const projectId = parseInt(req.params.projectId);
