@@ -14,6 +14,7 @@ import { ApplicationGraph, GraphNode, GraphEdge } from "./application-graph";
 import type { FrontendInteraction } from "./frontend-analyzer";
 import type { ExpressRoute } from "./node-backend/express-routes";
 import { toSnakeCase } from "./nuptechs-conventions";
+import { nodeBackendType } from "./canonical-model";
 
 export interface FullStackAugmentResult {
   views: number;
@@ -79,7 +80,10 @@ export function augmentGraphWithFullStack(
     const id = `node:${file}`;
     if (!graph.getNode(id)) {
       const base = (file.split("/").pop() || file).replace(/\.(js|ts)$/, "");
-      graph.addNode(new GraphNode(id, "SERVICE", base, null, null, {
+      // CM2 (ADR-0026): o papel do módulo Node é decidido pela regra do pack
+      // (por path) — repositório Node é tier de DADOS (mesmo Postgres do Java),
+      // não SERVICE genérico. Ver nota de honestidade em nodeBackendType.
+      graph.addNode(new GraphNode(id, nodeBackendType(file), base, null, null, {
         sourceFile: file, runtime: "node", synthetic: true,
       }));
       nodeModules++;

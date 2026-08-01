@@ -11,7 +11,23 @@ import { shapeSystemGraph, type RawSystemGraph } from "./system-graph";
 
 export interface FactSheet {
   provenance: { analysisRunId: number | null; computedAt: string; snapshotAt: string | null; freshnessSeconds: number | null };
-  layers: Record<string, number>;                 // nós por camada (canônico)
+  /**
+   * Camadas por ÂNCORA de id-prefixo (view RAW): `wsv1:`→ENDPOINT, `node:`→
+   * NODE_MODULE, `table:`→ENTITY, senão o tipo do produtor. São conjuntos
+   * DISJUNTOS (um nó cai em exatamente um balde) — não há dupla contagem no
+   * total. ENDPOINT e CONTROLLER são âncoras distintas do MESMO fluxo de api
+   * (C2 da ADR-0026): o endpoint é o contrato HTTP, o controller é a classe.
+   */
+  layers: Record<string, number>;
+  /**
+   * CM2 (ADR-0026 C2) — camada CANÔNICA deduplicada (do modelo canônico): o
+   * tier arquitetural real (api/domain/data/presentation/infra), onde ENDPOINT
+   * e CONTROLLER convergem em `api` (sem a dupla-representação da view raw).
+   * É a verdade que a IA deve CITAR para "quantos endpoints/controllers há".
+   */
+  byLayer: Record<string, number>;
+  /** CM2 (ADR-0026) — distribuição por STACK (spring/express/vue/node). */
+  byStack: Record<string, number>;
   inventory: Record<string, unknown> | null;      // código: telas roteadas, .vue, composables (denominador)
   participation: { views: number; components: number; composables: number }; // alcançam backend
   topHubs: { id: string; dependents: number; sensitive: boolean }[]; // entidades mais dependidas
@@ -56,6 +72,8 @@ export function buildFactSheet(
   return {
     provenance: { analysisRunId: meta.analysisRunId ?? null, computedAt: new Date(nowMs).toISOString(), snapshotAt: snapAt, freshnessSeconds: freshness },
     layers,
+    byLayer: g.byLayer || {},   // CM2 — camada canônica deduplicada (C2)
+    byStack: g.byStack || {},   // CM2 — distribuição por stack
     inventory: (g.inventory && typeof g.inventory === "object") ? (g.inventory as Record<string, unknown>) : null,
     participation: {
       views: g.nodes.filter((n) => n.type === "VIEW" && (deg.get(n.id) || 0) > 0).length,

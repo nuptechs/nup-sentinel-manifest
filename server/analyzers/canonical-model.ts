@@ -193,3 +193,30 @@ export function classifyNode(node: ClassifiableNode): RoleFacet | null {
   if (corrob === false) return { role, layer, stack, evidence: "path-conflict", confidence: "low" };
   return { role, layer, stack, evidence: "producer-type", confidence: "medium" };
 }
+
+// ── Pack Node/Express (CM2) — papel do módulo de backend Node por PATH ─────────
+//
+// O produtor (`full-stack-augment.mintNodeModule`) materializa TODO módulo Node
+// do handler como `SERVICE` genérico. Esta é a regra do pack Node que decide o
+// papel correto pela convenção de path — o mesmo princípio do §6 (papel por
+// rule-pack), aplicado ao mint. Repositório Node é a MESMA camada de dados que o
+// Java (mesmo Postgres, C1 da ADR-0026): quando um módulo de repositório aparece
+// no grafo, ele nasce `REPOSITORY`, não `SERVICE`.
+//
+// NOTA DE HONESTIDADE (verificado no projeto 31, 2026-08-01): hoje 0 dos 84
+// módulos Node materializados são repositórios — o extractor resolve o callChain
+// até routes/services/modules, mas NÃO desce à camada `packages/core/src/
+// repositories/` (a persistência Node vira aresta drizzle direto do service pro
+// `table:`). Logo esta regra reclassifica 0 nós HOJE; ela é a tipagem correta
+// PARA O PADRÃO (dispara quando o extractor surfar o tier de repositório — fix
+// upstream deferido, ADR-0026 CM2). Precisão sobre recall: nunca chuta REPOSITORY
+// sem sinal de path.
+
+/** Tipo legado do módulo de backend Node, decidido por path (regra do pack). */
+export function nodeBackendType(file: string | null | undefined): "REPOSITORY" | "SERVICE" {
+  const f = (file || "").toLowerCase();
+  if (/\/repositor(y|ies)\//.test(f) || /\.repository\.(js|ts|mjs|cjs)$/.test(f) || /repository\.(js|ts|mjs|cjs)$/.test(f)) {
+    return "REPOSITORY";
+  }
+  return "SERVICE";
+}
