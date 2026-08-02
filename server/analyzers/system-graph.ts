@@ -71,6 +71,14 @@ export interface ShapedNode {
   stack?: string;
   roleEvidence?: string;
   roleConfidence?: string;
+  /**
+   * ADR-0026 costura — nó EXERCITADO por tráfego real (traços OTel/Jaeger).
+   * `runtimeHot` = tocado por ≥1 requisição observada; `runtimeCount` = soma de
+   * traços. Ausente = FRIO (existe no código, sem tráfego na janela). Habilita
+   * a leitura "o que de fato roda × o que só existe".
+   */
+  runtimeHot?: boolean;
+  runtimeCount?: number;
 }
 export interface ShapedEdge {
   fromNode: string;
@@ -80,6 +88,10 @@ export interface ShapedEdge {
   resolution?: string;
   /** aresta de convenção (wsv1-handler/wsv1-name) — não é chamada de código observada */
   synthetic?: boolean;
+  /** ADR-0026 costura: aresta OBSERVADA em traço OTel/Jaeger (RUNTIME_OBSERVED). */
+  observed?: boolean;
+  /** nº de traços que exercitaram a aresta observada. */
+  count?: number;
 }
 export interface ShapedGraph {
   level: 'class' | 'method';
@@ -101,11 +113,26 @@ function isSensitive(node: RawSystemNode): boolean {
 function sourceFileOf(node: RawSystemNode): string | undefined {
   return typeof node.metadata?.sourceFile === 'string' ? (node.metadata.sourceFile as string) : undefined;
 }
-function edgeProvenance(e: RawSystemEdge): { resolution?: string; synthetic?: boolean } {
-  const m = e.metadata || {};
-  const resolution = typeof (m as Record<string, unknown>).resolution === 'string' ? ((m as Record<string, unknown>).resolution as string) : undefined;
-  const synthetic = (m as Record<string, unknown>).synthetic === true ? true : undefined;
-  return { ...(resolution ? { resolution } : {}), ...(synthetic ? { synthetic } : {}) };
+function edgeProvenance(e: RawSystemEdge): { resolution?: string; synthetic?: boolean; observed?: boolean; count?: number } {
+  const m = (e.metadata || {}) as Record<string, unknown>;
+  const resolution = typeof m.resolution === 'string' ? (m.resolution as string) : undefined;
+  const synthetic = m.synthetic === true ? true : undefined;
+  const observed = m.observed === true ? true : undefined;
+  const count = typeof m.count === 'number' ? (m.count as number) : undefined;
+  return {
+    ...(resolution ? { resolution } : {}),
+    ...(synthetic ? { synthetic } : {}),
+    ...(observed ? { observed } : {}),
+    ...(observed && count ? { count } : {}),
+  };
+}
+
+/** Lê os campos de runtime (costura ADR-0026) do metadata cru de um nó. */
+function runtimeOf(n: RawSystemNode): { runtimeHot?: boolean; runtimeCount?: number } {
+  const m = (n.metadata || {}) as Record<string, unknown>;
+  if (m.runtimeHot !== true) return {};
+  const count = typeof m.runtimeCount === 'number' ? (m.runtimeCount as number) : undefined;
+  return { runtimeHot: true, ...(count ? { runtimeCount: count } : {}) };
 }
 function entryPointOf(node: RawSystemNode): string | undefined {
   const ep = node.metadata?.entryPoint;
@@ -184,6 +211,7 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
       inDegree: inDegree[n.id] || 0, outDegree: outDegree[n.id] || 0,
       sensitive: isSensitive(n), sourceFile: sourceFileOf(n),
       ...(ep ? { entryPoint: [ep] } : {}),
+      ...runtimeOf(n),
       ...canonicalFacet(n, byLayer, byStack),
     };
   });
@@ -191,7 +219,7 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
 }
 
 function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
-  interface Agg { id: string; type: string; className: string; sensitive: boolean; sourceFile?: string; members: number; entryPoints: Set<string>; }
+  interface Agg { id: string; type: string; className: string; sensitive: boolean; sourceFile?: string; members: number; entryPoints: Set<string>; runtimeHot: boolean; runtimeCount: number; }
   const classes = new Map<string, Agg>();
   const keyOf = new Map<string, string>();
   for (const n of raw.nodes) {
@@ -199,11 +227,14 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
     keyOf.set(n.id, key);
     let c = classes.get(key);
     if (!c) {
-      c = { id: key, type: n.type, className: n.className || classNameFromKey(key), sensitive: false, members: 0, entryPoints: new Set() };
+      c = { id: key, type: n.type, className: n.className || classNameFromKey(key), sensitive: false, members: 0, entryPoints: new Set(), runtimeHot: false, runtimeCount: 0 };
       classes.set(key, c);
     }
     c.members += 1;
     if (isSensitive(n)) c.sensitive = true;
+    // costura ADR-0026: qualquer membro exercitado por tráfego marca a classe hot
+    const rt = runtimeOf(n);
+    if (rt.runtimeHot) { c.runtimeHot = true; c.runtimeCount += rt.runtimeCount || 0; }
     const ep = entryPointOf(n);
     if (ep) c.entryPoints.add(ep); // Onda 4: qualquer método-gatilho marca a classe
     // prefere nome/arquivo do nó de CLASSE (sem parêntese); senão o 1º arquivo visto
@@ -243,6 +274,7 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
       inDegree: inDegree[c.id] || 0, outDegree: outDegree[c.id] || 0,
       sensitive: c.sensitive, sourceFile: c.sourceFile, memberCount: c.members,
       ...(c.entryPoints.size ? { entryPoint: Array.from(c.entryPoints) } : {}),
+      ...(c.runtimeHot ? { runtimeHot: true, ...(c.runtimeCount ? { runtimeCount: c.runtimeCount } : {}) } : {}),
       ...canonicalFacet({ id: c.id, type: c.type, className: c.className, sourceFile: c.sourceFile }, byLayer, byStack),
     };
   });

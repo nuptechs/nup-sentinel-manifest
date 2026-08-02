@@ -79,11 +79,17 @@ interface GraphNode {
   /** ADR-0026 CM1: faceta canônica (camada/stack) — para a vista Matriz. */
   layer?: string;
   stack?: string;
+  /** ADR-0026 costura: nó exercitado por tráfego real (traços OTel/Jaeger). */
+  runtimeHot?: boolean;
+  runtimeCount?: number;
 }
 interface GraphEdge {
   fromNode: string;
   toNode: string;
   relationType: EdgeRelation;
+  /** ADR-0026 costura: aresta observada em traço + nº de traços. */
+  observed?: boolean;
+  count?: number;
 }
 interface GraphPayload {
   projectId: number;
@@ -399,6 +405,7 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
             label: labelOf(n),
             type: n.type,
             sensitive: n.sensitive ? 1 : 0,
+            hot: n.runtimeHot ? 1 : 0, // costura: exercitado por tráfego real
             // tamanho normalizado 24..64 por grau de entrada (importância)
             size: 24 + Math.round((n.inDegree / maxInDegree) * 40),
           },
@@ -448,6 +455,12 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
         {
           selector: "node[sensitive = 1]",
           style: { "border-width": 4, "border-color": "#ef4444" },
+        },
+        {
+          // costura ADR-0026: halo rosa nos nós QUENTES (tráfego real observado),
+          // combina com a borda de sensível — os dois sinais coexistem.
+          selector: "node[hot = 1]",
+          style: { "underlay-color": "#f43f5e", "underlay-opacity": 0.4, "underlay-padding": 7 },
         },
         {
           selector: "edge",
@@ -712,6 +725,16 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
                   {selected.sensitive && (
                     <Badge variant="destructive" className="gap-1">
                       <AlertTriangle className="h-3 w-3" /> sensível
+                    </Badge>
+                  )}
+                  {selected.runtimeHot && (
+                    <Badge
+                      variant="outline"
+                      className="gap-1"
+                      style={{ borderColor: "#f43f5e", color: "#f43f5e" }}
+                      title="Exercitado por tráfego real (traços OTel/Jaeger) — não só existe no código, roda."
+                    >
+                      🔥 {selected.runtimeCount ? `${selected.runtimeCount} traços` : "tráfego real"}
                     </Badge>
                   )}
                   {selected.entryPoint && selected.entryPoint.length > 0 && (
