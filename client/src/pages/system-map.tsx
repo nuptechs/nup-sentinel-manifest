@@ -129,7 +129,7 @@ function labelOf(n: GraphNode): string {
   return n.className || n.qualifiedSignature || n.id;
 }
 
-type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord";
+type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord" | "er";
 
 export default function SystemMapPage() {
   const { data: projects } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
@@ -211,6 +211,15 @@ export default function SystemMapPage() {
             >
               <Radar className="h-4 w-4" /> Roda
             </Button>
+            <Button
+              variant={viewMode === "er" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setViewMode("er")}
+              data-testid="view-er"
+            >
+              <Database className="h-4 w-4" /> Dados
+            </Button>
           </div>
           <Select
             value={projectId != null ? String(projectId) : undefined}
@@ -243,6 +252,7 @@ export default function SystemMapPage() {
       {graphQuery.data && viewMode === "layers" && <LayersFlowView payload={graphQuery.data} />}
       {graphQuery.data && viewMode === "treemap" && <TreemapView payload={graphQuery.data} />}
       {graphQuery.data && viewMode === "chord" && <ChordView payload={graphQuery.data} />}
+      {graphQuery.data && viewMode === "er" && <ErView payload={graphQuery.data} />}
     </div>
   );
 }
@@ -1258,6 +1268,116 @@ function ChordView({ payload }: { payload: GraphPayload }) {
           </div>
         ))}
         <p className="pt-2 text-xs text-muted-foreground">Largura do arco = nº de dependências. Cor = camada de origem. Arco para fora do sentido esperado revela acoplamento invertido.</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Vista DADOS (ER / modelo de domínio — constelação) — AT6 ──────────
+// As ENTIDADES do domínio num círculo: ASSOCIATES (@OneToMany/@ManyToOne) como
+// cordas entre elas; EXTENDS/IMPLEMENTS como starburst pros SUPERTIPOS no centro
+// (revela "tudo herda de BaseEntity"). Cor = grupo de base. A leitura do modelo
+// de dados num relance. SVG puro.
+function ErView({ payload }: { payload: GraphPayload }) {
+  const S = 760, cx = S / 2, cy = S / 2, R = 320;
+  const layout = useMemo(() => {
+    const isEntity = (n: GraphNode) => n.type === "ENTITY";
+    const isSuper = (n: GraphNode) => n.type === "SUPERTYPE" || n.type === "INTERFACE";
+    const entIds = new Set(payload.nodes.filter(isEntity).map((n) => n.id));
+    const superNodes = payload.nodes.filter(isSuper);
+    const superIds = new Set(superNodes.map((n) => n.id));
+    // entidade → supertipo (via EXTENDS)
+    const extOf = new Map<string, string>();
+    const assoc: [string, string][] = [];
+    const extLinks: [string, string][] = [];
+    for (const e of payload.edges) {
+      if (e.relationType === "ASSOCIATES" && entIds.has(e.fromNode) && entIds.has(e.toNode)) assoc.push([e.fromNode, e.toNode]);
+      if ((e.relationType === "EXTENDS" || e.relationType === "IMPLEMENTS") && entIds.has(e.fromNode) && superIds.has(e.toNode)) {
+        extLinks.push([e.fromNode, e.toNode]);
+        if (e.relationType === "EXTENDS" && !extOf.has(e.fromNode)) extOf.set(e.fromNode, e.toNode);
+      }
+    }
+    // grupos por supertipo (cores)
+    const GROUP_COLORS = ["#f59e0b", "#14b8a6", "#a78bfa", "#fb7185", "#38bdf8"];
+    const superOrder = superNodes.map((n) => n.id);
+    const groupColor = new Map<string, string>();
+    superOrder.forEach((id, i) => groupColor.set(id, GROUP_COLORS[i % GROUP_COLORS.length]));
+    // entidades conectadas (com associação OU herança)
+    const connected = new Set<string>();
+    for (const [a, b] of assoc) { connected.add(a); connected.add(b); }
+    for (const [a] of extLinks) connected.add(a);
+    const ents = payload.nodes.filter((n) => isEntity(n) && connected.has(n.id));
+    // ordena por grupo (supertipo) depois nome — agrupa cores no círculo
+    ents.sort((a, b) => (extOf.get(a.id) || "z").localeCompare(extOf.get(b.id) || "z") || (a.className || "").localeCompare(b.className || ""));
+    const pos = new Map<string, { x: number; y: number }>();
+    ents.forEach((n, i) => {
+      const ang = (i / ents.length) * 2 * Math.PI - Math.PI / 2;
+      pos.set(n.id, { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang) });
+    });
+    // supertipos: dispostos no centro (coluna vertical)
+    const sPos = new Map<string, { x: number; y: number; label: string; color: string }>();
+    superNodes.forEach((n, i) => {
+      const y = cy + (i - (superNodes.length - 1) / 2) * 46;
+      sPos.set(n.id, { x: cx, y, label: n.className || n.id.split(":").pop() || "?", color: groupColor.get(n.id)! });
+    });
+    const assocArcs = assoc.filter(([a, b]) => pos.has(a) && pos.has(b)).map(([a, b]) => {
+      const pa = pos.get(a)!, pb = pos.get(b)!;
+      return `M${pa.x},${pa.y} Q${cx},${cy} ${pb.x},${pb.y}`;
+    });
+    const extRays = extLinks.filter(([a, b]) => pos.has(a) && sPos.has(b)).map(([a, b]) => {
+      const pa = pos.get(a)!, pb = sPos.get(b)!;
+      return { d: `M${pa.x},${pa.y} L${pb.x},${pb.y}`, color: sPos.get(b)!.color };
+    });
+    const entDots = ents.map((n) => {
+      const p = pos.get(n.id)!;
+      const sup = extOf.get(n.id);
+      return { x: p.x, y: p.y, color: sup ? groupColor.get(sup)! : "#64748b", sensitive: n.sensitive, label: trunc(n.className || n.id, 16), lx: cx + (R + 8) * Math.cos(Math.atan2(p.y - cy, p.x - cx)), ly: cy + (R + 8) * Math.sin(Math.atan2(p.y - cy, p.x - cx)), anchor: p.x < cx - 20 ? "end" : p.x > cx + 20 ? "start" : "middle" };
+    });
+    const supDots = Array.from(sPos.entries()).map(([id, s]) => ({ ...s, count: extLinks.filter(([, b]) => b === id).length }));
+    const totalEnt = payload.nodes.filter(isEntity).length;
+    return { assocArcs, extRays, entDots, supDots, shown: ents.length, totalEnt, assocCount: assoc.length, extCount: extLinks.length };
+  }, [payload]);
+
+  return (
+    <div className="flex flex-1 gap-4 overflow-auto" data-testid="er-view">
+      <div className="rounded-lg border bg-card p-2">
+        <svg width={S} height={S}>
+          <g opacity={0.5}>
+            {layout.extRays.map((r, i) => (
+              <path key={"e" + i} d={r.d} fill="none" stroke={r.color} strokeWidth={0.6} strokeOpacity={0.35} />
+            ))}
+          </g>
+          <g opacity={0.4}>
+            {layout.assocArcs.map((d, i) => (
+              <path key={"a" + i} d={d} fill="none" stroke="#c084fc" strokeWidth={0.7} />
+            ))}
+          </g>
+          {layout.entDots.map((n, i) => (
+            <circle key={i} cx={n.x} cy={n.y} r={3.5} fill={n.color} stroke={n.sensitive ? "#ef4444" : "none"} strokeWidth={n.sensitive ? 1.5 : 0} />
+          ))}
+          {layout.supDots.map((s, i) => (
+            <g key={"s" + i}>
+              <circle cx={s.x} cy={s.y} r={9} fill={s.color} stroke="var(--background)" strokeWidth={2} />
+              <text x={s.x + 14} y={s.y + 4} fontSize={13} fontWeight={700} fill={s.color}>{s.label} <tspan fontWeight={400} fill="currentColor" className="text-muted-foreground">({s.count})</tspan></text>
+            </g>
+          ))}
+        </svg>
+      </div>
+      <div className="w-64 shrink-0 space-y-3 text-sm">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Modelo de dados</div>
+        <div className="flex items-center justify-between"><span>Entidades conectadas</span><Badge variant="outline">{layout.shown} / {layout.totalEnt}</Badge></div>
+        <div className="flex items-center justify-between"><span className="flex items-center gap-1.5"><span className="inline-block h-2 w-4 rounded-sm" style={{ background: "#c084fc" }} /> Associações</span><Badge variant="outline">{layout.assocCount}</Badge></div>
+        <div className="flex items-center justify-between"><span className="flex items-center gap-1.5"><span className="inline-block h-2 w-4 rounded-sm" style={{ background: "#22d3ee" }} /> Herança</span><Badge variant="outline">{layout.extCount}</Badge></div>
+        <div>
+          <div className="mb-1 mt-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Supertipos (raiz do domínio)</div>
+          {layout.supDots.map((s, i) => (
+            <div key={i} className="flex items-center justify-between py-0.5">
+              <span className="flex items-center gap-2"><span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: s.color }} /> {s.label}</span>
+              <span className="text-xs text-muted-foreground tabular-nums">{s.count} herdeiros</span>
+            </div>
+          ))}
+        </div>
+        <p className="pt-2 text-xs text-muted-foreground">Cordas roxas = associações JPA (@OneToMany/@ManyToOne). Raios = herança até o supertipo no centro. Cor da entidade = seu supertipo.</p>
       </div>
     </div>
   );
