@@ -11,7 +11,10 @@ export type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIE
 // (@OneToMany/@ManyToOne/…) — como o pai alcança a filha sem repositório.
 // EXTENDS/IMPLEMENTS (ADR-0026 EXT1): herança — subclasse→superclasse e
 // classe→interface (a relação nº1 de arquitetura que antes era descartada).
-export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY" | "ASSOCIATES" | "EXTENDS" | "IMPLEMENTS";
+// RUNTIME_OBSERVED (ADR-0026 costura / ADR-073): aresta OBSERVADA nos traços
+// OTel/Jaeger (rota→entidade / rota→endpoint Java) — resolve o dispatch
+// dinâmico que o estático não pega. Proveniência `observed:true, source:jaeger`.
+export type EdgeRelation = "CALLS" | "WRITES_ENTITY" | "READS_ENTITY" | "ASSOCIATES" | "EXTENDS" | "IMPLEMENTS" | "RUNTIME_OBSERVED";
 
 /**
  * True when an endpoint path is malformed and should NOT be reported as a real
