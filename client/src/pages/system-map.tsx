@@ -994,7 +994,10 @@ const FLOW_COLS: { key: string; label: string; cap: number; color: string }[] = 
   { key: "SERVICE", label: "Service", cap: 36, color: "#0ea5e9" },
   { key: "REPOSITORY", label: "Repository", cap: 8, color: "#14b8a6" },
   { key: "ENTITY", label: "Entity", cap: 36, color: "#f59e0b" },
-  { key: "TIPO", label: "Interface/Supertipo", cap: 8, color: "#22d3ee" },
+  // NOTA: supertipos/interfaces (INTERFACE/SUPERTYPE) NÃO entram na vista Camadas —
+  // são âncora de HERANÇA, não etapa do fluxo clique→dado (dariam nós "0 a jusante"
+  // confusos). O lugar deles é a vista Dados/ER. flowColKey ainda os mapeia p/ TIPO,
+  // mas sem coluna aqui eles ficam de fora do fluxo (aparecem no ER).
 ];
 
 function flowColKey(n: GraphNode): string {
