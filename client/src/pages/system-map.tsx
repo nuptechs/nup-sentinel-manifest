@@ -1009,6 +1009,7 @@ function trunc(s: string, n: number): string {
 
 function LayersFlowView({ payload }: { payload: GraphPayload }) {
   const COL_W = 150, ROW_H = 22, TOP = 54, LEFT = 20, DOT = 4;
+  const [hovered, setHovered] = useState<string | null>(null);
 
   const layout = useMemo(() => {
     const byCol = new Map<string, GraphNode[]>();
@@ -1031,12 +1032,15 @@ function LayersFlowView({ payload }: { payload: GraphPayload }) {
       });
       return { ...c, x, total: totalByCol[c.key] || 0, sel: picked.length, nodes };
     });
-    const edges: { d: string; color: string }[] = [];
+    const edges: { d: string; color: string; from: string; to: string }[] = [];
+    const neighbors = new Map<string, Set<string>>();
+    const link = (a: string, b: string) => (neighbors.get(a) || neighbors.set(a, new Set()).get(a)!).add(b);
     for (const e of payload.edges) {
       const a = pos.get(e.fromNode), b = pos.get(e.toNode);
       if (!a || !b || a === b) continue;
       const x1 = a.x + DOT, x2 = b.x - DOT, mx = (x1 + x2) / 2;
-      edges.push({ d: `M${x1},${a.y} C${mx},${a.y} ${mx},${b.y} ${x2},${b.y}`, color: (REL[e.relationType]?.color) || "#94a3b8" });
+      edges.push({ d: `M${x1},${a.y} C${mx},${a.y} ${mx},${b.y} ${x2},${b.y}`, color: (REL[e.relationType]?.color) || "#94a3b8", from: e.fromNode, to: e.toNode });
+      link(e.fromNode, e.toNode); link(e.toNode, e.fromNode);
     }
     const maxRows = Math.max(1, ...cols.map((c) => c.nodes.length));
     const width = LEFT + cols.length * COL_W + 40;
@@ -1050,8 +1054,15 @@ function LayersFlowView({ payload }: { payload: GraphPayload }) {
       resCounts[r] = (resCounts[r] || 0) + 1;
     }
     const selTotal = cols.reduce((s, c) => s + c.sel, 0);
-    return { cols, edges, width, height, relCounts, resCounts, totalByCol, selTotal };
+    const labelFull = new Map<string, string>();
+    for (const c of cols) for (const n of c.nodes) labelFull.set(n.id, labelOf(payload.nodes.find((p) => p.id === n.id) || ({} as GraphNode)) || n.label);
+    return { cols, edges, neighbors, width, height, relCounts, resCounts, totalByCol, selTotal, labelFull };
   }, [payload]);
+
+  // realce de vizinhança no hover (a interatividade que faltava)
+  const hi = hovered ? new Set<string>([hovered, ...Array.from(layout.neighbors.get(hovered) || [])]) : null;
+  const nodeOpacity = (id: string) => (!hi ? 1 : hi.has(id) ? 1 : 0.12);
+  const edgeState = (from: string, to: string) => (!hovered ? { o: 0.4, w: 0.7 } : from === hovered || to === hovered ? { o: 0.95, w: 1.4 } : { o: 0.04, w: 0.6 });
 
   const RES_LABEL: Record<string, string> = {
     "compiler": "compilador", "syntactic-resolved": "código resolvido",
@@ -1094,8 +1105,12 @@ function LayersFlowView({ payload }: { payload: GraphPayload }) {
             </div>
           ))}
         </div>
-        <div className="rounded-md border bg-muted/40 p-2 text-xs text-muted-foreground">
-          <b className="text-foreground">Recorte executivo:</b> os nós mais importantes de cada camada (grau) + suas ligações — {layout.selTotal} de {payload.nodes.length} do grafo.
+        <div className="rounded-md border bg-muted/40 p-2 text-xs">
+          {hovered ? (
+            <><b className="text-foreground">{layout.labelFull.get(hovered) || hovered}</b><br /><span className="text-muted-foreground">{(layout.neighbors.get(hovered)?.size || 0)} conexões diretas</span></>
+          ) : (
+            <span className="text-muted-foreground"><b className="text-foreground">Recorte executivo:</b> {layout.selTotal} de {payload.nodes.length} nós. Passe o mouse num nó para realçar a vizinhança.</span>
+          )}
         </div>
       </div>
 
@@ -1103,22 +1118,26 @@ function LayersFlowView({ payload }: { payload: GraphPayload }) {
       <div className="flex-1 overflow-auto rounded-lg border bg-card">
         <svg width={layout.width} height={layout.height} className="min-w-full">
           {/* arestas atrás */}
-          <g opacity={0.4}>
-            {layout.edges.map((e, i) => (
-              <path key={i} d={e.d} fill="none" stroke={e.color} strokeWidth={0.7} />
-            ))}
+          <g>
+            {layout.edges.map((e, i) => {
+              const s = edgeState(e.from, e.to);
+              return <path key={i} d={e.d} fill="none" stroke={e.color} strokeWidth={s.w} strokeOpacity={s.o} />;
+            })}
           </g>
           {/* colunas */}
           {layout.cols.map((c) => (
             <g key={c.key}>
               <text x={c.x} y={26} fontSize={11} fontWeight={600} fill={c.color}>{c.label.toUpperCase()}</text>
               <text x={c.x} y={40} fontSize={10} fill="currentColor" className="text-muted-foreground">{c.sel}/{c.total}</text>
-              {c.nodes.map((n) => (
-                <g key={n.id}>
-                  <circle cx={c.x} cy={n.y} r={DOT} fill={c.color} stroke={n.sensitive ? "#ef4444" : "none"} strokeWidth={n.sensitive ? 1.5 : 0} />
-                  <text x={c.x + 8} y={n.y + 3} fontSize={10} fill="currentColor">{n.label}</text>
-                </g>
-              ))}
+              {c.nodes.map((n) => {
+                const isH = hovered === n.id;
+                return (
+                  <g key={n.id} opacity={nodeOpacity(n.id)} onMouseEnter={() => setHovered(n.id)} onMouseLeave={() => setHovered(null)} style={{ cursor: "pointer" }}>
+                    <circle cx={c.x} cy={n.y} r={isH ? DOT + 2 : DOT} fill={c.color} stroke={isH ? "var(--foreground)" : n.sensitive ? "#ef4444" : "none"} strokeWidth={isH ? 1.5 : n.sensitive ? 1.5 : 0} />
+                    <text x={c.x + 8} y={n.y + 3} fontSize={10} fontWeight={isH ? 700 : 400} fill="currentColor">{n.label}</text>
+                  </g>
+                );
+              })}
             </g>
           ))}
         </svg>
@@ -1200,6 +1219,7 @@ function TreemapView({ payload }: { payload: GraphPayload }) {
 // A leitura circular do ACOPLAMENTO (quem puxa quem) num relance. SVG puro.
 function ChordView({ payload }: { payload: GraphPayload }) {
   const S = 620, cx = S / 2, cy = S / 2, R = 210;
+  const [hovered, setHovered] = useState<string | null>(null);
   const layout = useMemo(() => {
     const meta: Record<string, { l: string; c: string }> = {
       presentation: { l: "Apresentação", c: "#ec4899" }, api: { l: "API", c: "#6366f1" },
@@ -1224,12 +1244,12 @@ function ChordView({ payload }: { payload: GraphPayload }) {
       return { key: l, label: meta[l].l, color: meta[l].c, count: count[l], ang, x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang), lx: cx + (R + 26) * Math.cos(ang), ly: cy + (R + 26) * Math.sin(ang) };
     });
     const pm = new Map(pts.map((p) => [p.key, p]));
-    const arcs: { d: string; color: string; w: number; from: string; to: string; n: number }[] = [];
+    const arcs: { d: string; color: string; w: number; from: string; to: string; fromKey: string; toKey: string; n: number }[] = [];
     for (const a of layers) for (const b of layers) {
       if (a === b) continue;
       const n = mat[a][b]; if (!n) continue;
       const pa = pm.get(a)!, pb = pm.get(b)!;
-      arcs.push({ d: `M${pa.x},${pa.y} Q${cx},${cy} ${pb.x},${pb.y}`, color: pa.color, w: 1 + Math.sqrt(n / maxE) * 12, from: meta[a].l, to: meta[b].l, n });
+      arcs.push({ d: `M${pa.x},${pa.y} Q${cx},${cy} ${pb.x},${pb.y}`, color: pa.color, w: 1 + Math.sqrt(n / maxE) * 12, from: meta[a].l, to: meta[b].l, fromKey: a, toKey: b, n });
     }
     arcs.sort((x, y) => y.w - x.w);
     return { pts, arcs, mat, layers, meta };
@@ -1240,15 +1260,18 @@ function ChordView({ payload }: { payload: GraphPayload }) {
       <div className="rounded-lg border bg-card p-2">
         <svg width={S} height={S}>
           <g>
-            {layout.arcs.map((a, i) => (
-              <path key={i} d={a.d} fill="none" stroke={a.color} strokeWidth={a.w} strokeOpacity={0.28} strokeLinecap="round">
-                <title>{a.from} → {a.to}: {a.n} dependências</title>
-              </path>
-            ))}
+            {layout.arcs.map((a, i) => {
+              const on = !hovered || a.fromKey === hovered || a.toKey === hovered;
+              return (
+                <path key={i} d={a.d} fill="none" stroke={a.color} strokeWidth={a.w} strokeOpacity={on ? (hovered ? 0.85 : 0.28) : 0.04} strokeLinecap="round">
+                  <title>{a.from} → {a.to}: {a.n} dependências</title>
+                </path>
+              );
+            })}
           </g>
           {layout.pts.map((p) => (
-            <g key={p.key}>
-              <circle cx={p.x} cy={p.y} r={7} fill={p.color} />
+            <g key={p.key} onMouseEnter={() => setHovered(p.key)} onMouseLeave={() => setHovered(null)} style={{ cursor: "pointer" }}>
+              <circle cx={p.x} cy={p.y} r={hovered === p.key ? 10 : 7} fill={p.color} stroke={hovered === p.key ? "var(--foreground)" : "none"} strokeWidth={hovered === p.key ? 1.5 : 0} />
               <text x={p.lx} y={p.ly} fontSize={12} fontWeight={600} fill={p.color}
                     textAnchor={Math.cos(p.ang) < -0.3 ? "end" : Math.cos(p.ang) > 0.3 ? "start" : "middle"}>
                 {p.label} <tspan fontWeight={400} fill="currentColor" className="text-muted-foreground">({p.count})</tspan>
@@ -1280,6 +1303,7 @@ function ChordView({ payload }: { payload: GraphPayload }) {
 // de dados num relance. SVG puro.
 function ErView({ payload }: { payload: GraphPayload }) {
   const S = 760, cx = S / 2, cy = S / 2, R = 320;
+  const [hovered, setHovered] = useState<string | null>(null);
   const layout = useMemo(() => {
     const isEntity = (n: GraphNode) => n.type === "ENTITY";
     const isSuper = (n: GraphNode) => n.type === "SUPERTYPE" || n.type === "INTERFACE";
@@ -1320,44 +1344,59 @@ function ErView({ payload }: { payload: GraphPayload }) {
       const y = cy + (i - (superNodes.length - 1) / 2) * 46;
       sPos.set(n.id, { x: cx, y, label: n.className || n.id.split(":").pop() || "?", color: groupColor.get(n.id)! });
     });
+    const neighbors = new Map<string, Set<string>>();
+    const link = (a: string, b: string) => (neighbors.get(a) || neighbors.set(a, new Set()).get(a)!).add(b);
     const assocArcs = assoc.filter(([a, b]) => pos.has(a) && pos.has(b)).map(([a, b]) => {
       const pa = pos.get(a)!, pb = pos.get(b)!;
-      return `M${pa.x},${pa.y} Q${cx},${cy} ${pb.x},${pb.y}`;
+      link(a, b); link(b, a);
+      return { d: `M${pa.x},${pa.y} Q${cx},${cy} ${pb.x},${pb.y}`, a, b };
     });
     const extRays = extLinks.filter(([a, b]) => pos.has(a) && sPos.has(b)).map(([a, b]) => {
       const pa = pos.get(a)!, pb = sPos.get(b)!;
-      return { d: `M${pa.x},${pa.y} L${pb.x},${pb.y}`, color: sPos.get(b)!.color };
+      link(a, b); link(b, a);
+      return { d: `M${pa.x},${pa.y} L${pb.x},${pb.y}`, color: sPos.get(b)!.color, a, b };
     });
     const entDots = ents.map((n) => {
       const p = pos.get(n.id)!;
       const sup = extOf.get(n.id);
-      return { x: p.x, y: p.y, color: sup ? groupColor.get(sup)! : "#64748b", sensitive: n.sensitive, label: trunc(n.className || n.id, 16), lx: cx + (R + 8) * Math.cos(Math.atan2(p.y - cy, p.x - cx)), ly: cy + (R + 8) * Math.sin(Math.atan2(p.y - cy, p.x - cx)), anchor: p.x < cx - 20 ? "end" : p.x > cx + 20 ? "start" : "middle" };
+      const ang = Math.atan2(p.y - cy, p.x - cx);
+      return { id: n.id, x: p.x, y: p.y, color: sup ? groupColor.get(sup)! : "#64748b", sensitive: n.sensitive, full: n.className || n.id, lx: cx + (R + 10) * Math.cos(ang), ly: cy + (R + 10) * Math.sin(ang), anchor: p.x < cx - 20 ? "end" : p.x > cx + 20 ? "start" : "middle" };
     });
-    const supDots = Array.from(sPos.entries()).map(([id, s]) => ({ ...s, count: extLinks.filter(([, b]) => b === id).length }));
+    const supDots = Array.from(sPos.entries()).map(([id, s]) => ({ id, ...s, count: extLinks.filter(([, b]) => b === id).length }));
     const totalEnt = payload.nodes.filter(isEntity).length;
-    return { assocArcs, extRays, entDots, supDots, shown: ents.length, totalEnt, assocCount: assoc.length, extCount: extLinks.length };
+    return { assocArcs, extRays, entDots, supDots, neighbors, shown: ents.length, totalEnt, assocCount: assoc.length, extCount: extLinks.length };
   }, [payload]);
+
+  const hi = hovered ? new Set<string>([hovered, ...Array.from(layout.neighbors.get(hovered) || [])]) : null;
+  const dot = (id: string) => (!hi ? 1 : hi.has(id) ? 1 : 0.1);
+  const touches = (a: string, b: string) => !hovered || a === hovered || b === hovered;
 
   return (
     <div className="flex flex-1 gap-4 overflow-auto" data-testid="er-view">
       <div className="rounded-lg border bg-card p-2">
         <svg width={S} height={S}>
-          <g opacity={0.5}>
+          <g>
             {layout.extRays.map((r, i) => (
-              <path key={"e" + i} d={r.d} fill="none" stroke={r.color} strokeWidth={0.6} strokeOpacity={0.35} />
+              <path key={"e" + i} d={r.d} fill="none" stroke={r.color} strokeWidth={touches(r.a, r.b) && hovered ? 1.6 : 0.6} strokeOpacity={touches(r.a, r.b) ? (hovered ? 0.85 : 0.3) : 0.04} />
             ))}
           </g>
-          <g opacity={0.4}>
-            {layout.assocArcs.map((d, i) => (
-              <path key={"a" + i} d={d} fill="none" stroke="#c084fc" strokeWidth={0.7} />
+          <g>
+            {layout.assocArcs.map((a, i) => (
+              <path key={"a" + i} d={a.d} fill="none" stroke="#c084fc" strokeWidth={touches(a.a, a.b) && hovered ? 1.4 : 0.7} strokeOpacity={touches(a.a, a.b) ? (hovered ? 0.9 : 0.35) : 0.03} />
             ))}
           </g>
-          {layout.entDots.map((n, i) => (
-            <circle key={i} cx={n.x} cy={n.y} r={3.5} fill={n.color} stroke={n.sensitive ? "#ef4444" : "none"} strokeWidth={n.sensitive ? 1.5 : 0} />
-          ))}
-          {layout.supDots.map((s, i) => (
-            <g key={"s" + i}>
-              <circle cx={s.x} cy={s.y} r={9} fill={s.color} stroke="var(--background)" strokeWidth={2} />
+          {layout.entDots.map((n) => {
+            const isH = hovered === n.id;
+            return (
+              <g key={n.id} opacity={dot(n.id)} onMouseEnter={() => setHovered(n.id)} onMouseLeave={() => setHovered(null)} style={{ cursor: "pointer" }}>
+                <circle cx={n.x} cy={n.y} r={isH ? 6 : 3.5} fill={n.color} stroke={isH ? "var(--foreground)" : n.sensitive ? "#ef4444" : "none"} strokeWidth={isH ? 1.5 : n.sensitive ? 1.5 : 0} />
+                {isH && <text x={n.lx} y={n.ly + 3} fontSize={11} fontWeight={700} textAnchor={n.anchor} fill="currentColor">{trunc(n.full, 22)}</text>}
+              </g>
+            );
+          })}
+          {layout.supDots.map((s) => (
+            <g key={"s" + s.id} onMouseEnter={() => setHovered(s.id)} onMouseLeave={() => setHovered(null)} style={{ cursor: "pointer" }} opacity={dot(s.id)}>
+              <circle cx={s.x} cy={s.y} r={hovered === s.id ? 11 : 9} fill={s.color} stroke="var(--background)" strokeWidth={2} />
               <text x={s.x + 14} y={s.y + 4} fontSize={13} fontWeight={700} fill={s.color}>{s.label} <tspan fontWeight={400} fill="currentColor" className="text-muted-foreground">({s.count})</tspan></text>
             </g>
           ))}
