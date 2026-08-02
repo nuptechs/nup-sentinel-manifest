@@ -62,7 +62,7 @@ cytoscape.use(elk as any);
 
 // ── Tipos do payload /api/projects/:id/graph ──────────────────────────
 type NodeType = "CONTROLLER" | "SERVICE" | "REPOSITORY" | "ENTITY" | "VIEW" | "ROUTE" | "COMPONENT" | "COMPOSABLE" | "INTERFACE" | "SUPERTYPE";
-type EdgeRelation = "CALLS" | "READS_ENTITY" | "WRITES_ENTITY" | "ASSOCIATES" | "EXTENDS" | "IMPLEMENTS";
+type EdgeRelation = "CALLS" | "READS_ENTITY" | "WRITES_ENTITY" | "ASSOCIATES" | "EXTENDS" | "IMPLEMENTS" | "RUNTIME_OBSERVED";
 
 interface GraphNode {
   id: string;
@@ -123,6 +123,7 @@ const REL: Record<EdgeRelation, { label: string; color: string }> = {
   ASSOCIATES: { label: "associa", color: "#c084fc" },
   EXTENDS: { label: "estende", color: "#22d3ee" },
   IMPLEMENTS: { label: "implementa", color: "#2dd4bf" },
+  RUNTIME_OBSERVED: { label: "observado (tráfego real)", color: "#f43f5e" },
 };
 
 function labelOf(n: GraphNode): string {
@@ -303,6 +304,7 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
     ASSOCIATES: true,
     EXTENDS: true,
     IMPLEMENTS: true,
+    RUNTIME_OBSERVED: true,
   });
 
   // Escopo de renderização (foco-primeiro, anti-hairball — a pesquisa é
@@ -463,6 +465,8 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
           selector: `edge[rel = "${r}"]`,
           style: { "line-color": REL[r].color, "target-arrow-color": REL[r].color },
         })),
+        // aresta OBSERVADA (tráfego real): tracejada — proveniência distinta do estático
+        { selector: `edge[rel = "RUNTIME_OBSERVED"]`, style: { "line-style": "dashed", "line-dash-pattern": [6, 3] } },
         // estados de ênfase
         { selector: ".faded", style: { opacity: 0.08 } },
         { selector: "node.hl", style: { "border-color": "#0f172a", "border-width": 3 } },

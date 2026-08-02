@@ -208,6 +208,35 @@ export class AnalysisPipeline {
         this.progress("Step 3/4", `Full-stack: +${fsAug.views} telas, +${fsAug.routes} rotas gateway, +${fsAug.edges} arestas`);
       }
 
+      // COSTURA runtime↔estático (ADR-0026 / ADR-073): arestas OBSERVADAS dos
+      // traços OTel/Jaeger resolvem o dispatch dinâmico (~56% de rotas Node
+      // param na rota no estático). GATED por JAEGER_QUERY_URL; fail-soft e
+      // time-boxed — telemetria NUNCA quebra a análise (sem env = byte-a-byte).
+      try {
+        const jaegerUrl = process.env.RUNTIME_OVERLAY_JAEGER_URL || process.env.JAEGER_QUERY_URL;
+        if (jaegerUrl) {
+          const { fetchRecentTraces, extractRuntimePairs, applyRuntimeOverlay } = await import("../analyzers/runtime-overlay");
+          const services = (process.env.RUNTIME_OVERLAY_SERVICES || "easynup-gateway,easynup-backend")
+            .split(",").map((s) => s.trim()).filter(Boolean);
+          const lookbackMs = Number(process.env.RUNTIME_OVERLAY_LOOKBACK_MS || 86400000);
+          const traces = await fetchRecentTraces({
+            baseUrl: jaegerUrl,
+            apiKey: process.env.JAEGER_QUERY_API_KEY || null,
+            services,
+            lookbackMs,
+            limit: Number(process.env.RUNTIME_OVERLAY_LIMIT || 400),
+          });
+          const pairs = extractRuntimePairs(traces, { gatewayServices: [services[0]] });
+          const ov = applyRuntimeOverlay(appGraph, pairs);
+          this.progress(
+            "Step 3/4",
+            `Runtime overlay: traços=${traces.length} rotas obs=${ov.routesMatched}✓+${ov.routesMinted}novas · arestas obs=${ov.entityEdges} rota→entidade +${ov.wsv1Edges} rota→Java · hot=${ov.hotNodes}`,
+          );
+        }
+      } catch (err) {
+        console.error(`[pipeline] runtime overlay falhou (fail-soft): ${err}`);
+      }
+
       let catalogEntryData = this.connectGraph(
         frontendInteractions, endpointImpacts, appGraph, analysisRun.id, projectId, archType, frontendFiles
       );
