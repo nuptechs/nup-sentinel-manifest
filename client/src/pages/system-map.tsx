@@ -53,6 +53,8 @@ import {
   GitFork,
   Shapes,
   Layers,
+  LayoutGrid,
+  Radar,
 } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -127,7 +129,7 @@ function labelOf(n: GraphNode): string {
   return n.className || n.qualifiedSignature || n.id;
 }
 
-type ViewMode = "graph" | "matrix" | "layers";
+type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord";
 
 export default function SystemMapPage() {
   const { data: projects } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
@@ -191,6 +193,24 @@ export default function SystemMapPage() {
             >
               <Layers className="h-4 w-4" /> Camadas
             </Button>
+            <Button
+              variant={viewMode === "treemap" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setViewMode("treemap")}
+              data-testid="view-treemap"
+            >
+              <LayoutGrid className="h-4 w-4" /> Treemap
+            </Button>
+            <Button
+              variant={viewMode === "chord" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setViewMode("chord")}
+              data-testid="view-chord"
+            >
+              <Radar className="h-4 w-4" /> Roda
+            </Button>
           </div>
           <Select
             value={projectId != null ? String(projectId) : undefined}
@@ -221,6 +241,8 @@ export default function SystemMapPage() {
         <MatrixView projectId={projectId} payload={graphQuery.data} />
       )}
       {graphQuery.data && viewMode === "layers" && <LayersFlowView payload={graphQuery.data} />}
+      {graphQuery.data && viewMode === "treemap" && <TreemapView payload={graphQuery.data} />}
+      {graphQuery.data && viewMode === "chord" && <ChordView payload={graphQuery.data} />}
     </div>
   );
 }
@@ -1090,6 +1112,152 @@ function LayersFlowView({ payload }: { payload: GraphPayload }) {
             </g>
           ))}
         </svg>
+      </div>
+    </div>
+  );
+}
+
+// ── Vista TREEMAP (hotspot: onde está a massa e o risco) — AT4 ─────────
+// Slice-and-dice por CAMADA canônica: cada bloco = uma camada (largura ∝ massa),
+// cada retângulo = um nó (altura ∝ importância/grau); borda vermelha = campo
+// sensível. Lê "onde o sistema pesa e onde dói" num relance. SVG puro.
+function TreemapView({ payload }: { payload: GraphPayload }) {
+  const W = 1120, H = 620, PAD = 2, TOPH = 22;
+  const layout = useMemo(() => {
+    const order = ["presentation", "api", "domain", "data", "infra", "—"];
+    const meta: Record<string, { l: string; c: string }> = {
+      presentation: { l: "Apresentação", c: "#ec4899" }, api: { l: "API", c: "#6366f1" },
+      domain: { l: "Domínio", c: "#0ea5e9" }, data: { l: "Dados", c: "#f59e0b" },
+      infra: { l: "Infra", c: "#94a3b8" }, "—": { l: "Outros", c: "#64748b" },
+    };
+    const deg = (n: GraphNode) => (n.inDegree || 0) + (n.outDegree || 0) + 1;
+    const byLayer = new Map<string, GraphNode[]>();
+    for (const n of payload.nodes) {
+      const l = n.layer && meta[n.layer] ? n.layer : "—";
+      (byLayer.get(l) || byLayer.set(l, []).get(l)!).push(n);
+    }
+    const layers = order.filter((l) => (byLayer.get(l) || []).length);
+    const layerMass = (l: string) => (byLayer.get(l) || []).reduce((s, n) => s + deg(n), 0);
+    const totalMass = layers.reduce((s, l) => s + layerMass(l), 0) || 1;
+    let x = 0;
+    const blocks = layers.map((l) => {
+      const nodes = (byLayer.get(l) || []).slice().sort((a, b) => deg(b) - deg(a)).slice(0, 60);
+      const bw = Math.max(60, (layerMass(l) / totalMass) * W);
+      const colMass = nodes.reduce((s, n) => s + deg(n), 0) || 1;
+      let y = TOPH;
+      const rects = nodes.map((n) => {
+        const rh = Math.max(3, (deg(n) / colMass) * (H - TOPH));
+        const r = { x, y, w: bw, h: rh, label: n.className || n.id, deg: deg(n) - 1, sensitive: n.sensitive };
+        y += rh;
+        return r;
+      });
+      const b = { key: l, label: meta[l].l, color: meta[l].c, x, w: bw, count: (byLayer.get(l) || []).length, rects };
+      x += bw;
+      return b;
+    });
+    return { blocks, meta };
+  }, [payload]);
+
+  return (
+    <div className="flex-1 overflow-auto rounded-lg border bg-card p-2" data-testid="treemap-view">
+      <svg width={W} height={H} className="min-w-full">
+        {layout.blocks.map((b) => (
+          <g key={b.key}>
+            <text x={b.x + 4} y={15} fontSize={12} fontWeight={700} fill={b.color}>{b.label} <tspan fontWeight={400} fill="currentColor" className="text-muted-foreground">({b.count})</tspan></text>
+            {b.rects.map((r, i) => (
+              <g key={i}>
+                <rect x={r.x + PAD} y={r.y} width={Math.max(0, r.w - PAD * 2)} height={Math.max(0, r.h - PAD)} rx={2}
+                      fill={b.color} fillOpacity={0.18 + Math.min(0.55, r.deg / 60)} stroke={r.sensitive ? "#ef4444" : b.color} strokeWidth={r.sensitive ? 1.5 : 0.5} strokeOpacity={r.sensitive ? 1 : 0.4}>
+                  <title>{r.label} — {r.deg} conexões{r.sensitive ? " · campo sensível" : ""}</title>
+                </rect>
+                {r.h > 13 && r.w > 60 && (
+                  <text x={r.x + 6} y={r.y + Math.min(r.h - 4, 13)} fontSize={10} fill="currentColor" className="pointer-events-none">
+                    {trunc(r.label, Math.floor(r.w / 7))}{r.h > 26 ? "" : ""}
+                  </text>
+                )}
+              </g>
+            ))}
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// ── Vista RODA (dependência entre camadas — acoplamento) — AT5 ─────────
+// Roda de dependências: cada camada é um ponto no círculo; cada arco = fluxo de
+// dependência camada→camada, largura ∝ nº de arestas, cor = camada de origem.
+// A leitura circular do ACOPLAMENTO (quem puxa quem) num relance. SVG puro.
+function ChordView({ payload }: { payload: GraphPayload }) {
+  const S = 620, cx = S / 2, cy = S / 2, R = 210;
+  const layout = useMemo(() => {
+    const meta: Record<string, { l: string; c: string }> = {
+      presentation: { l: "Apresentação", c: "#ec4899" }, api: { l: "API", c: "#6366f1" },
+      domain: { l: "Domínio", c: "#0ea5e9" }, data: { l: "Dados", c: "#f59e0b" },
+      infra: { l: "Infra", c: "#94a3b8" }, "—": { l: "Outros", c: "#64748b" },
+    };
+    const order = ["presentation", "api", "domain", "data", "infra", "—"];
+    const idLayer = new Map<string, string>();
+    const count: Record<string, number> = {};
+    for (const n of payload.nodes) { const l = n.layer && meta[n.layer] ? n.layer : "—"; idLayer.set(n.id, l); count[l] = (count[l] || 0) + 1; }
+    const layers = order.filter((l) => count[l]);
+    const mat: Record<string, Record<string, number>> = {};
+    for (const a of layers) { mat[a] = {}; for (const b of layers) mat[a][b] = 0; }
+    let maxE = 1;
+    for (const e of payload.edges) {
+      const a = idLayer.get(e.fromNode), b = idLayer.get(e.toNode);
+      if (!a || !b || !mat[a] || mat[a][b] === undefined) continue;
+      mat[a][b]++; if (a !== b && mat[a][b] > maxE) maxE = mat[a][b];
+    }
+    const pts = layers.map((l, i) => {
+      const ang = (i / layers.length) * 2 * Math.PI - Math.PI / 2;
+      return { key: l, label: meta[l].l, color: meta[l].c, count: count[l], ang, x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang), lx: cx + (R + 26) * Math.cos(ang), ly: cy + (R + 26) * Math.sin(ang) };
+    });
+    const pm = new Map(pts.map((p) => [p.key, p]));
+    const arcs: { d: string; color: string; w: number; from: string; to: string; n: number }[] = [];
+    for (const a of layers) for (const b of layers) {
+      if (a === b) continue;
+      const n = mat[a][b]; if (!n) continue;
+      const pa = pm.get(a)!, pb = pm.get(b)!;
+      arcs.push({ d: `M${pa.x},${pa.y} Q${cx},${cy} ${pb.x},${pb.y}`, color: pa.color, w: 1 + Math.sqrt(n / maxE) * 12, from: meta[a].l, to: meta[b].l, n });
+    }
+    arcs.sort((x, y) => y.w - x.w);
+    return { pts, arcs, mat, layers, meta };
+  }, [payload]);
+
+  return (
+    <div className="flex flex-1 gap-4 overflow-auto" data-testid="chord-view">
+      <div className="rounded-lg border bg-card p-2">
+        <svg width={S} height={S}>
+          <g>
+            {layout.arcs.map((a, i) => (
+              <path key={i} d={a.d} fill="none" stroke={a.color} strokeWidth={a.w} strokeOpacity={0.28} strokeLinecap="round">
+                <title>{a.from} → {a.to}: {a.n} dependências</title>
+              </path>
+            ))}
+          </g>
+          {layout.pts.map((p) => (
+            <g key={p.key}>
+              <circle cx={p.x} cy={p.y} r={7} fill={p.color} />
+              <text x={p.lx} y={p.ly} fontSize={12} fontWeight={600} fill={p.color}
+                    textAnchor={Math.cos(p.ang) < -0.3 ? "end" : Math.cos(p.ang) > 0.3 ? "start" : "middle"}>
+                {p.label} <tspan fontWeight={400} fill="currentColor" className="text-muted-foreground">({p.count})</tspan>
+              </text>
+            </g>
+          ))}
+        </svg>
+      </div>
+      <div className="w-64 shrink-0 space-y-2 text-sm">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Acoplamento camada→camada</div>
+        {layout.arcs.slice(0, 12).map((a, i) => (
+          <div key={i} className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-xs">
+              <span className="inline-block h-2 w-2 rounded-full" style={{ background: a.color }} /> {a.from} → {a.to}
+            </span>
+            <Badge variant="outline" className="tabular-nums">{a.n}</Badge>
+          </div>
+        ))}
+        <p className="pt-2 text-xs text-muted-foreground">Largura do arco = nº de dependências. Cor = camada de origem. Arco para fora do sentido esperado revela acoplamento invertido.</p>
       </div>
     </div>
   );
