@@ -1033,14 +1033,18 @@ function LayersFlowView({ payload }: { payload: GraphPayload }) {
       return { ...c, x, total: totalByCol[c.key] || 0, sel: picked.length, nodes };
     });
     const edges: { d: string; color: string; from: string; to: string }[] = [];
-    const neighbors = new Map<string, Set<string>>();
+    const neighbors = new Map<string, Set<string>>();     // 1 salto (para o contador do detalhe)
+    const out = new Map<string, string[]>();              // dirigido: quem ESTE chama/usa (a jusante → dado)
+    const inc = new Map<string, string[]>();              // dirigido: quem chama ESTE (a montante → tela)
     const link = (a: string, b: string) => (neighbors.get(a) || neighbors.set(a, new Set()).get(a)!).add(b);
+    const dir = (m: Map<string, string[]>, a: string, b: string) => (m.get(a) || m.set(a, []).get(a)!).push(b);
     for (const e of payload.edges) {
       const a = pos.get(e.fromNode), b = pos.get(e.toNode);
       if (!a || !b || a === b) continue;
       const x1 = a.x + DOT, x2 = b.x - DOT, mx = (x1 + x2) / 2;
       edges.push({ d: `M${x1},${a.y} C${mx},${a.y} ${mx},${b.y} ${x2},${b.y}`, color: (REL[e.relationType]?.color) || "#94a3b8", from: e.fromNode, to: e.toNode });
       link(e.fromNode, e.toNode); link(e.toNode, e.fromNode);
+      dir(out, e.fromNode, e.toNode); dir(inc, e.toNode, e.fromNode);
     }
     const maxRows = Math.max(1, ...cols.map((c) => c.nodes.length));
     const width = LEFT + cols.length * COL_W + 40;
@@ -1056,13 +1060,22 @@ function LayersFlowView({ payload }: { payload: GraphPayload }) {
     const selTotal = cols.reduce((s, c) => s + c.sel, 0);
     const labelFull = new Map<string, string>();
     for (const c of cols) for (const n of c.nodes) labelFull.set(n.id, labelOf(payload.nodes.find((p) => p.id === n.id) || ({} as GraphNode)) || n.label);
-    return { cols, edges, neighbors, width, height, relCounts, resCounts, totalByCol, selTotal, labelFull };
+    return { cols, edges, neighbors, out, inc, width, height, relCounts, resCounts, totalByCol, selTotal, labelFull };
   }, [payload]);
 
-  // realce de vizinhança no hover (a interatividade que faltava)
-  const hi = hovered ? new Set<string>([hovered, ...Array.from(layout.neighbors.get(hovered) || [])]) : null;
-  const nodeOpacity = (id: string) => (!hi ? 1 : hi.has(id) ? 1 : 0.12);
-  const edgeState = (from: string, to: string) => (!hovered ? { o: 0.4, w: 0.7 } : from === hovered || to === hovered ? { o: 0.95, w: 1.4 } : { o: 0.04, w: 0.6 });
+  // realce do CAMINHO INTEIRO no hover (cone transitivo): a jusante segue as
+  // arestas pra frente (até o dado) e a montante pra trás (até a tela) — não só
+  // 1 salto. É a leitura "clique→dado" de ponta a ponta.
+  const closure = (start: string, adj: Map<string, string[]>) => {
+    const seen = new Set<string>(); const stack = [start];
+    while (stack.length) { const v = stack.pop()!; for (const w of adj.get(v) || []) if (!seen.has(w)) { seen.add(w); stack.push(w); } }
+    return seen;
+  };
+  const down = hovered ? closure(hovered, layout.out) : null;
+  const up = hovered ? closure(hovered, layout.inc) : null;
+  const hi = hovered ? new Set<string>([hovered, ...Array.from(down!), ...Array.from(up!)]) : null;
+  const nodeOpacity = (id: string) => (!hi ? 1 : hi.has(id) ? 1 : 0.1);
+  const edgeState = (from: string, to: string) => (!hi ? { o: 0.4, w: 0.7 } : hi.has(from) && hi.has(to) ? { o: 0.9, w: 1.3 } : { o: 0.03, w: 0.6 });
 
   const RES_LABEL: Record<string, string> = {
     "compiler": "compilador", "syntactic-resolved": "código resolvido",
@@ -1107,9 +1120,9 @@ function LayersFlowView({ payload }: { payload: GraphPayload }) {
         </div>
         <div className="rounded-md border bg-muted/40 p-2 text-xs">
           {hovered ? (
-            <><b className="text-foreground">{layout.labelFull.get(hovered) || hovered}</b><br /><span className="text-muted-foreground">{(layout.neighbors.get(hovered)?.size || 0)} conexões diretas</span></>
+            <><b className="text-foreground">{layout.labelFull.get(hovered) || hovered}</b><br /><span className="text-muted-foreground">{down?.size || 0} a jusante (→ dado) · {up?.size || 0} a montante (telas) · {(layout.neighbors.get(hovered)?.size || 0)} diretos</span></>
           ) : (
-            <span className="text-muted-foreground"><b className="text-foreground">Recorte executivo:</b> {layout.selTotal} de {payload.nodes.length} nós. Passe o mouse num nó para realçar a vizinhança.</span>
+            <span className="text-muted-foreground"><b className="text-foreground">Recorte executivo:</b> {layout.selTotal} de {payload.nodes.length} nós. Passe o mouse num nó — realça o caminho inteiro (clique→dado).</span>
           )}
         </div>
       </div>
