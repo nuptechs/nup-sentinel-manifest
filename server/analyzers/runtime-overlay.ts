@@ -67,7 +67,44 @@ export interface RuntimeOverlayResult {
 }
 
 const NOISE_RE = /\/(healthz?|metrics|actuator|favicon|robots\.txt)(\/|$|\?)/i;
-const JAVA_OP_RE = /\/easynup\/[A-Za-z][A-Za-z0-9]*\.v\d+/;
+// Padrão de op do endpoint interno (rota→wsv1). DEFAULT = convenção easynup
+// (/easynup/op.vN); QUALQUER alvo passa o seu via opts.opPathPattern — o overlay
+// não é mais cravado num sistema (ADR mapeador universal, Fase 0).
+const DEFAULT_OP_RE = /\/easynup\/[A-Za-z][A-Za-z0-9]*\.v\d+/;
+
+// Extração de TABELA agnóstica a stack (semconv OTel, verificado 1.43.0):
+// cascata db.collection.name (novo Stable) → db.sql.table (antigo) → parse do
+// SQL (db.query.text novo / db.statement antigo). A auto-instrumentação de
+// Node(pg)/Java-antigo NEM SEMPRE emite o nome da tabela como atributo — só o
+// texto do SQL — então o parser é o que torna o mapeamento UNIVERSAL.
+// Captura o identificador inteiro após FROM/JOIN/INTO/UPDATE — incl. schema
+// pontilhado e aspas/colchetes por segmento (`"public"."service_order"`,
+// `` `contract` ``, `[dbo].[Order]`). O cleanup tira aspas e reduz a schema.tabela→tabela.
+const SQL_TABLE_RE = /\b(?:from|join|into|update)\s+([`"[\]\w.$]+)/gi;
+/** Extrai nomes de tabela de um SQL (sanitizado, literais→?). Puro. */
+export function tablesFromSql(sql: string): string[] {
+  const out = new Set<string>();
+  if (!sql || typeof sql !== "string") return [];
+  let m: RegExpExecArray | null;
+  SQL_TABLE_RE.lastIndex = 0;
+  while ((m = SQL_TABLE_RE.exec(sql)) !== null) {
+    let t = m[1].replace(/[`"[\]]/g, "");        // tira aspas/colchetes
+    t = t.split(".").pop() || t;                  // schema.tabela → tabela
+    if (t && !/^(select|where|set|values|on|as)$/i.test(t)) out.add(t.toLowerCase());
+  }
+  return Array.from(out);
+}
+/** Tabelas tocadas por um span de banco (cascata novo→antigo→SQL). Puro. */
+export function tablesFromDbSpan(tg: Record<string, string>): string[] {
+  if (tg["db.collection.name"]) return [tg["db.collection.name"]];  // semconv Stable atual
+  if (tg["db.sql.table"]) return [tg["db.sql.table"]];               // convenção antiga (renomeada)
+  const sql = tg["db.query.text"] || tg["db.statement"];             // fallback universal
+  return sql ? tablesFromSql(sql) : [];
+}
+/** Verbo da operação de banco (novo db.operation.name → antigo db.operation). */
+function dbOpOf(tg: Record<string, string>): string {
+  return (tg["db.operation.name"] || tg["db.operation"] || "").toUpperCase();
+}
 
 function tagsOf(sp: JaegerSpan): Record<string, string> {
   const o: Record<string, string> = {};
@@ -88,9 +125,10 @@ function stripQuery(p: string): string {
  */
 export function extractRuntimePairs(
   traces: JaegerTrace[],
-  opts: { gatewayServices?: string[] } = {},
+  opts: { gatewayServices?: string[]; opPathPattern?: RegExp } = {},
 ): RuntimePair[] {
   const gwSvcs = new Set(opts.gatewayServices && opts.gatewayServices.length ? opts.gatewayServices : ["easynup-gateway"]);
+  const opRe = opts.opPathPattern || DEFAULT_OP_RE; // configurável por alvo (não mais cravado)
   const byRoute = new Map<string, RuntimePair>();
 
   for (const t of traces || []) {
@@ -122,9 +160,11 @@ export function extractRuntimePairs(
     let lastSeenMs = 0;
     for (const s of spans) {
       const tg = tagsOf(s);
-      if (tg["db.sql.table"]) tables.push({ table: toSnakeCase(tg["db.sql.table"]), op: (tg["db.operation"] || "").toUpperCase() });
+      const op = dbOpOf(tg);
+      for (const tbl of tablesFromDbSpan(tg)) tables.push({ table: toSnakeCase(tbl), op });
       const hr = tg["http.route"] || "";
-      if (JAVA_OP_RE.test(hr)) javaEndpoints.add(hr.match(JAVA_OP_RE)![0]);
+      const opMatch = hr.match(opRe);
+      if (opMatch) javaEndpoints.add(opMatch[0]);
       if (tg["page.route"]) pageRoutes.add(tg["page.route"]);
       if (typeof s.startTime === "number") lastSeenMs = Math.max(lastSeenMs, Math.round(s.startTime / 1000));
     }
@@ -137,8 +177,8 @@ export function extractRuntimePairs(
     }
     pair.count++;
     for (const { table, op } of tables) if (table) pair.tables.set(table, op || pair.tables.get(table) || "");
-    for (const e of javaEndpoints) pair.javaEndpoints.add(e);
-    for (const p of pageRoutes) pair.pageRoutes.add(p);
+    for (const e of Array.from(javaEndpoints)) pair.javaEndpoints.add(e);
+    for (const p of Array.from(pageRoutes)) pair.pageRoutes.add(p);
     if (pair.traceIds.length < 5 && t.traceID) pair.traceIds.push(t.traceID);
     pair.lastSeenMs = Math.max(pair.lastSeenMs, lastSeenMs);
   }
@@ -175,7 +215,8 @@ export function applyRuntimeOverlay(
   const markHot = (id: string, count: number, lastSeenMs: number) => {
     const n = graph.getNode(id);
     if (!n) return;
-    const md = (n.metadata = (n.metadata || {}) as Record<string, unknown>);
+    const md = (n.metadata || {}) as Record<string, unknown>;
+    (n as { metadata?: Record<string, unknown> }).metadata = md;
     md.runtimeHot = true;
     md.runtimeCount = (Number(md.runtimeCount) || 0) + count;
     if (lastSeenMs) md.runtimeLastSeenMs = Math.max(Number(md.runtimeLastSeenMs) || 0, lastSeenMs);
@@ -225,7 +266,7 @@ export function applyRuntimeOverlay(
     };
 
     // 2) rota → entidade (a costura: alcança o DADO que o estático não pega)
-    for (const [table, op] of p.tables) {
+    for (const [table, op] of Array.from(p.tables)) {
       let target = entityByTable.get(table);
       if (target) {
         res.tablesResolved++;
@@ -242,7 +283,7 @@ export function applyRuntimeOverlay(
     }
 
     // 3) rota → endpoint Java (quando o proxy aparece no traço)
-    for (const ep of p.javaEndpoints) {
+    for (const ep of Array.from(p.javaEndpoints)) {
       const target = wsv1ByPath.get(ep);
       if (!target) continue;
       if (addObserved(routeId, target, { ...meta, endpoint: ep })) res.wsv1Edges++;
