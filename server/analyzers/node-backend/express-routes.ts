@@ -48,8 +48,31 @@ export interface ExpressRoute {
    * começando no handler. Vazia quando o toque é same-file ou não há toque.
    */
   callChain: string[];
+  /**
+   * EXT-ROTA (ADR-0026): endpoints Java (`/easynup/<op>.v<N>`) que o handler
+   * PROXIA — via fetch `/easynup/<op>.vN` ou `callJavaWs` (op-key `<op>.vN`).
+   * Liga a rota gateway ao backend Java (fecha o beco: 66% das rotas não tocam
+   * Drizzle porque proxiam pro Java, e a cadeia real continua lá).
+   */
+  proxiesTo: string[];
   sourceFile: string;
   lineNumber: number;
+}
+
+/**
+ * Extrai os endpoints Java proxiados pelo handler: `/easynup/<op>.v<N>` (fetch
+ * direto) e op-keys `'<op>.v<N>'` (callJavaWs/SERVICE_ROUTES) → normaliza p/ o
+ * fullPath canônico `/easynup/<op>.v<N>` (mesma chave dos nós wsv1). Puro.
+ */
+export function extractJavaProxies(handlerText: string): string[] {
+  const found = new Set<string>();
+  const path = /\/easynup\/([A-Za-z][A-Za-z0-9]*)\.v(\d+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = path.exec(handlerText))) found.add(`/easynup/${m[1]}.v${m[2]}`);
+  // op-key em string literal: 'findContracts.v1' / "createServiceOrder.v2"
+  const opKey = /['"]([A-Za-z][A-Za-z0-9]*\.v\d+)['"]/g;
+  while ((m = opKey.exec(handlerText))) found.add(`/easynup/${m[1]}`);
+  return Array.from(found).sort();
 }
 
 // Verbos de rota do Express (router.get, router.post, ...). `use` fica de fora
@@ -330,6 +353,7 @@ export function extractExpressRoutes(
         entitiesTouched: entities,
         persistenceOperations: operations,
         callChain: chain,
+        proxiesTo: extractJavaProxies(args),
         sourceFile: file.filePath,
         lineNumber: lineAt(content, r.index),
       });

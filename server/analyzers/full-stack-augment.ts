@@ -109,6 +109,15 @@ export function augmentGraphWithFullStack(
       }));
     }
   };
+  // EXT-ROTA (ADR-0026): índice fullPath → id do nó wsv1 (endpoint Java), já
+  // mintado antes do full-stack. Liga a rota gateway que PROXIA (proxiesTo) ao
+  // backend Java — fecha o beco das rotas que não tocam Drizzle porque proxiam.
+  const wsv1ByPath = new Map<string, string>();
+  for (const n of graph.getAllNodes()) {
+    if (!n.id.startsWith("wsv1:")) continue;
+    const fp = (n.metadata as Record<string, unknown>)?.fullPath;
+    if (typeof fp === "string") wsv1ByPath.set(fp, n.id);
+  }
   const routeNodeByKey = new Map<string, { id: string; route: ExpressRoute }>();
   for (const r of routes || []) {
     if (!r?.path || !r.method || r.method === "ALL") continue;
@@ -139,6 +148,16 @@ export function augmentGraphWithFullStack(
     }
     // toque de dados sai do FIM da cadeia (ou da própria rota se same-file)
     dataEdge(prev, r);
+    // EXT-ROTA: liga a rota ao ENDPOINT Java que ela proxia (rota→wsv1) — o
+    // caminho clique→dado atravessa a fronteira Node↔Java e chega à entidade.
+    for (const fp of (r as unknown as { proxiesTo?: string[] }).proxiesTo || []) {
+      const target = wsv1ByPath.get(fp);
+      if (target && target !== id) {
+        graph.addEdge(new GraphEdge(id, target, "CALLS", {
+          synthetic: true, resolution: "syntactic-declared", convention: "gateway-proxy",
+        }));
+      }
+    }
   }
 
   // VIEW — telas/componentes com interação HTTP; aresta pro backend mapeado
