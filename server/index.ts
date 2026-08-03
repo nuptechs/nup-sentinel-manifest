@@ -1,8 +1,11 @@
 import express, { type Request, Response, NextFunction } from "express";
+import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { isAuthRequired } from "./middleware/api-auth";
+import { registerBrowserOidcRoutes } from "./auth/oidc-browser";
 
 process.on("uncaughtException", (err) => {
   console.error("[FATAL] Uncaught exception:", err.message, err.stack);
@@ -13,6 +16,13 @@ process.on("unhandledRejection", (reason) => {
 
 const app = express();
 const httpServer = createServer(app);
+
+declare module "express-session" {
+  interface SessionData {
+    oidc?: { state: string; verifier: string; returnTo: string };
+    oidcAccessToken?: string;
+  }
+}
 
 declare module "http" {
   interface IncomingMessage {
@@ -30,6 +40,29 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+
+const sessionSecret = process.env.SESSION_SECRET;
+if (process.env.NODE_ENV === "production" && !sessionSecret) {
+  throw new Error("SESSION_SECRET must be set in production");
+}
+if (process.env.NODE_ENV === "production") {
+  app.set("trust proxy", 1);
+}
+const PgSessionStore = connectPgSimple(session);
+app.use(session({
+  name: "manifest.sid",
+  secret: sessionSecret || "manifest-development-session-secret",
+  resave: false,
+  saveUninitialized: false,
+  store: process.env.DATABASE_URL ? new PgSessionStore({ conString: process.env.DATABASE_URL, createTableIfMissing: true }) : undefined,
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 60 * 60 * 1000,
+  },
+}));
+registerBrowserOidcRoutes(app);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {

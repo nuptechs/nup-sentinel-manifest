@@ -12,6 +12,7 @@
  *
  * Environment variables:
  *   OIDC_ISSUER_URL   — OIDC issuer (e.g. https://nupidentity.nuptechs.com)
+ *   OIDC_JWKS_URI     — Optional provider JWKS endpoint override
  *   OIDC_AUDIENCE     — Expected JWT audience (client_id)
  *   OIDC_SYSTEM_ID    — System prefix for permission normalization (e.g. "manifest")
  */
@@ -21,20 +22,23 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 // ─── Configuration ─────────────────────────────────────────────────
 
 const OIDC_ISSUER_URL = process.env.OIDC_ISSUER_URL || "";
+const OIDC_JWKS_URI = process.env.OIDC_JWKS_URI || "";
 const OIDC_AUDIENCE = process.env.OIDC_AUDIENCE || "";
 const OIDC_SYSTEM_ID = process.env.OIDC_SYSTEM_ID || "manifest";
 
 /** Cached JWKS fetcher — jose handles key rotation and caching internally. */
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
+export function resolveJwksUrl(issuer: string, configuredJwksUri = ""): URL {
+  return new URL(configuredJwksUri || `${issuer.replace(/\/$/, "")}/api/oidc/jwks`);
+}
+
 function getJWKS(): ReturnType<typeof createRemoteJWKSet> {
   if (!jwks) {
     if (!OIDC_ISSUER_URL) {
       throw new Error("OIDC_ISSUER_URL is not configured");
     }
-    const jwksUrl = new URL(
-      `${OIDC_ISSUER_URL.replace(/\/$/, "")}/.well-known/jwks.json`,
-    );
+    const jwksUrl = resolveJwksUrl(OIDC_ISSUER_URL, OIDC_JWKS_URI);
     jwks = createRemoteJWKSet(jwksUrl);
   }
   return jwks;

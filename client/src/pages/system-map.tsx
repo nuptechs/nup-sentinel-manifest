@@ -55,6 +55,8 @@ import {
   Layers,
   LayoutGrid,
   Radar,
+  RefreshCw,
+  LogIn,
 } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -139,7 +141,8 @@ function labelOf(n: GraphNode): string {
 type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord" | "er";
 
 export default function SystemMapPage() {
-  const { data: projects } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
+  const projectsQuery = useQuery<Project[]>({ queryKey: ["/api/projects"] });
+  const projects = projectsQuery.data;
   const [projectId, setProjectId] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("graph");
 
@@ -231,6 +234,7 @@ export default function SystemMapPage() {
           <Select
             value={projectId != null ? String(projectId) : undefined}
             onValueChange={(v) => setProjectId(Number(v))}
+            disabled={projectsQuery.isLoading || projectsQuery.isError || !projects?.length}
           >
             <SelectTrigger className="w-64" data-testid="select-project">
               <SelectValue placeholder="Selecione um projeto" />
@@ -246,21 +250,81 @@ export default function SystemMapPage() {
         </div>
       </div>
 
+      {projectsQuery.isLoading && <MapSkeleton />}
+
+      {projectsQuery.isError && (
+        <ProjectListError
+          error={projectsQuery.error as Error}
+          onRetry={() => void projectsQuery.refetch()}
+        />
+      )}
+
+      {!projectsQuery.isLoading && !projectsQuery.isError && projects?.length === 0 && (
+        <ProjectListEmpty />
+      )}
+
       {graphQuery.isLoading && <MapSkeleton />}
 
-      {graphQuery.isError && (
+      {!projectsQuery.isError && graphQuery.isError && (
         <GraphEmptyOrError error={graphQuery.error as Error} />
       )}
 
-      {graphQuery.data && viewMode === "graph" && <GraphCanvas payload={graphQuery.data} />}
-      {graphQuery.data && viewMode === "matrix" && projectId != null && (
+      {!projectsQuery.isError && graphQuery.data && viewMode === "graph" && <GraphCanvas payload={graphQuery.data} />}
+      {!projectsQuery.isError && graphQuery.data && viewMode === "matrix" && projectId != null && (
         <MatrixView projectId={projectId} payload={graphQuery.data} />
       )}
-      {graphQuery.data && viewMode === "layers" && <LayersFlowView payload={graphQuery.data} />}
-      {graphQuery.data && viewMode === "treemap" && <TreemapView payload={graphQuery.data} />}
-      {graphQuery.data && viewMode === "chord" && <ChordView payload={graphQuery.data} />}
-      {graphQuery.data && viewMode === "er" && <ErView payload={graphQuery.data} />}
+      {!projectsQuery.isError && graphQuery.data && viewMode === "layers" && <LayersFlowView payload={graphQuery.data} />}
+      {!projectsQuery.isError && graphQuery.data && viewMode === "treemap" && <TreemapView payload={graphQuery.data} />}
+      {!projectsQuery.isError && graphQuery.data && viewMode === "chord" && <ChordView payload={graphQuery.data} />}
+      {!projectsQuery.isError && graphQuery.data && viewMode === "er" && <ErView payload={graphQuery.data} />}
     </div>
+  );
+}
+
+function ProjectListError({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  const requiresAuthentication = error.message.startsWith("401:");
+
+  return (
+    <Card className="border-destructive/40">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <AlertTriangle className="h-5 w-5 text-destructive" />
+          {requiresAuthentication ? "Entre para carregar o EasyNuP" : "Não foi possível carregar os projetos"}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
+        <p>
+          {requiresAuthentication
+            ? "O mapa já lê a análise salva, mas esta sessão não tem acesso aos projetos. Entre com a conta autorizada e tente novamente."
+            : "A lista de projetos não respondeu. Tente carregar novamente."}
+        </p>
+        {requiresAuthentication ? (
+          <Button asChild size="sm">
+            <a href="/auth/login?returnTo=%2Fsystem-map">
+              <LogIn className="mr-2 h-4 w-4" /> Entrar
+            </a>
+          </Button>
+        ) : (
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            <RefreshCw className="mr-2 h-4 w-4" /> Tentar novamente
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProjectListEmpty() {
+  return (
+    <Card className="flex flex-1 items-center justify-center">
+      <CardContent className="max-w-md py-16 text-center">
+        <Boxes className="mx-auto mb-4 h-12 w-12 text-muted-foreground/50" />
+        <h3 className="mb-2 text-lg font-semibold">Nenhum projeto disponível</h3>
+        <p className="text-sm text-muted-foreground">
+          Esta conta não tem projetos analisados disponíveis. Entre com a conta que possui acesso ao EasyNuP ou selecione outro projeto quando ele estiver disponível.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 

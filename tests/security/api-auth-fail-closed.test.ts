@@ -128,6 +128,25 @@ describe("apiAuthMiddleware — anonymous request", () => {
     assert.equal(nexted, false);
     assert.equal(res.statusCode, 401);
   });
+
+  it("DENIES an invalid server-side browser session token when auth is required", async () => {
+    process.env.MANIFEST_REQUIRE_AUTH = "true";
+    const res = makeRes();
+    const req = makeReq({ session: { oidcAccessToken: "expired-or-malformed" } });
+    const { nexted } = await run(req, res);
+    assert.equal(nexted, false);
+    assert.equal(res.statusCode, 401);
+  });
+
+  it("never treats a browser session value as the bootstrap API key", async () => {
+    process.env.MANIFEST_REQUIRE_AUTH = "true";
+    process.env.MANIFEST_BOOTSTRAP_API_KEY = "boot-secret-123456";
+    const res = makeRes();
+    const req = makeReq({ session: { oidcAccessToken: "boot-secret-123456" } });
+    const { nexted } = await run(req, res);
+    assert.equal(nexted, false);
+    assert.equal(res.statusCode, 401);
+  });
 });
 
 // ── webhook bypass ─────────────────────────────────────────────────
