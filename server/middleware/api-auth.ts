@@ -56,6 +56,10 @@ function extractCredential(req: Request): string | null {
   return null;
 }
 
+function sessionAccessToken(req: Request): string | null {
+  return req.session?.oidcAccessToken || null;
+}
+
 // ─── Dual auth middleware ─────────────────────────────────────────
 //
 // Supported credentials (via `Authorization: Bearer <tok>` or `X-API-Key`):
@@ -73,7 +77,9 @@ export function apiAuthMiddleware(req: Request, res: Response, next: NextFunctio
   }
 
   const authRequired = isAuthRequired();
-  const token = extractCredential(req);
+  const headerCredential = extractCredential(req);
+  const sessionToken = headerCredential ? null : sessionAccessToken(req);
+  const token = headerCredential || sessionToken;
 
   const denyOrPass = (why: string) => {
     if (authRequired) {
@@ -92,7 +98,7 @@ export function apiAuthMiddleware(req: Request, res: Response, next: NextFunctio
   // as a full-access credential so the operator can provision real keys
   // and wire the Sentinel. Compared in constant time.
   const bootstrap = process.env.MANIFEST_BOOTSTRAP_API_KEY;
-  if (bootstrap && bootstrap.length > 0) {
+  if (headerCredential && bootstrap && bootstrap.length > 0) {
     const a = Buffer.from(token);
     const b = Buffer.from(bootstrap);
     if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
@@ -103,7 +109,7 @@ export function apiAuthMiddleware(req: Request, res: Response, next: NextFunctio
   }
 
   // ── Path 1: API Key (pk_ prefix) ──
-  if (token.startsWith("pk_")) {
+  if (headerCredential && token.startsWith("pk_")) {
     const keyHash = hashApiKey(token);
 
     storage.getApiKeyByHash(keyHash).then((apiKey) => {
