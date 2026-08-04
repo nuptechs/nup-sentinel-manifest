@@ -550,7 +550,22 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
         { selector: "edge.hl", style: { opacity: 0.95, width: 3 } },
         { selector: "node.pick", style: { "border-color": "#111827", "border-width": 5 } },
       ],
-      layout: {
+    });
+    cyRef.current = cy;
+
+    // O layout ELK roda ASSÍNCRONO (aplica as posições num microtask). Se o
+    // React destrói/recria a instância (troca de payload/scope, refetch do
+    // react-query, foco da janela após o login) antes desse microtask, a
+    // aplicação cai numa instância já destruída → "Cannot read properties of
+    // null (reading 'notify')" e o grafo fica EM BRANCO (repro headless
+    // confirmou: `layout.stop()` sozinho NÃO evita — o microtask já está
+    // agendado). O fix é ADIAR o start do layout um frame e checar
+    // `cy.destroyed()`: se a instância morreu no meio, o layout nem começa.
+    let disposed = false;
+    let layout: cytoscape.Layouts | null = null;
+    const rafId = requestAnimationFrame(() => {
+      if (disposed || cy.destroyed()) return;
+      layout = cy.layout({
         name: "elk",
         elk: {
           algorithm: "layered",
@@ -561,9 +576,9 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
         },
         fit: true,
         padding: 30,
-      } as unknown as cytoscape.LayoutOptions,
+      } as unknown as cytoscape.LayoutOptions);
+      layout.run();
     });
-    cyRef.current = cy;
 
     const clearEmphasis = () => {
       cy.elements().removeClass("faded hl pick");
@@ -601,6 +616,9 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
     });
 
     return () => {
+      disposed = true;
+      cancelAnimationFrame(rafId);
+      try { layout?.stop(); } catch { /* layout já concluído/parado */ }
       cy.destroy();
       cyRef.current = null;
     };
