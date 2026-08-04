@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, serial, integer, timestamp, jsonb, real, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, serial, integer, timestamp, jsonb, json, index, real, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -16,6 +16,23 @@ export const insertUserSchema = createInsertSchema(users).pick({
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+
+// Sessões do login por navegador (OIDC) — gravadas via connect-pg-simple
+// (ver server/index.ts). Precisa estar no schema para o `drizzle-kit push` do
+// pré-deploy CRIAR e PRESERVAR a tabela; sem isso o push a trata como órfã e a
+// DROPA a cada deploy, quebrando o login (sessionSave → 503). Colunas exatas que
+// o connect-pg-simple espera: sid (PK), sess (json), expire timestamp(6).
+export const session = pgTable(
+  "session",
+  {
+    sid: varchar("sid").primaryKey(),
+    sess: json("sess").notNull(),
+    expire: timestamp("expire", { precision: 6 }).notNull(),
+  },
+  (table) => ({
+    expireIdx: index("IDX_session_expire").on(table.expire),
+  }),
+);
 
 export const projects = pgTable("projects", {
   id: serial("id").primaryKey(),
