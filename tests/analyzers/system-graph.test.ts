@@ -150,3 +150,143 @@ describe("shapeSystemGraph — T1 proveniência exposta nas arestas (ADR-0025)",
     assert.equal(g.edges[0].synthetic, undefined);
   });
 });
+
+// ─── ADR-0028 P0.1 — taxonomia epistêmica (método+confiança) + censo ───
+// Prova o CONTRATO: toda aresta/nó declara COMO sabemos que existe, e o grafo
+// carrega um censo. Os valores REAIS de `resolution` (grep server/analyzers|
+// pipeline): PRECISOS `compiler`/`interface-impl` (Engine A) → STATIC_PROVEN;
+// HEURÍSTICOS `syntactic-declared` (sempre synthetic:true) + `convention-name`
+// (full-stack-augment) → STATIC_UNRESOLVED.
+describe("shapeSystemGraph — ADR-0028 P0.1 evidence por ARESTA (5 métodos)", () => {
+  function oneEdge(metadata: Record<string, unknown> | undefined) {
+    const raw = {
+      nodes: [{ id: "SERVICE:d.A.m()", type: "SERVICE" }, { id: "SERVICE:d.B.n()", type: "SERVICE" }],
+      edges: [{ fromNode: "SERVICE:d.A.m()", toNode: "SERVICE:d.B.n()", relationType: "CALLS", metadata }],
+    };
+    return shapeSystemGraph(raw, "method").edges[0];
+  }
+
+  it("observed → RUNTIME_OBSERVED (0.95) e preserva count", () => {
+    const e = oneEdge({ observed: true, count: 7, source: "jaeger" });
+    assert.deepEqual(e.evidence, { method: "RUNTIME_OBSERVED", confidence: 0.95 });
+    assert.equal(e.observed, true);
+    assert.equal(e.count, 7);
+  });
+
+  it("resolution `compiler` → STATIC_PROVEN (0.80)", () => {
+    const e = oneEdge({ resolution: "compiler" });
+    assert.deepEqual(e.evidence, { method: "STATIC_PROVEN", confidence: 0.80 });
+  });
+
+  it("resolution `interface-impl` (sem synthetic) → STATIC_PROVEN (0.80)", () => {
+    const e = oneEdge({ resolution: "interface-impl" });
+    assert.deepEqual(e.evidence, { method: "STATIC_PROVEN", confidence: 0.80 });
+  });
+
+  it("synthetic:true + `syntactic-declared` → STATIC_UNRESOLVED (0.40)", () => {
+    const e = oneEdge({ synthetic: true, resolution: "syntactic-declared" });
+    assert.deepEqual(e.evidence, { method: "STATIC_UNRESOLVED", confidence: 0.40 });
+  });
+
+  it("resolution `convention-name` (heurística, sem synthetic) → STATIC_UNRESOLVED (0.40)", () => {
+    const e = oneEdge({ resolution: "convention-name" });
+    assert.deepEqual(e.evidence, { method: "STATIC_UNRESOLVED", confidence: 0.40 });
+  });
+
+  it("aresta sem proveniência → UNKNOWN (0.20) — o mapa ADMITE que não sabe", () => {
+    const e = oneEdge(undefined);
+    assert.deepEqual(e.evidence, { method: "UNKNOWN", confidence: 0.20 });
+  });
+
+  it("precedência: observed vence resolution/synthetic (RUNTIME domina)", () => {
+    const e = oneEdge({ observed: true, resolution: "convention-name", synthetic: true });
+    assert.equal(e.evidence.method, "RUNTIME_OBSERVED");
+  });
+
+  it("precedência: synthetic vence resolution precisa (declarada > provada nominal)", () => {
+    // `syntactic-declared` chega SEMPRE com synthetic:true no full-stack-augment;
+    // aqui simulamos synthetic com uma resolution que seria precisa se sozinha.
+    const e = oneEdge({ synthetic: true, resolution: "compiler" });
+    assert.equal(e.evidence.method, "STATIC_UNRESOLVED");
+  });
+
+  it("LLM_CONJECTURED é RESERVADO — nenhum produtor o emite hoje", () => {
+    // Não há entrada que produza este método; a coluna existe só no censo (=0).
+    // Garante que resolution desconhecida NÃO vira LLM_CONJECTURED por engano.
+    const e = oneEdge({ resolution: "algo-inventado" });
+    assert.equal(e.evidence.method, "UNKNOWN");
+  });
+});
+
+describe("shapeSystemGraph — ADR-0028 P0.1 evidence por NÓ + censo de cobertura", () => {
+  // Grafo method-level cobrindo os 5 métodos de aresta + nós hot/frio.
+  const raw = {
+    nodes: [
+      { id: "ROUTE:runtime:GET:/x", type: "ROUTE", metadata: { runtimeHot: true, runtimeCount: 4, observed: true } },
+      { id: "SERVICE:d.A.m()", type: "SERVICE", metadata: { runtimeHot: true, runtimeCount: 2 } },
+      { id: "SERVICE:d.B.n()", type: "SERVICE" }, // frio
+      { id: "SERVICE:d.C.p()", type: "SERVICE" }, // frio
+      { id: "SERVICE:d.D.q()", type: "SERVICE" }, // frio
+    ],
+    edges: [
+      { fromNode: "ROUTE:runtime:GET:/x", toNode: "SERVICE:d.A.m()", relationType: "RUNTIME_OBSERVED", metadata: { observed: true, count: 4 } },
+      { fromNode: "SERVICE:d.A.m()", toNode: "SERVICE:d.B.n()", relationType: "CALLS", metadata: { resolution: "compiler" } },
+      { fromNode: "SERVICE:d.A.m()", toNode: "SERVICE:d.C.p()", relationType: "CALLS", metadata: { resolution: "interface-impl" } },
+      { fromNode: "SERVICE:d.B.n()", toNode: "SERVICE:d.C.p()", relationType: "CALLS", metadata: { synthetic: true, resolution: "syntactic-declared" } },
+      { fromNode: "SERVICE:d.C.p()", toNode: "SERVICE:d.D.q()", relationType: "CALLS", metadata: { resolution: "convention-name" } },
+      { fromNode: "SERVICE:d.B.n()", toNode: "SERVICE:d.D.q()", relationType: "CALLS" }, // sem metadata → UNKNOWN
+    ],
+  };
+
+  it("nó hot → evidence RUNTIME_OBSERVED + observed:true; nó frio → STATIC_PROVEN sem observed", () => {
+    const g = shapeSystemGraph(raw, "method");
+    const hot = g.nodes.find((n) => n.id === "SERVICE:d.A.m()")!;
+    assert.deepEqual(hot.evidence, { method: "RUNTIME_OBSERVED", confidence: 0.95 });
+    assert.equal(hot.observed, true);
+    const frio = g.nodes.find((n) => n.id === "SERVICE:d.B.n()")!;
+    assert.deepEqual(frio.evidence, { method: "STATIC_PROVEN", confidence: 0.80 });
+    assert.equal(frio.observed, undefined);
+  });
+
+  it("censo de arestas: byMethod (LLM=0) + total + observedRatio", () => {
+    const g = shapeSystemGraph(raw, "method");
+    assert.deepEqual(g.coverage.edges.byMethod, {
+      RUNTIME_OBSERVED: 1,
+      STATIC_PROVEN: 2,
+      STATIC_UNRESOLVED: 2,
+      LLM_CONJECTURED: 0,
+      UNKNOWN: 1,
+    });
+    assert.equal(g.coverage.edges.total, 6);
+    assert.equal(g.coverage.edges.observedRatio, 1 / 6);
+    // soma das colunas == total (censo fechado, nada some por omissão)
+    const sum = Object.values(g.coverage.edges.byMethod).reduce((a, b) => a + b, 0);
+    assert.equal(sum, g.coverage.edges.total);
+  });
+
+  it("censo de nós: observed vs total (o que roda × o que só existe)", () => {
+    const g = shapeSystemGraph(raw, "method");
+    assert.deepEqual(g.coverage.nodes, { observed: 2, total: 5 });
+  });
+
+  it("grafo vazio: observedRatio=0 sem divisão-por-zero; colunas zeradas", () => {
+    const g = shapeSystemGraph({ nodes: [], edges: [] }, "method");
+    assert.equal(g.coverage.edges.total, 0);
+    assert.equal(g.coverage.edges.observedRatio, 0);
+    assert.deepEqual(g.coverage.edges.byMethod, {
+      RUNTIME_OBSERVED: 0, STATIC_PROVEN: 0, STATIC_UNRESOLVED: 0, LLM_CONJECTURED: 0, UNKNOWN: 0,
+    });
+    assert.deepEqual(g.coverage.nodes, { observed: 0, total: 0 });
+  });
+
+  it("class-level também carrega censo + evidence (após dedup de arestas)", () => {
+    const g = shapeSystemGraph(raw, "class");
+    // toda aresta shaped tem evidence
+    assert.ok(g.edges.every((e) => !!e.evidence && typeof e.evidence.confidence === "number"));
+    // todo nó shaped tem evidence
+    assert.ok(g.nodes.every((n) => !!n.evidence));
+    assert.equal(g.coverage.edges.total, g.edges.length);
+    const sum = Object.values(g.coverage.edges.byMethod).reduce((a, b) => a + b, 0);
+    assert.equal(sum, g.coverage.edges.total);
+  });
+});

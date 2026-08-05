@@ -79,7 +79,45 @@ export interface ShapedNode {
    */
   runtimeHot?: boolean;
   runtimeCount?: number;
+  /**
+   * ADR-0028 P0.1 — nó EXERCITADO por tráfego (espelha `runtimeHot`; presente só
+   * quando true). Alimenta o censo `coverage.nodes.observed`.
+   */
+  observed?: boolean;
+  /**
+   * ADR-0028 P0.1 — método+confiança de que o nó EXISTE: RUNTIME_OBSERVED quando
+   * tocado por tráfego, senão STATIC_PROVEN (existe na fonte parseada pelo
+   * Engine A). Sempre presente — todo nó declara como sabemos que ele existe.
+   */
+  evidence: Evidence;
 }
+/**
+ * ADR-0028 P0.1 — Taxonomia epistêmica. NÃO é técnica nova: é o CONTRATO de que
+ * toda aresta/nó do mapa declara COMO sabemos que existe (o MÉTODO de evidência)
+ * e com QUE confiança. É a base do "censo de cobertura": o mapa passa a MOSTRAR o
+ * que NÃO sabe (arestas UNKNOWN, ratio de runtime) em vez de apagar por omissão a
+ * arquitetura fora do molde conhecido (caso NuPIdentify: nós/arestas invisíveis).
+ */
+export type EvidenceMethod =
+  // traço real (OTel/Jaeger) exercitou isto — a evidência mais forte
+  | 'RUNTIME_OBSERVED'
+  // resolvido pelo compilador/tipo (Engine A emite `compiler` / `interface-impl`)
+  | 'STATIC_PROVEN'
+  // convenção/sintaxe/heurística: DECLARADA, não provada
+  // (`synthetic:true`, `convention-name`, família `syntactic-*`, `dynamic`)
+  | 'STATIC_UNRESOLVED'
+  // RESERVADO — nenhum produtor emite aresta assim hoje; entra quando houver
+  // inferência por LLM. Documentado aqui para o censo já ter a coluna (=0).
+  | 'LLM_CONJECTURED'
+  // sem proveniência alguma: o mapa ADMITE que não sabe (em vez de fingir)
+  | 'UNKNOWN';
+
+export interface Evidence {
+  method: EvidenceMethod;
+  /** 0..1 — confiança nominal do método (calibração fina fica para ondas futuras). */
+  confidence: number;
+}
+
 export interface ShapedEdge {
   fromNode: string;
   toNode: string;
@@ -92,6 +130,27 @@ export interface ShapedEdge {
   observed?: boolean;
   /** nº de traços que exercitaram a aresta observada. */
   count?: number;
+  /**
+   * ADR-0028 P0.1 — método+confiança de evidência DESTA aresta, derivado de
+   * resolution/synthetic/observed. Sempre presente (aresta sem proveniência =
+   * UNKNOWN, não omitida). Aditivo aos campos crus acima.
+   */
+  evidence: Evidence;
+}
+
+/**
+ * ADR-0028 P0.1 — censo de cobertura do grafo: quanto do mapa é RUNTIME_OBSERVED
+ * vs STATIC_PROVEN vs só DECLARADO vs desconhecido. É o número que torna a
+ * incerteza VISÍVEL na tela.
+ */
+export interface GraphCoverage {
+  edges: {
+    byMethod: Record<EvidenceMethod, number>;
+    total: number;
+    /** fração de arestas com evidência RUNTIME_OBSERVED (0..1). */
+    observedRatio: number;
+  };
+  nodes: { observed: number; total: number };
 }
 export interface ShapedGraph {
   level: 'class' | 'method';
@@ -101,6 +160,8 @@ export interface ShapedGraph {
   /** ADR-0026 CM1 — distribuições canônicas (aditivas): por camada e por stack. */
   byLayer?: Record<string, number>;
   byStack?: Record<string, number>;
+  /** ADR-0028 P0.1 — censo epistêmico: quanto do mapa é observado/provado/só-declarado/desconhecido. */
+  coverage: GraphCoverage;
   nodes: ShapedNode[];
   edges: ShapedEdge[];
 }
@@ -137,6 +198,58 @@ function runtimeOf(n: RawSystemNode): { runtimeHot?: boolean; runtimeCount?: num
 function entryPointOf(node: RawSystemNode): string | undefined {
   const ep = node.metadata?.entryPoint;
   return typeof ep === 'string' && ep ? ep : undefined;
+}
+
+// ─── ADR-0028 P0.1 — classificação epistêmica (pura) ───
+// `resolution` REAIS observados no código (grep server/analyzers|pipeline):
+//   PRECISOS (Engine A, resolvidos por compilador/tipo): `compiler`, `interface-impl`
+//   HEURÍSTICOS (Node full-stack-augment): `syntactic-declared` (sempre com
+//   synthetic:true), `convention-name`. Os genéricos exact/type/import/direct/
+//   dynamic estão previstos no vocabulário T1 mesmo sem produtor atual — mapeados
+//   para não cair em UNKNOWN se um analisador novo os emitir.
+const PRECISE_RESOLUTIONS = new Set(['compiler', 'interface-impl', 'exact', 'type', 'import', 'direct']);
+function isHeuristicResolution(r: string): boolean {
+  return r === 'convention-name' || r === 'dynamic' || r === 'heuristic' || r.startsWith('syntactic');
+}
+
+/** Deriva {method, confidence} de uma aresta a partir da proveniência crua. */
+function classifyEdgeEvidence(p: { resolution?: string; synthetic?: boolean; observed?: boolean }): Evidence {
+  if (p.observed === true) return { method: 'RUNTIME_OBSERVED', confidence: 0.95 };
+  const r = p.resolution;
+  if (p.synthetic === true || (r !== undefined && isHeuristicResolution(r))) {
+    return { method: 'STATIC_UNRESOLVED', confidence: 0.40 };
+  }
+  if (r !== undefined && PRECISE_RESOLUTIONS.has(r)) return { method: 'STATIC_PROVEN', confidence: 0.80 };
+  return { method: 'UNKNOWN', confidence: 0.20 };
+}
+
+/** Deriva {method, confidence} de um nó: hot=runtime; senão provado pela fonte. */
+function classifyNodeEvidence(observed: boolean): Evidence {
+  return observed
+    ? { method: 'RUNTIME_OBSERVED', confidence: 0.95 }
+    : { method: 'STATIC_PROVEN', confidence: 0.80 };
+}
+
+/** Record zerado com TODAS as colunas do censo (LLM_CONJECTURED inclusa, hoje =0). */
+function emptyEdgeByMethod(): Record<EvidenceMethod, number> {
+  return { RUNTIME_OBSERVED: 0, STATIC_PROVEN: 0, STATIC_UNRESOLVED: 0, LLM_CONJECTURED: 0, UNKNOWN: 0 };
+}
+
+/** Monta o censo `coverage` (aritmética de divisão-por-zero segura). */
+function buildCoverage(
+  byMethod: Record<EvidenceMethod, number>,
+  edgeTotal: number,
+  nodesObserved: number,
+  nodesTotal: number,
+): GraphCoverage {
+  return {
+    edges: {
+      byMethod,
+      total: edgeTotal,
+      observedRatio: edgeTotal > 0 ? byMethod.RUNTIME_OBSERVED / edgeTotal : 0,
+    },
+    nodes: { observed: nodesObserved, total: nodesTotal },
+  };
 }
 
 /**
@@ -193,29 +306,40 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
   const inDegree: Record<string, number> = {};
   const outDegree: Record<string, number> = {};
   const edges: ShapedEdge[] = [];
+  const byMethod = emptyEdgeByMethod(); // ADR-0028 P0.1 — censo de arestas
   for (const e of raw.edges || []) {
     if (!nodeIds.has(e.fromNode) || !nodeIds.has(e.toNode)) continue;
     inDegree[e.toNode] = (inDegree[e.toNode] || 0) + 1;
     outDegree[e.fromNode] = (outDegree[e.fromNode] || 0) + 1;
-    edges.push({ fromNode: e.fromNode, toNode: e.toNode, relationType: e.relationType, ...edgeProvenance(e) });
+    const prov = edgeProvenance(e);
+    const evidence = classifyEdgeEvidence(prov);
+    byMethod[evidence.method] += 1;
+    edges.push({ fromNode: e.fromNode, toNode: e.toNode, relationType: e.relationType, ...prov, evidence });
   }
   const byType: Record<string, number> = {};
   const byLayer: Record<string, number> = {};
   const byStack: Record<string, number> = {};
+  let nodesObserved = 0;
   const nodes: ShapedNode[] = raw.nodes.map((n) => {
     byType[n.type] = (byType[n.type] || 0) + 1;
     const ep = entryPointOf(n);
+    const rt = runtimeOf(n);
+    const observed = rt.runtimeHot === true;
+    if (observed) nodesObserved += 1;
     return {
       id: n.id, type: n.type, className: n.className, methodName: n.methodName,
       qualifiedSignature: n.qualifiedSignature,
       inDegree: inDegree[n.id] || 0, outDegree: outDegree[n.id] || 0,
       sensitive: isSensitive(n), sourceFile: sourceFileOf(n),
       ...(ep ? { entryPoint: [ep] } : {}),
-      ...runtimeOf(n),
+      ...rt,
+      ...(observed ? { observed: true } : {}),
       ...canonicalFacet(n, byLayer, byStack),
+      evidence: classifyNodeEvidence(observed),
     };
   });
-  return { level: 'method', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, byLayer, byStack, nodes, edges };
+  const coverage = buildCoverage(byMethod, edges.length, nodesObserved, nodes.length);
+  return { level: 'method', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, byLayer, byStack, coverage, nodes, edges };
 }
 
 function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
@@ -252,6 +376,7 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
   const inDegree: Record<string, number> = {};
   const outDegree: Record<string, number> = {};
   const edges: ShapedEdge[] = [];
+  const byMethod = emptyEdgeByMethod(); // ADR-0028 P0.1 — censo (arestas de classe já dedup)
   for (const e of raw.edges || []) {
     const a = keyOf.get(e.fromNode);
     const b = keyOf.get(e.toNode);
@@ -261,22 +386,31 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
     edgeSet.add(k);
     inDegree[b] = (inDegree[b] || 0) + 1;
     outDegree[a] = (outDegree[a] || 0) + 1;
-    edges.push({ fromNode: a, toNode: b, relationType: e.relationType, ...edgeProvenance(e) });
+    const prov = edgeProvenance(e);
+    const evidence = classifyEdgeEvidence(prov);
+    byMethod[evidence.method] += 1;
+    edges.push({ fromNode: a, toNode: b, relationType: e.relationType, ...prov, evidence });
   }
 
   const byType: Record<string, number> = {};
   const byLayer: Record<string, number> = {};
   const byStack: Record<string, number> = {};
+  let nodesObserved = 0;
   const nodes: ShapedNode[] = Array.from(classes.values()).map((c) => {
     byType[c.type] = (byType[c.type] || 0) + 1;
+    const observed = c.runtimeHot === true;
+    if (observed) nodesObserved += 1;
     return {
       id: c.id, type: c.type, className: c.className,
       inDegree: inDegree[c.id] || 0, outDegree: outDegree[c.id] || 0,
       sensitive: c.sensitive, sourceFile: c.sourceFile, memberCount: c.members,
       ...(c.entryPoints.size ? { entryPoint: Array.from(c.entryPoints) } : {}),
       ...(c.runtimeHot ? { runtimeHot: true, ...(c.runtimeCount ? { runtimeCount: c.runtimeCount } : {}) } : {}),
+      ...(observed ? { observed: true } : {}),
       ...canonicalFacet({ id: c.id, type: c.type, className: c.className, sourceFile: c.sourceFile }, byLayer, byStack),
+      evidence: classifyNodeEvidence(observed),
     };
   });
-  return { level: 'class', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, byLayer, byStack, nodes, edges };
+  const coverage = buildCoverage(byMethod, edges.length, nodesObserved, nodes.length);
+  return { level: 'class', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, byLayer, byStack, coverage, nodes, edges };
 }
