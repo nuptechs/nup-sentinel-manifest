@@ -347,3 +347,120 @@ export async function fetchRecentTraces(opts: FetchTracesOpts): Promise<JaegerTr
   }
   return Array.from(byTrace.values());
 }
+
+// ─── ADR-0028 P1.1 — resolução de config POR PROJETO (pura, testável) ───
+//
+// PROBLEMA que isto resolve (diagnóstico do `observedRatio:0` do NuPIdentify):
+// a costura runtime↔estático já flui ponta-a-ponta (overlay → `appGraph` →
+// snapshot `systemGraph` → `/graph`/`shapeSystemGraph` → `RUNTIME_OBSERVED` +
+// `coverage.observedRatio`). Mas o allowlist de SERVIÇO Jaeger vinha de um env
+// GLOBAL do processo (`RUNTIME_OVERLAY_SERVICES`, default `easynup-*`). Uma
+// única instância do Manifest analisa VÁRIOS projetos — com um env global ela
+// NUNCA acende os traços de um 2º projeto (NuPIdentify): o allowlist easynup
+// não casa NENHUM span daquele serviço, `extractRuntimePairs` volta [], zero
+// aresta observada, `observedRatio` fica 0.
+//
+// A config passa a ser resolvida POR PROJETO, em cascata:
+//   conventionProfile.runtimeOverlay (por projeto, JSONB — SEM migration)
+//     > env do processo (RUNTIME_OVERLAY_*/JAEGER_QUERY_*)
+//       > default easynup.
+// OPT-IN / ADITIVO: sem override de projeto e sem env → `null` (desligado,
+// byte-a-byte ao gated de hoje). `gatewayService` = span-raiz do traço (o
+// serviço que recebe a requisição); num serviço único (NuPIdentify) é o próprio.
+//
+// CONSTRAINT honesto (SOTA): OTel só observa FRONTEIRAS instrumentadas
+// (serviço→serviço, →DB). O overlay carimba as arestas de fronteira (rota→
+// entidade, rota→endpoint), NÃO o call-graph interno método-a-método. Logo
+// `observedRatio` mede "fração de arestas de fronteira observadas" e por
+// construção NÃO tende a 1.0 — é o teto correto, não uma falha.
+
+/** Override por projeto (lido de `conventionProfile.runtimeOverlay`). Todos opcionais. */
+export interface RuntimeOverlayProjectConfig {
+  jaegerUrl?: string | null;
+  apiKey?: string | null;
+  /** allowlist de serviços OTel; CSV ou array. services[0] = serviço de fronteira/raiz. */
+  services?: string | string[];
+  /** serviço que recebe a requisição (span-raiz). Default = services[0]. */
+  gatewayService?: string;
+  lookbackMs?: number;
+  limit?: number;
+  /** regex (string) do endpoint interno (rota→endpoint). Inválida → default. */
+  opPathPattern?: string;
+}
+
+/** Config normalizada e pronta pra usar; `null` = overlay desligado (gated). */
+export interface ResolvedRuntimeOverlayConfig {
+  jaegerUrl: string;
+  apiKey: string | null;
+  services: string[];
+  gatewayService: string;
+  lookbackMs: number;
+  limit: number;
+  opPathPattern?: RegExp;
+}
+
+const DEFAULT_OVERLAY_SERVICES = ["easynup-gateway", "easynup-backend"];
+
+function csvToList(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map((s) => String(s).trim()).filter(Boolean);
+  if (typeof v === "string") return v.split(",").map((s) => s.trim()).filter(Boolean);
+  return [];
+}
+function firstNum(...vals: unknown[]): number | undefined {
+  for (const v of vals) {
+    if (v === undefined || v === null || v === "") continue;
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+function firstStr(...vals: unknown[]): string | undefined {
+  for (const v of vals) if (typeof v === "string" && v.trim()) return v.trim();
+  return undefined;
+}
+/** Compila a regex de op (string do operador); inválida → default seguro, nunca lança. */
+function compileOpPattern(raw?: string): RegExp | undefined {
+  if (!raw || typeof raw !== "string") return undefined;
+  try { return new RegExp(raw); } catch { return DEFAULT_OP_RE; }
+}
+
+/**
+ * Resolve a config do overlay para UM projeto. PURA (só lê o bag do projeto +
+ * um mapa de env). Retorna `null` quando não há URL do Jaeger em nenhuma camada
+ * (overlay desligado = comportamento gated atual, byte-a-byte).
+ */
+export function resolveRuntimeOverlayConfig(
+  perProject: RuntimeOverlayProjectConfig | null | undefined,
+  env: Record<string, string | undefined> = {},
+): ResolvedRuntimeOverlayConfig | null {
+  const pp = perProject || {};
+  const jaegerUrl = firstStr(pp.jaegerUrl, env.RUNTIME_OVERLAY_JAEGER_URL, env.JAEGER_QUERY_URL);
+  if (!jaegerUrl) return null; // gated: sem Jaeger, nada a fazer
+
+  const services =
+    (pp.services !== undefined ? csvToList(pp.services) : []).length
+      ? csvToList(pp.services)
+      : csvToList(env.RUNTIME_OVERLAY_SERVICES).length
+        ? csvToList(env.RUNTIME_OVERLAY_SERVICES)
+        : [...DEFAULT_OVERLAY_SERVICES];
+
+  const gatewayService = firstStr(pp.gatewayService) || services[0];
+
+  return {
+    jaegerUrl,
+    apiKey: firstStr(pp.apiKey, env.JAEGER_QUERY_API_KEY) || null,
+    services,
+    gatewayService,
+    lookbackMs: firstNum(pp.lookbackMs, env.RUNTIME_OVERLAY_LOOKBACK_MS) ?? 86400000,
+    limit: firstNum(pp.limit, env.RUNTIME_OVERLAY_LIMIT) ?? 400,
+    opPathPattern: compileOpPattern(pp.opPathPattern),
+  };
+}
+
+/** Lê o bag `runtimeOverlay` do `conventionProfile` de um projeto (defensivo, nunca lança). */
+export function projectOverlayConfig(project: unknown): RuntimeOverlayProjectConfig | null {
+  const cp = (project as { conventionProfile?: unknown } | null)?.conventionProfile;
+  if (!cp || typeof cp !== "object") return null;
+  const ro = (cp as Record<string, unknown>).runtimeOverlay;
+  return ro && typeof ro === "object" ? (ro as RuntimeOverlayProjectConfig) : null;
+}
