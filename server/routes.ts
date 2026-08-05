@@ -1488,7 +1488,7 @@ export async function registerRoutes(
       }
       const currG = ((snaps[0].manifestJson as any) || {}).systemGraph;
       const prevG = ((snaps[1].manifestJson as any) || {}).systemGraph;
-      if (!currG?.nodes || !prevG?.nodes) {
+      if (!Array.isArray(currG?.nodes) || !Array.isArray(prevG?.nodes)) {
         return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Um dos snapshots precede o system graph." });
       }
       const { computeGraphDrift, driftToFindings } = await import("./analyzers/graph-drift");
@@ -1513,7 +1513,7 @@ export async function registerRoutes(
       const snaps = await storage.getAnalysisSnapshots(projectId);
       if (!snaps.length) return res.status(404).json({ message: "Sem analise ainda." });
       const sg = ((snaps[0].manifestJson as any) || {}).systemGraph;
-      if (!sg?.nodes) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
+      if (!Array.isArray(sg?.nodes)) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
       const { buildFactSheet } = await import("./analyzers/fact-sheet");
       res.json({ projectId, ...buildFactSheet(sg, { analysisRunId: snaps[0].analysisRunId, snapshotAt: snaps[0].createdAt }) });
     } catch (e) { console.error("facts error:", e); res.status(500).json({ message: "Failed to build fact sheet" }); }
@@ -1528,7 +1528,7 @@ export async function registerRoutes(
       const snaps = await storage.getAnalysisSnapshots(projectId);
       if (!snaps.length) return res.status(404).json({ message: "Sem analise ainda." });
       const sg = ((snaps[0].manifestJson as any) || {}).systemGraph;
-      if (!sg?.nodes) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
+      if (!Array.isArray(sg?.nodes)) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
       const { buildFactSheet, checkClaim } = await import("./analyzers/fact-sheet");
       const sheet = buildFactSheet(sg, { analysisRunId: snaps[0].analysisRunId, snapshotAt: snaps[0].createdAt });
       res.json({ projectId, ...checkClaim(sheet, metric, value) });
@@ -1546,7 +1546,7 @@ export async function registerRoutes(
       const snaps = await storage.getAnalysisSnapshots(projectId);
       if (!snaps.length) return res.status(404).json({ message: "Sem analise ainda." });
       const sg = ((snaps[0].manifestJson as any) || {}).systemGraph;
-      if (!sg?.nodes) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
+      if (!Array.isArray(sg?.nodes)) return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Snapshot precede o system graph." });
       const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const { computeDsm } = await import("./analyzers/dsm");
       const shaped = shapeSystemGraph(sg, "class");

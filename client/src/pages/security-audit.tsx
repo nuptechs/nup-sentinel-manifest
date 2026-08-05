@@ -412,7 +412,7 @@ export default function SecurityAuditPage() {
     queryKey: ["/api/projects"],
   });
 
-  const { data: findings, isLoading: loadingFindings } = useQuery<SecurityFinding[]>({
+  const { data: findings, isLoading: loadingFindings, isError: findingsError } = useQuery<SecurityFinding[]>({
     queryKey: [`/api/projects/${selectedProjectId}/security-findings`],
     enabled: !!selectedProjectId,
   });
@@ -519,7 +519,16 @@ export default function SecurityAuditPage() {
         </div>
       )}
 
-      {selectedProjectId && !loadingFindings && findings && findings.length === 0 && (
+      {selectedProjectId && !loadingFindings && findingsError && (
+        <Card className="border-destructive/30 bg-destructive/5">
+          <CardContent className="py-12 text-center">
+            <p className="font-medium text-destructive">Falha ao carregar as análises de segurança</p>
+            <p className="text-xs text-muted-foreground mt-1">A consulta falhou (não é "sem achados"). Recarregue ou verifique sua sessão.</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {selectedProjectId && !loadingFindings && !findingsError && findings && findings.length === 0 && (
         <Card data-testid="card-no-findings">
           <CardContent className="py-12 text-center">
             <ShieldCheck className="h-12 w-12 mx-auto text-green-500 mb-4" />
