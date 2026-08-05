@@ -735,7 +735,7 @@ export default function InsightsPage() {
     queryKey: ["/api/projects"],
   });
 
-  const { data: entries, isLoading: loadingEntries } = useQuery<CatalogEntry[]>({
+  const { data: entries, isLoading: loadingEntries, isError: entriesError } = useQuery<CatalogEntry[]>({
     queryKey: ["/api/catalog-entries", selectedProjectId],
     enabled: !!selectedProjectId,
   });
@@ -870,7 +870,16 @@ export default function InsightsPage() {
         </div>
       )}
 
-      {selectedProjectId && !loadingEntries && entries && entries.length === 0 && (
+      {selectedProjectId && !loadingEntries && entriesError && (
+        <Card className="border-destructive/30 bg-destructive/5">
+          <CardContent className="py-16 text-center">
+            <p className="font-medium text-destructive">Falha ao carregar o catálogo</p>
+            <p className="text-xs text-muted-foreground mt-1">A consulta falhou (não é "sem dados"). Recarregue a página ou verifique sua sessão.</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {selectedProjectId && !loadingEntries && !entriesError && entries && entries.length === 0 && (
         <Card>
           <CardContent className="py-16 text-center">
             <FileCode className="h-10 w-10 text-muted-foreground mx-auto mb-3" />

@@ -416,7 +416,7 @@ export default function CatalogPage() {
     projectIdParam || ""
   );
 
-  const { data: entries, isLoading: loadingEntries } = useQuery<CatalogEntry[]>({
+  const { data: entries, isLoading: loadingEntries, isError: entriesError } = useQuery<CatalogEntry[]>({
     queryKey: ["/api/catalog-entries", selectedProjectId],
     enabled: !!selectedProjectId,
   });
@@ -816,6 +816,12 @@ export default function CatalogPage() {
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <FileSearch className="h-12 w-12 text-muted-foreground mb-4" />
               <p className="text-sm text-muted-foreground">Select a project to view its catalog</p>
+            </div>
+          ) : entriesError ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <AlertTriangle className="h-12 w-12 text-destructive mb-4" />
+              <p className="text-sm font-medium text-destructive">Falha ao carregar o catálogo</p>
+              <p className="text-xs text-muted-foreground mt-1">A consulta falhou (não é "sem dados"). Recarregue ou verifique sua sessão.</p>
             </div>
           ) : filteredEntries.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
