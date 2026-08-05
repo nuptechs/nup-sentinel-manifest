@@ -30,10 +30,16 @@ export interface AdrMatch {
 // Um "símbolo forte" = identificador CamelCase com ≥2 segmentos OU PascalCase de
 // ≥4 letras (Contract, ContractGuarantee, ServiceClass, SlaIndicator). Curtos e
 // palavras comuns ficam de fora pra não gerar ruído.
-const STRONG_SYMBOL = /\b([A-Z][a-z]+(?:[A-Z][a-z0-9]+)+|[A-Z][a-z]{3,})\b/g;
+// Fonte da regex (nova instância a cada uso — regex `g` guarda `lastIndex`, então
+// compartilhar o objeto entre chamadas é perigoso). Reusado por adr-tacit-links.
+export const STRONG_SYMBOL_SRC = "\\b([A-Z][a-z]+(?:[A-Z][a-z0-9]+)+|[A-Z][a-z]{3,})\\b";
+export function strongSymbolRegex(): RegExp {
+  return new RegExp(STRONG_SYMBOL_SRC, "g");
+}
+const STRONG_SYMBOL = strongSymbolRegex();
 
 // Stopwords PascalCase que aparecem em prosa de ADR e NÃO são símbolos de domínio.
-const SYMBOL_STOPWORDS = new Set<string>([
+export const SYMBOL_STOPWORDS = new Set<string>([
   "Status", "Data", "Decisores", "Aceita", "Proposta", "Rejeitada", "Onda",
   "Contexto", "Decisao", "Decisão", "Consequencias", "Consequências", "Lei",
   "Claude", "Yuri", "Opus", "Sonnet", "Anthropic", "Este", "Esta", "Quando",
@@ -42,9 +48,10 @@ const SYMBOL_STOPWORDS = new Set<string>([
   "Reuso", "Crava", "Doc", "Fase", "Fases", "Roadmap", "Anexo", "Artigo",
 ]);
 
-function extractSymbols(text: string): Set<string> {
+export function extractSymbols(text: string): Set<string> {
   const out = new Set<string>();
-  Array.from(text.matchAll(STRONG_SYMBOL)).forEach((g) => {
+  const re = strongSymbolRegex();
+  Array.from(text.matchAll(re)).forEach((g) => {
     const s = g[1];
     if (!SYMBOL_STOPWORDS.has(s)) out.add(s);
   });

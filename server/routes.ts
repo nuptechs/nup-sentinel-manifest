@@ -1584,6 +1584,46 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-0028 P5 (Mapa Epistêmico — fundação) — conhecimento tácito: ligações
+  // ADR ↔ símbolo com proveniência (a linha da ADR que cita). Responde "qual
+  // decisão governa este código?". Fonte durável = snapshot.manifestJson.adrLinks
+  // (populado no saveSnapshot). Filtros opcionais: ?symbol=Foo (por símbolo
+  // citado) e ?adr=ADR-063 (por decisão). Snapshot antigo/sem ADR → 404 nomeado.
+  app.get("/api/projects/:projectId/adr-links", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const adrLinks = manifest.adrLinks;
+      if (!adrLinks || !Array.isArray(adrLinks.links)) {
+        return res.status(404).json({
+          message: "This snapshot has no ADR↔symbol links — send the docs/adr/*.md and re-run the analysis.",
+          code: "ADR_LINKS_NOT_IN_SNAPSHOT",
+        });
+      }
+      const symbolFilter = typeof req.query.symbol === "string" ? req.query.symbol.trim() : "";
+      const adrFilter = typeof req.query.adr === "string" ? req.query.adr.trim().toUpperCase() : "";
+      let links = adrLinks.links as any[];
+      if (symbolFilter) links = links.filter((l) => l.targetSymbol === symbolFilter);
+      if (adrFilter) links = links.filter((l) => String(l.adrId).toUpperCase() === adrFilter);
+      res.json({
+        projectId,
+        analysisRunId: snapshots[0].analysisRunId,
+        stats: adrLinks.stats ?? null,
+        truncated: adrLinks.truncated ?? false,
+        count: links.length,
+        links,
+      });
+    } catch (error) {
+      console.error("Error serving ADR tacit links:", error);
+      res.status(500).json({ message: "Failed to load ADR links" });
+    }
+  });
+
   // ADR-070 Onda 2 / Propósito 2 — impacto de um DIFF/entrega: "o fornecedor
   // entregou estes N arquivos, o que foi impactado?". Agrega o blast radius de
   // cada arquivo mudado. Body: { files: string[] }.
