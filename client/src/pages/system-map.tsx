@@ -58,6 +58,16 @@ import {
   RefreshCw,
   LogIn,
 } from "lucide-react";
+import {
+  type EdgeEvidence,
+  type EvidenceMethod,
+  type GraphCoverage,
+  evidenceMethodOf,
+  strongestEvidence,
+  hasEvidenceData,
+  EvidenceLegend,
+  CoverageBadge,
+} from "./system-map-evidence";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 cytoscape.use(elk as any);
@@ -92,6 +102,8 @@ interface GraphEdge {
   /** ADR-0026 costura: aresta observada em traço + nº de traços. */
   observed?: boolean;
   count?: number;
+  /** ADR-0028 P0.3: COMO o Sentinel soube desta aresta (proveniência). */
+  evidence?: EdgeEvidence;
 }
 interface GraphPayload {
   projectId: number;
@@ -102,6 +114,8 @@ interface GraphPayload {
   byStack?: Record<string, number>;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** ADR-0028 P0.3: censo de cobertura — o que o mapa NÃO observou. */
+  coverage?: GraphCoverage;
 }
 interface Project {
   id: number;
@@ -444,16 +458,29 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
   // Arestas agregadas por (from,to,type) com contagem → espessura (padrão
   // Sourcetrail: troca N linhas por 1 rotulada). Só entre nós visíveis.
   const aggEdges = useMemo(() => {
-    const map = new Map<string, { source: string; target: string; rel: EdgeRelation; weight: number }>();
+    const map = new Map<
+      string,
+      { source: string; target: string; rel: EdgeRelation; weight: number; methods: EvidenceMethod[] }
+    >();
     for (const e of payload.edges) {
       if (!scopedIds.has(e.fromNode) || !scopedIds.has(e.toNode)) continue;
       const key = `${e.fromNode}|${e.toNode}|${e.relationType}`;
+      const method = evidenceMethodOf(e);
       const prev = map.get(key);
-      if (prev) prev.weight += 1;
-      else map.set(key, { source: e.fromNode, target: e.toNode, rel: e.relationType, weight: 1 });
+      if (prev) {
+        prev.weight += 1;
+        prev.methods.push(method);
+      } else {
+        map.set(key, { source: e.fromNode, target: e.toNode, rel: e.relationType, weight: 1, methods: [method] });
+      }
     }
-    return Array.from(map.values());
+    // O encoding de uma aresta agregada usa a evidência MAIS FORTE que a compõe.
+    return Array.from(map.values()).map((e) => ({ ...e, method: strongestEvidence(e.methods) }));
   }, [payload, scopedIds]);
+
+  // O backend (P0.1) anexou o eixo de evidência? Só então estilizamos por
+  // método e mostramos a legenda de proveniência — senão, render atual intacto.
+  const showEvidence = useMemo(() => hasEvidenceData(payload.edges), [payload]);
 
   const maxInDegree = useMemo(
     () => Math.max(1, ...payload.nodes.map((n) => n.inDegree)),
@@ -490,6 +517,9 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
             rel: e.rel,
             weight: e.weight,
             width: Math.min(6, 1 + Math.log2(e.weight + 1)),
+            // Só entra no dado quando há evidência — sem isso o seletor
+            // `edge[method]` não casa e o encoding por `rel` segue intacto.
+            ...(showEvidence ? { method: e.method } : {}),
           },
         })),
       },
@@ -552,6 +582,16 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
         })),
         // aresta OBSERVADA (tráfego real): tracejada — proveniência distinta do estático
         { selector: `edge[rel = "RUNTIME_OBSERVED"]`, style: { "line-style": "dashed", "line-dash-pattern": [6, 3] } },
+        // ADR-0028 P0.3: estilo por MÉTODO DE EVIDÊNCIA (proveniência da aresta).
+        // Aplicado DEPOIS do `rel` (herda a cor da relação) e só quando o backend
+        // emitiu `evidence` — sem isso `method` nem existe no dado (degradação
+        // graciosa). O mapa passa a MOSTRAR o que não sabe: não-resolvido =
+        // tracejado, conjectura de IA = pontilhado, desconhecido = cinza esmaecido.
+        { selector: `edge[method = "STATIC_PROVEN"]`, style: { "line-style": "solid" } },
+        { selector: `edge[method = "STATIC_UNRESOLVED"]`, style: { "line-style": "dashed", "line-dash-pattern": [4, 4] } },
+        { selector: `edge[method = "LLM_CONJECTURED"]`, style: { "line-style": "dotted" } },
+        { selector: `edge[method = "RUNTIME_OBSERVED"]`, style: { "line-style": "solid", opacity: 0.85 } },
+        { selector: `edge[method = "UNKNOWN"]`, style: { "line-color": "#94a3b8", "target-arrow-color": "#94a3b8", opacity: 0.22 } },
         // estados de ênfase
         { selector: ".faded", style: { opacity: 0.08 } },
         { selector: "node.hl", style: { "border-color": "#0f172a", "border-width": 3 } },
@@ -754,6 +794,9 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
                 : `${scopedNodes.length} de ${payload.counts.nodes} nós`}
             </Badge>
             <Badge variant="secondary">{aggEdges.length} arestas</Badge>
+            {/* ADR-0028 P0.3: a revelação honesta da cobertura. Auto-degrada
+                (não renderiza) quando o backend não emite `coverage`. */}
+            <CoverageBadge coverage={payload.coverage} />
             {payload.truncated && (
               <Badge variant="destructive" className="gap-1">
                 <AlertTriangle className="h-3 w-3" /> truncado
@@ -789,6 +832,13 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
               <span className="inline-block h-2 w-2 rounded-full border-2 border-red-500" />
               <span>anel vermelho = sensível/risco</span>
             </div>
+            {/* ADR-0028 P0.3: proveniência por aresta — só quando o backend
+                (P0.1) a emite; sem isso a legenda de método nem aparece. */}
+            {showEvidence && (
+              <div className="mt-2 border-t pt-2">
+                <EvidenceLegend />
+              </div>
+            )}
           </div>
         </Card>
       </div>
