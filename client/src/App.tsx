@@ -1,4 +1,5 @@
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation } from "wouter";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -20,7 +21,11 @@ import ConventionsPage from "@/pages/conventions";
 import SecurityAuditPage from "@/pages/security-audit";
 
 function Router() {
+  // Boundary chaveado por rota: um crash numa tela vira card localizado, e
+  // navegar para outra rota remonta o boundary (limpa o erro).
+  const [location] = useLocation();
   return (
+    <ErrorBoundary key={location}>
     <Switch>
       <Route path="/" component={Dashboard} />
       <Route path="/upload" component={UploadPage} />
@@ -34,6 +39,7 @@ function Router() {
       <Route path="/settings" component={SettingsPage} />
       <Route component={NotFound} />
     </Switch>
+    </ErrorBoundary>
   );
 }
 
