@@ -9,6 +9,7 @@ import { classifyEntriesDeterministic } from "../analyzers/deterministic-classif
 import { detectArchitecture } from "../analyzers/architecture-detector";
 import { generateManifest } from "../generators/manifest-generator";
 import { buildAdrIndex } from "../analyzers/adr-retrieval";
+import { buildAdrLinks, knownSymbolsFromSystemGraph } from "../analyzers/adr-tacit-links";
 import { computeFileHashes, detectChanges } from "./change-detector";
 import type { FileHash } from "./change-detector";
 import type { InsertCatalogEntry } from "@shared/schema";
@@ -663,11 +664,26 @@ export class AnalysisPipeline {
       }
       if (systemGraph) systemGraph.inventory = feInventory;
 
+      // ADR-0028 P5 (Mapa Epistêmico — fundação) — conhecimento tácito: liga as
+      // decisões (ADRs) aos SÍMBOLOS que citam, com proveniência (a linha da ADR
+      // que cita), pra o mapa responder "qual decisão governa este código?".
+      // Grada a confiança contra os símbolos conhecidos do grafo (STATIC_PROVEN
+      // quando a classe existe; STATIC_UNRESOLVED quando não). Determinístico e
+      // aditivo — só grava quando há ligações (snapshot antigo/sem ADR = ausente).
+      const ADR_LINKS_CAP = 4000;
+      const knownSymbols = knownSymbolsFromSystemGraph(systemGraph);
+      const adrLinksResult = buildAdrLinks(fileData || [], knownSymbols);
+      const adrLinks =
+        adrLinksResult.links.length > ADR_LINKS_CAP
+          ? { ...adrLinksResult, links: adrLinksResult.links.slice(0, ADR_LINKS_CAP), truncated: true }
+          : adrLinksResult;
+
       const enrichedManifest = {
         ...manifest,
         ...(allEntitiesFromGraph.length > 0 ? { allEntitiesFromGraph } : {}),
         ...(impactEndpoints.length > 0 ? { impactEndpoints } : {}),
         ...(adrIndex.length > 0 ? { adrIndex } : {}),
+        ...(adrLinks.links.length > 0 ? { adrLinks } : {}),
         ...(systemGraph ? { systemGraph } : {}),
       };
 
