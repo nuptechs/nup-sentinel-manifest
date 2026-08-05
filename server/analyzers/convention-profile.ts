@@ -79,6 +79,17 @@ export interface ConventionProfile {
   /** Proveniência do perfil (auditoria); livre na Onda 1. */
   source?: string;
   updatedAt?: string;
+  /**
+   * Override de overlay runtime POR PROJETO (ADR-0028 P1.1 / ADR-0029).
+   * Lido por `readProjectRuntimeOverlay` (runtime-overlay.ts). O parser
+   * PRESERVA este bag (o read-side foi adicionado no P1.1, mas o write-side
+   * o descartava — este é o conserto). Validação leve; o reader é defensivo.
+   */
+  runtimeOverlay?: {
+    services?: string | string[];
+    gatewayService?: string;
+    [k: string]: unknown;
+  };
 }
 
 const KINDS: ReadonlySet<string> = new Set([
@@ -187,11 +198,32 @@ export function parseConventionProfile(raw: unknown): ConventionProfile {
     };
   });
 
+  // ADR-0028 P1.1 / ADR-0029: preserva o bag runtimeOverlay (write-side).
+  // Fail-closed leve: se presente, deve ser objeto e services (se houver)
+  // string ou array de strings. O reader (runtime-overlay.ts) é defensivo.
+  let runtimeOverlay: ConventionProfile["runtimeOverlay"] | undefined;
+  if (o.runtimeOverlay != null) {
+    const ro = o.runtimeOverlay;
+    if (typeof ro !== "object" || Array.isArray(ro)) {
+      throw new Error("runtimeOverlay deve ser um objeto");
+    }
+    const svc = (ro as Record<string, unknown>).services;
+    if (
+      svc !== undefined &&
+      typeof svc !== "string" &&
+      !(Array.isArray(svc) && svc.every((s) => typeof s === "string"))
+    ) {
+      throw new Error("runtimeOverlay.services deve ser string ou array de strings");
+    }
+    runtimeOverlay = ro as ConventionProfile["runtimeOverlay"];
+  }
+
   return {
     version: 1,
     rules,
     ...(typeof o.source === "string" ? { source: o.source } : {}),
     ...(typeof o.updatedAt === "string" ? { updatedAt: o.updatedAt } : {}),
+    ...(runtimeOverlay ? { runtimeOverlay } : {}),
   };
 }
 

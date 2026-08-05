@@ -73,6 +73,20 @@ describe("parseConventionProfile — fail-closed", () => {
     );
     assert.throws(() => parseConventionProfile({ version: 2, rules: [] }), /version/);
   });
+
+  // ADR-0028 P1.1 / ADR-0029: write-side do runtimeOverlay (o read-side já
+  // existia; o parser descartava o bag — este é o conserto).
+  it("PRESERVA runtimeOverlay (services array/CSV) e valida fail-closed", () => {
+    const p = parseConventionProfile({ version: 1, rules: [], runtimeOverlay: { services: ["nupidentity"] } });
+    assert.deepEqual(p.runtimeOverlay?.services, ["nupidentity"]);
+    const p2 = parseConventionProfile({ version: 1, rules: [], runtimeOverlay: { services: "a,b", gatewayService: "a" } });
+    assert.equal(p2.runtimeOverlay?.services, "a,b");
+    // ausente ⇒ campo não existe (byte-a-byte com o comportamento anterior)
+    assert.equal(parseConventionProfile({ version: 1, rules: [] }).runtimeOverlay, undefined);
+    // fail-closed
+    assert.throws(() => parseConventionProfile({ version: 1, rules: [], runtimeOverlay: [] as any }), /runtimeOverlay deve ser um objeto/);
+    assert.throws(() => parseConventionProfile({ version: 1, rules: [], runtimeOverlay: { services: 123 } as any }), /runtimeOverlay.services/);
+  });
 });
 
 describe("RegexAnchoredMatcher — anti-superalarme herdado + contagem exata", () => {
