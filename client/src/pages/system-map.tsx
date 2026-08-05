@@ -134,6 +134,14 @@ const REL: Record<EdgeRelation, { label: string; color: string }> = {
   RUNTIME_OBSERVED: { label: "observado (tráfego real)", color: "#f43f5e" },
 };
 
+// Acessos seguros aos mapas indexados por dado da API: um `type`/`relationType`
+// fora do union (enum novo no Sentinel, snapshot de outro stack) não pode
+// crashar o painel — cai num fallback neutro.
+const LAYER_FALLBACK = { label: "Nó", color: "#94a3b8", shape: "ellipse", icon: Shapes };
+const REL_FALLBACK = { label: "relaciona", color: "#94a3b8" };
+const layerOf = (t: string) => LAYER[t as NodeType] ?? LAYER_FALLBACK;
+const relOf = (r: string) => REL[r as EdgeRelation] ?? REL_FALLBACK;
+
 function labelOf(n: GraphNode): string {
   return n.className || n.qualifiedSignature || n.id;
 }
@@ -793,16 +801,16 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
                   {(() => {
-                    const Icon = LAYER[selected.type].icon;
-                    return <Icon className="h-4 w-4 shrink-0" style={{ color: LAYER[selected.type].color }} />;
+                    const Icon = layerOf(selected.type).icon;
+                    return <Icon className="h-4 w-4 shrink-0" style={{ color: layerOf(selected.type).color }} />;
                   })()}
                   <CardTitle className="truncate text-base" title={labelOf(selected)}>
                     {labelOf(selected)}
                   </CardTitle>
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-1">
-                  <Badge variant="outline" style={{ borderColor: LAYER[selected.type].color }}>
-                    {LAYER[selected.type].label}
+                  <Badge variant="outline" style={{ borderColor: layerOf(selected.type).color }}>
+                    {layerOf(selected.type).label}
                   </Badge>
                   {selected.sensitive && (
                     <Badge variant="destructive" className="gap-1">
@@ -897,20 +905,20 @@ function IsolateList({
       ) : (
         <ul className="space-y-1">
           {items.slice(0, 40).map(({ node, rel }, i) => {
-            const Icon = LAYER[node.type].icon;
+            const Icon = layerOf(node.type).icon;
             return (
               <li key={`${node.id}-${i}`}>
                 <button
                   className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-muted"
                   onClick={() => onPick(node.id)}
                 >
-                  <Icon className="h-3 w-3 shrink-0" style={{ color: LAYER[node.type].color }} />
+                  <Icon className="h-3 w-3 shrink-0" style={{ color: layerOf(node.type).color }} />
                   <span className="truncate">{labelOf(node)}</span>
                   <span
                     className="ml-auto shrink-0 rounded px-1 text-[10px]"
-                    style={{ color: REL[rel].color }}
+                    style={{ color: relOf(rel).color }}
                   >
-                    {REL[rel].label}
+                    {relOf(rel).label}
                   </span>
                 </button>
               </li>
