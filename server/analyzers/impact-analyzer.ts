@@ -20,6 +20,8 @@ import { renderCrossRepoSection } from "./cross-repo-consumers";
 import { computeDeliveryRisk, type DeliveryRiskReport } from "./delivery-risk";
 import { computeFunctionalImpact, type FunctionalImpactReport } from "./functional-impact";
 import type { DomainConcept } from "./domain-ontology";
+import { shapeSystemGraph, type ShapedGraph } from "./system-graph";
+import { computeImpactConfidence, type ImpactConfidence, type AffectedNode } from "./impact-confidence";
 
 export interface ImpactedEndpoint {
   path: string;
@@ -56,6 +58,14 @@ export interface ImpactReport {
   impactedEndpoints: ImpactedEndpoint[];
   impactedScreens: ImpactedScreen[];
   entitiesTouched: string[];
+  /**
+   * ADR-0028 P4 — camada de CONFIANÇA + revelação de pontos cegos, colhida do
+   * contrato epistêmico P0.1 (`shapeSystemGraph`: toda aresta tem
+   * `evidence:{method,confidence}` + o grafo tem `coverage`). Aditiva: os campos
+   * acima ficam byte-a-byte; este só ENRIQUECE. Sempre presente — quando o
+   * snapshot não tem grafo/proveniência, degrada honestamente pra tudo UNKNOWN.
+   */
+  confidence: ImpactConfidence;
 }
 
 const MIN_SYMBOL_LEN = 3;
@@ -149,6 +159,7 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
     impactedEndpoints: [],
     impactedScreens: [],
     entitiesTouched: [],
+    confidence: computeImpactConfidence(null, symbol, []),
   };
   if (sym.length < MIN_SYMBOL_LEN || !manifest) return empty;
 
@@ -252,6 +263,16 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
   }
 
   const found = impactedEndpoints.length > 0 || impactedScreens.length > 0 || entities.size > 0;
+  const entitiesTouched = Array.from(entities).sort();
+
+  // ADR-0028 P4 — colhe o contrato epistêmico do systemGraph (P0.1). O grafo cru
+  // é shaped aqui (puro) para materializar `evidence`/`coverage` por aresta. Quando
+  // o snapshot não tem `systemGraph`, `shaped` é null e a confiança degrada pra
+  // tudo UNKNOWN a partir do raio do manifest — nunca crasha, nunca finge certeza.
+  const shaped = shapeSnapshotGraph(manifest);
+  const fallbackAffected = affectedFromReport(impactedEndpoints, impactedScreens, entitiesTouched);
+  const confidence = computeImpactConfidence(shaped, symbol, fallbackAffected);
+
   return {
     symbol,
     found,
@@ -260,8 +281,48 @@ export function computeImpact(manifest: any, symbol: string): ImpactReport {
     summary: { endpoints: impactedEndpoints.length, screens: impactedScreens.length, entities: entities.size },
     impactedEndpoints,
     impactedScreens,
-    entitiesTouched: Array.from(entities).sort(),
+    entitiesTouched,
+    confidence,
   };
+}
+
+/**
+ * Shape do `systemGraph` cru do snapshot (P0.1) — class-level (o nível de
+ * arquitetura). Retorna null quando o snapshot precede o grafo (compat com
+ * snapshots antigos, sem crashar). Puro.
+ */
+function shapeSnapshotGraph(manifest: any): ShapedGraph | null {
+  const sg = manifest?.systemGraph;
+  if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) return null;
+  try {
+    return shapeSystemGraph(sg, "class");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Converte o raio do manifest (endpoints/telas/entidades) em nós afetados para o
+ * modo DEGRADADO (grafo ausente ou símbolo fora do grafo de evidência). O
+ * `weakestMethod`/`confidence` são preenchidos por `computeImpactConfidence`
+ * (tudo UNKNOWN) — aqui só carregamos id/label/type/depth.
+ */
+function affectedFromReport(
+  endpoints: ImpactedEndpoint[],
+  screens: ImpactedScreen[],
+  entities: string[],
+): AffectedNode[] {
+  const out: AffectedNode[] = [];
+  for (const e of endpoints) {
+    out.push({ id: `EP:${e.method} ${e.path}`, label: `${e.method} ${e.path}`, type: "ENDPOINT", weakestMethod: "UNKNOWN", confidence: 0.2, depth: 1 });
+  }
+  for (const s of screens) {
+    out.push({ id: `SCREEN:${s.name}`, label: s.name, type: "SCREEN", weakestMethod: "UNKNOWN", confidence: 0.2, depth: 1 });
+  }
+  for (const ent of entities) {
+    out.push({ id: `ENTITY:${ent}`, label: ent, type: "ENTITY", weakestMethod: "UNKNOWN", confidence: 0.2, depth: 1 });
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────
