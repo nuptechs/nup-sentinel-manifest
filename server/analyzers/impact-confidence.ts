@@ -117,6 +117,26 @@ function nodeMatchesSubstring(node: { id: string; className?: string }, sym: str
   return lc(node.className).includes(sym) || lc(shortName(node.id)).includes(sym);
 }
 
+/**
+ * Resolve os nós-semente de um símbolo no grafo (exato; substring como fallback).
+ * Extraído de `computeImpactConfidence` para ser reusado pelo subgrafo de
+ * narrativa (ADR-0033 P4.1) — MESMA lógica de casamento, fonte única. Puro.
+ */
+export function resolveSymbolSeeds(
+  graph: { nodes?: { id: string; className?: string; methodName?: string }[] } | null | undefined,
+  symbol: string,
+): Set<string> {
+  const sym = (symbol || "").trim().toLowerCase();
+  const seeds = new Set<string>();
+  const nodes = graph?.nodes;
+  if (!Array.isArray(nodes)) return seeds;
+  for (const n of nodes) if (nodeMatchesExact(n, sym)) seeds.add(n.id);
+  if (seeds.size === 0) {
+    for (const n of nodes) if (nodeMatchesSubstring(n, sym)) seeds.add(n.id);
+  }
+  return seeds;
+}
+
 /** Motivo humano de um blind spot conforme o método. */
 function blindReason(method: EvidenceMethod): string {
   if (method === "STATIC_UNRESOLVED") {
@@ -209,11 +229,7 @@ export function computeImpactConfidence(
       : g.edges.some((e) => (e.evidence?.method ?? "UNKNOWN") !== "UNKNOWN");
 
   // 1) resolve o símbolo para nós-semente (exato; substring como fallback).
-  let seeds = new Set<string>();
-  for (const n of g.nodes) if (nodeMatchesExact(n, sym)) seeds.add(n.id);
-  if (seeds.size === 0) {
-    for (const n of g.nodes) if (nodeMatchesSubstring(n, sym)) seeds.add(n.id);
-  }
+  const seeds = resolveSymbolSeeds(g, sym);
 
   // Símbolo não localizado no grafo → raio vem do manifest, evidência indisponível
   // para ESTES alvos (honesto): possíveis/UNKNOWN, mas o censo do grafo é ecoado.
