@@ -25,6 +25,7 @@ export type StatementKind =
   | "partition" // abertura garante×possível×cego — determinística, da partição
   | "edge" // frase sobre UMA aresta verificada — sujeita ao gate de `edgeId`
   | "blindspot" // fecho: o que NÃO sei — determinístico, dos blindSpots
+  | "refuted" // fecho: o que o laço ativo REFUTOU — determinístico (ADR-0033 P4.5)
   | "coverage" // censo do grafo — determinístico
   | "abstain"; // subgrafo vazio — abstenção honesta
 
@@ -175,6 +176,28 @@ function blindSpotStatement(sub: NarrativeSubgraph): NarrativeStatement | null {
   };
 }
 
+/**
+ * Fecho de REFUTAÇÃO (ADR-0033 P4.5). Determinístico, dos `refutedEdges` reais.
+ * O laço ativo (P3) dirigiu tráfego e não confirmou estas arestas que o estático
+ * previu — a narrativa as NOMEIA, jamais as afirma como fato. Distingue o grau
+ * honesto: provável-morta × não-confirmada-pelo-robô (UNKNOWN honesto).
+ */
+function refutedStatement(sub: NarrativeSubgraph): NarrativeStatement | null {
+  if (sub.refutedCount <= 0) return null;
+  const dead = sub.refutedEdges.filter((r) => r.subtype === "REFUTED_LIKELY_DEAD").length;
+  const unreach = sub.refutedCount - dead;
+  const grade: string[] = [];
+  if (dead > 0) grade.push(`${dead} provável(is) morta(s)/falso-positivo`);
+  if (unreach > 0) grade.push(`${unreach} não-confirmada(s) pelo robô (UNKNOWN honesto)`);
+  const sample = sub.refutedEdges.slice(0, 3).map((r) => `${r.fromLabel}→${r.toLabel}`);
+  const more = sub.refutedCount > sample.length ? ` (+${sub.refutedCount - sample.length} outra(s))` : "";
+  return {
+    kind: "refuted",
+    text: `O laço ativo REFUTOU ${sub.refutedCount} aresta(s) que o estático desenhou (${grade.join(", ")}): ${sample.join(", ")}${more}. NÃO as afirmo — o estático as previu, o runtime dirigido não as confirmou.`,
+    origin: "deterministic",
+  };
+}
+
 function coverageStatement(sub: NarrativeSubgraph): NarrativeStatement | null {
   if (!sub.coverage) return null;
   const pct = Math.round((sub.coverage.edges.observedRatio || 0) * 100);
@@ -213,6 +236,8 @@ export function narrate(sub: NarrativeSubgraph, edgeClaims?: EdgeClaim[] | null)
     ];
     const bs = blindSpotStatement(sub);
     if (bs) statements.push(bs);
+    const rf = refutedStatement(sub);
+    if (rf) statements.push(rf);
     return {
       symbol: sub.symbol,
       abstained: true,
@@ -254,9 +279,11 @@ export function narrate(sub: NarrativeSubgraph, edgeClaims?: EdgeClaim[] | null)
     }
   }
 
-  // 3) fecho de ponto-cego (determinístico) + censo.
+  // 3) fecho de ponto-cego + refutação (determinísticos) + censo.
   const bs = blindSpotStatement(sub);
   if (bs) statements.push(bs);
+  const rf = refutedStatement(sub);
+  if (rf) statements.push(rf);
   const cov = coverageStatement(sub);
   if (cov) statements.push(cov);
 

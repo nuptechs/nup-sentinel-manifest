@@ -12,7 +12,7 @@
 // arestas — não copia nem recomputa evidência).
 // ─────────────────────────────────────────────
 
-import type { NarrativeSubgraph, NarrativeEdge, SubgraphAdrLink } from "./narrative-subgraph";
+import type { NarrativeSubgraph, NarrativeEdge, RefutedNarrativeEdge, SubgraphAdrLink, EdgeFacets } from "./narrative-subgraph";
 import type { BlindSpotEdge } from "./impact-confidence";
 
 export type Persona = "dev" | "security" | "data" | "architect" | "business" | "impact";
@@ -29,6 +29,12 @@ export interface PerspectiveView {
   edges: NarrativeEdge[];
   /** blind spots relevantes à lente (nomeados, nunca fabricados). */
   blindSpots: BlindSpotEdge[];
+  /**
+   * ADR-0033 P4.5 — arestas REFUTADAS pelo laço ativo, filtradas por esta lente.
+   * NÃO são fato afirmado (o estático as previu, o robô não confirmou) — viajam
+   * junto sob a mesma preocupação para a lente ser honesta sobre elas.
+   */
+  refutedEdges: RefutedNarrativeEdge[];
   /** ADR links relevantes (só a lente `business`/decisão os surfaça). */
   adrLinks: SubgraphAdrLink[];
   /** true quando nada verificado cai sob esta lente (≠ falhou). */
@@ -51,24 +57,26 @@ const DATA_TYPES = /ENTITY|REPOSITORY|TABLE|MODEL/i;
 const DATA_RELATIONS = /READS_ENTITY|WRITES_ENTITY|READS|WRITES/i;
 const BUSINESS_TYPES = /CONTROLLER|ENDPOINT|SCREEN|ROUTE|COMPONENT|PAGE/i;
 
+// Predicados de lente sobre as FACETAS (comuns à aresta andável e à refutada —
+// o mesmo recorte de preocupação vale para ambas).
 /** A aresta toca segurança? (nó sensível OU tipo de auth/permissão). */
-function touchesSecurity(e: NarrativeEdge): boolean {
+function touchesSecurity(e: EdgeFacets): boolean {
   return e.fromSensitive || e.toSensitive || SENSITIVE_TYPES.test(e.fromType) || SENSITIVE_TYPES.test(e.toType);
 }
-function touchesData(e: NarrativeEdge): boolean {
+function touchesData(e: EdgeFacets): boolean {
   return DATA_TYPES.test(e.fromType) || DATA_TYPES.test(e.toType) || DATA_RELATIONS.test(e.relationType);
 }
 /** Cruza camada ou stack? (aresta de fronteira arquitetural). */
-function crossesBoundary(e: NarrativeEdge): boolean {
+function crossesBoundary(e: EdgeFacets): boolean {
   const layerCross = !!e.fromLayer && !!e.toLayer && e.fromLayer !== e.toLayer;
   const stackCross = !!e.fromStack && !!e.toStack && e.fromStack !== e.toStack;
   return layerCross || stackCross;
 }
-function touchesBusiness(e: NarrativeEdge): boolean {
+function touchesBusiness(e: EdgeFacets): boolean {
   return BUSINESS_TYPES.test(e.fromType) || BUSINESS_TYPES.test(e.toType);
 }
 
-function edgeFilterFor(persona: Persona): (e: NarrativeEdge) => boolean {
+function edgeFilterFor(persona: Persona): (e: EdgeFacets) => boolean {
   switch (persona) {
     case "security":
       return touchesSecurity;
@@ -108,16 +116,22 @@ function blindSpotsFor(persona: Persona, blindSpots: BlindSpotEdge[]): BlindSpot
  */
 export function projectPerspective(sub: NarrativeSubgraph, persona: Persona): PerspectiveView {
   const meta = LABELS[persona];
-  const edges = sub.edges.filter(edgeFilterFor(persona));
+  const lens = edgeFilterFor(persona);
+  const edges = sub.edges.filter(lens);
+  const refutedEdges = sub.refutedEdges.filter(lens); // P4.5 — mesma lente, arestas refutadas
   const blindSpots = blindSpotsFor(persona, sub.blindSpots);
   const adrLinks = persona === "business" ? sub.adrLinks : [];
-  const empty = edges.length === 0 && blindSpots.length === 0 && adrLinks.length === 0;
+  // "empty" = NADA verificado sob a lente. Refutada NÃO conta como verificado
+  // (é ausência de prova, não prova) — mas se só há refutada/cego, a lente
+  // ainda tem o que mostrar, então não é vazia.
+  const empty = edges.length === 0 && blindSpots.length === 0 && refutedEdges.length === 0 && adrLinks.length === 0;
   return {
     persona,
     label: meta.label,
     focus: meta.focus,
     edges,
     blindSpots,
+    refutedEdges,
     adrLinks,
     empty,
     ...(empty ? { note: `Nada verificado sob a lente "${meta.label}" para "${sub.symbol}" (≠ falhou — nenhuma aresta verificada casa esta preocupação aqui).` } : {}),

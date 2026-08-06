@@ -1613,6 +1613,8 @@ export async function registerRoutes(
           edgeCount: sub.edges.length,
           blindSpots: sub.blindSpots,
           blindSpotCount: sub.blindSpotCount,
+          refutedEdges: sub.refutedEdges, // ADR-0033 P4.5 — refutadas pelo laço ativo (P3)
+          refutedCount: sub.refutedCount,
           proven: sub.proven,
           possible: sub.possible,
           adrLinks: sub.adrLinks,
