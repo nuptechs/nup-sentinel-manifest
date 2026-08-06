@@ -43,13 +43,24 @@ dependência concreta, dispatch dinâmico, `import()` dinâmico, reflexão,
 higher-order/event-bus. **PROVEN (estático) + OBSERVED (runtime) convergem** —
 nunca fingir PROVEN onde só há candidato.
 
-## O motor de agregação (P2.2→P2.5, ADR-0031 — IMPLEMENTADO)
-Estas arestas são **símbolo→símbolo**. O **system-graph** do Manifest é no nível
-de **serviço/endpoint/entidade**. O **motor de agregação** (ADR-0031,
-`server/analyzers/scip-aggregate.ts`) faz a ponte: junta símbolo→nó-de-sistema
-por **arquivo** e mescla as arestas provadas no `systemGraph` com
+## O motor de agregação (P2.2→P2.5, ADR-0031 — IMPLEMENTADO · A5: granularidade de FUNÇÃO)
+Estas arestas são **símbolo→símbolo** (função→função). O **motor de agregação**
+(ADR-0031, `server/analyzers/scip-aggregate.ts`) faz a ponte: junta símbolo→
+nó-de-sistema e mescla as arestas provadas no `systemGraph` com
 `resolution:'compiler'`/'interface-impl' — que o `classifyEdgeEvidence`
-(`system-graph.ts:210`) já classifica como `STATIC_PROVEN`.
+(`system-graph.ts:210`) já classifica como `STATIC_PROVEN`, sem tocar a
+classificação/rollup/censo.
+
+**A5 — granularidade de FUNÇÃO.** A junção original casava símbolo→nó por
+**arquivo**, colapsando a agregação a arquivo→arquivo: das 7.327 arestas do
+NuPIdentify, 138 caíam como "intra-nó" (duas funções do MESMO arquivo,
+indistinguíveis em `node:<file>`) e só 14 pares arquivo→arquivo sobravam. Agora
+o nó-módulo `node:<file>` ganha **sub-nós de FUNÇÃO** `node:<file>::<fn>` (o
+símbolo SCIP embute arquivo E função) e a agregação resolve **função→função**.
+Os sub-nós são **paren-free** por construção (o sufixo de chamada `().` do SCIP
+é removido) → o `classKeyOf` (`system-graph.ts`) os trata **atômicos** sem
+qualquer mudança de código lá. Refina só o que JÁ é arquitetura: sub-nó só
+nasce sob um nó-MÓDULO existente (§5 — nunca inventa nó para arquivo órfão).
 
 ### Pipeline completo (CI do repo-alvo)
 ```
@@ -61,11 +72,13 @@ curl -X POST "$MANIFEST_URL/api/projects/$PROJECT_ID/scip-edges" \
 ```
 O `POST /api/projects/:id/scip-edges` guarda as arestas no store lateral
 (`projects.scipEdges`, idempotente) e o `GET /graph` as agrega/mescla **na
-leitura** (fail-soft: sem POST, byte-a-byte). A agregação é por **arquivo** —
+leitura** (fail-soft: sem POST, byte-a-byte). A agregação é por **função** —
 símbolo cujo arquivo não casa nó (util puro) é descartado (nunca inventa nó);
-`interface-impl` vira K arestas; intra-nó é descartado. O muro de Rice permanece
-(§ acima): o dinâmico fica com o `RUNTIME_OBSERVED`.
+`interface-impl` vira K arestas; auto-chamada (mesma função) é descartada. O
+muro de Rice permanece (§ acima): o dinâmico fica com o `RUNTIME_OBSERVED`.
 
-**Provado ao vivo (NuPIdentify, projeto 38):** `STATIC_PROVEN` do system-graph
-saiu de **0 → 14** (`compiler`; rotas→middleware→services→auth), 9 arestas
-heurísticas promovidas + 5 novas.
+**Provado ao vivo (NuPIdentify, projeto 38):** com a agregação por **arquivo**
+o `STATIC_PROVEN` saiu de **0 → 14**; com a granularidade de **função** (A5)
+sobe para **165** (`compiler`; as 138 chamadas função→função do mesmo arquivo —
+antes descartadas como intra-nó — passam a contar, mais os pares cross-módulo
+abertos por função). 147 sub-nós de função materializados sob os 34 módulos.

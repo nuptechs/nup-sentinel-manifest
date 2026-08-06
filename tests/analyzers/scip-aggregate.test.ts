@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   fileOfScipSymbol,
+  functionOfScipSymbol,
   buildFileNodeIndex,
   aggregateScipEdges,
   mergeScipEdges,
@@ -11,7 +12,10 @@ import { shapeSystemGraph, type RawSystemGraph } from "../../server/analyzers/sy
 
 // Símbolos reais (formato scip-typescript, verificado no index.scip do NuPIdentify).
 const SYM = {
+  // duas funções do MESMO arquivo (o caso "intra-nó" que a granularidade de
+  // FUNÇÃO recupera — antes ambas caíam em `node:<file>` e a aresta era descartada).
   tenantMiddleware: "scip-typescript npm nupidentity 1.0.0 server/middleware/`tenant.ts`/tenantMiddleware().",
+  tenantLoadClaims: "scip-typescript npm nupidentity 1.0.0 server/middleware/`tenant.ts`/loadClaims().",
   jwtVerify: "scip-typescript npm nupidentity 1.0.0 server/auth/`jwt.ts`/verifyToken().",
   tenantService: "scip-typescript npm nupidentity 1.0.0 server/services/`tenant.service.ts`/TenantService#resolve().",
   utilCn: "scip-typescript npm nupidentity 1.0.0 client/src/lib/`utils.ts`/cn().",
@@ -37,6 +41,24 @@ describe("fileOfScipSymbol", () => {
   });
 });
 
+describe("functionOfScipSymbol (A5) — arquivo + função PAREN-FREE", () => {
+  it("extrai {file, fn} de função e método (sufixo de chamada `().` removido)", () => {
+    assert.deepEqual(functionOfScipSymbol(SYM.tenantMiddleware), { file: "server/middleware/tenant.ts", fn: "tenantMiddleware" });
+    assert.deepEqual(functionOfScipSymbol(SYM.tenantService), { file: "server/services/tenant.service.ts", fn: "TenantService#resolve" });
+    assert.deepEqual(functionOfScipSymbol(SYM.utilCn), { file: "client/src/lib/utils.ts", fn: "cn" });
+  });
+  it("o `fn` NUNCA contém `(` — invariante do id de sub-nó (classKeyOf atômico)", () => {
+    for (const s of [SYM.tenantMiddleware, SYM.tenantService, SYM.utilCn, SYM.jwtVerify]) {
+      const r = functionOfScipSymbol(s)!;
+      assert.ok(!r.fn.includes("("), `fn "${r.fn}" contém (`);
+    }
+  });
+  it("retorna null para símbolos sem arquivo", () => {
+    assert.equal(functionOfScipSymbol(SYM.localScip), null);
+    assert.equal(functionOfScipSymbol(""), null);
+  });
+});
+
 // Grafo cru mínimo espelhando a forma do NuPIdentify (nós node:<file> + route + entity).
 function fixtureGraph(): RawSystemGraph {
   return {
@@ -51,12 +73,20 @@ function fixtureGraph(): RawSystemGraph {
       // arquivo com só ENTITY
       { id: "table:organizations", type: "ENTITY", className: "organizations", metadata: { sourceFile: "server/db/schema.ts", drizzleOnly: true } },
     ],
-    // aresta heurística pré-existente (node-chain do full-stack-augment): será PROMOVIDA
+    // aresta heurística pré-existente (node-chain do full-stack-augment) entre módulos.
     edges: [
       { fromNode: "node:server/middleware/tenant.ts", toNode: "node:server/services/tenant.service.ts", relationType: "CALLS", metadata: { synthetic: true, resolution: "syntactic-declared", convention: "node-chain" } },
     ],
   };
 }
+
+// ids de sub-nó de função esperados (paren-free)
+const FN = {
+  tenantMiddleware: "node:server/middleware/tenant.ts::tenantMiddleware",
+  tenantLoadClaims: "node:server/middleware/tenant.ts::loadClaims",
+  tenantResolve: "node:server/services/tenant.service.ts::TenantService#resolve",
+  jwtVerify: "node:server/auth/jwt.ts::verifyToken",
+};
 
 describe("buildFileNodeIndex — prioridade honesta (ADR-0031 §4.1)", () => {
   const idx = buildFileNodeIndex(fixtureGraph().nodes);
@@ -81,27 +111,46 @@ describe("buildFileNodeIndex — arquivo ambíguo (N rotas, sem módulo) não é
   });
 });
 
-describe("aggregateScipEdges — símbolo→nó→aresta-de-sistema", () => {
+describe("aggregateScipEdges (A5) — símbolo→FUNÇÃO→aresta-de-sistema", () => {
   const nodes = fixtureGraph().nodes;
-  it("chamada direta handler→service vira aresta de sistema compiler", () => {
+  it("chamada cross-módulo handler→service vira aresta função→função compiler", () => {
     const derived: ScipDerivedEdge[] = [{ from: SYM.tenantMiddleware, to: SYM.tenantService, kind: "CALLS", resolution: "compiler" }];
-    const { edges } = aggregateScipEdges(nodes, derived);
+    const { edges, functionNodes } = aggregateScipEdges(nodes, derived);
     assert.equal(edges.length, 1);
-    assert.deepEqual(edges[0], { fromNode: "node:server/middleware/tenant.ts", toNode: "node:server/services/tenant.service.ts", relationType: "CALLS", resolution: "compiler" });
+    assert.deepEqual(edges[0], { fromNode: FN.tenantMiddleware, toNode: FN.tenantResolve, relationType: "CALLS", resolution: "compiler" });
+    // sub-nós de função materializados, sob o módulo correto, com o arquivo
+    const ids = functionNodes.map((n) => n.id).sort();
+    assert.deepEqual(ids, [FN.tenantResolve, FN.tenantMiddleware].sort());
+    const mw = functionNodes.find((n) => n.id === FN.tenantMiddleware)!;
+    assert.equal(mw.parentModule, "node:server/middleware/tenant.ts");
+    assert.equal(mw.sourceFile, "server/middleware/tenant.ts");
+    assert.equal(mw.type, "SERVICE");
   });
+
+  it("A5 — DUAS funções do MESMO arquivo viram aresta provada (recupera o 'intra-nó')", () => {
+    // No motor por-arquivo isto era descartado como intra-nó (ambas em `node:tenant.ts`).
+    const derived: ScipDerivedEdge[] = [{ from: SYM.tenantMiddleware, to: SYM.tenantLoadClaims, resolution: "compiler" }];
+    const { edges, stats } = aggregateScipEdges(nodes, derived);
+    assert.equal(stats.intraDropped, 0);
+    assert.equal(edges.length, 1);
+    assert.deepEqual(edges[0], { fromNode: FN.tenantMiddleware, toNode: FN.tenantLoadClaims, relationType: "CALLS", resolution: "compiler" });
+  });
+
   it("símbolo órfão (arquivo sem nó) → aresta descartada", () => {
     const derived: ScipDerivedEdge[] = [{ from: SYM.utilCn, to: SYM.tenantService, resolution: "compiler" }];
     const { edges, stats } = aggregateScipEdges(nodes, derived);
     assert.equal(edges.length, 0);
     assert.equal(stats.orphanDropped, 1);
   });
-  it("intra-nó (mesmo arquivo/nó nas duas pontas) → descartada", () => {
+
+  it("auto-chamada (MESMA função nas duas pontas) → descartada", () => {
     const derived: ScipDerivedEdge[] = [{ from: SYM.tenantMiddleware, to: SYM.tenantMiddleware, resolution: "compiler" }];
     const { edges, stats } = aggregateScipEdges(nodes, derived);
     assert.equal(edges.length, 0);
     assert.equal(stats.intraDropped, 1);
   });
-  it("compiler prevalece sobre interface-impl para o MESMO par de nós", () => {
+
+  it("compiler prevalece sobre interface-impl para o MESMO par de funções", () => {
     const derived: ScipDerivedEdge[] = [
       { from: SYM.tenantMiddleware, to: SYM.jwtVerify, resolution: "interface-impl" },
       { from: SYM.tenantMiddleware, to: SYM.jwtVerify, resolution: "compiler" },
@@ -110,6 +159,7 @@ describe("aggregateScipEdges — símbolo→nó→aresta-de-sistema", () => {
     assert.equal(edges.length, 1);
     assert.equal(edges[0].resolution, "compiler");
   });
+
   it("interface-impl preservado quando é a única evidência do par", () => {
     const derived: ScipDerivedEdge[] = [{ from: SYM.tenantMiddleware, to: SYM.jwtVerify, resolution: "interface-impl" }];
     const { edges } = aggregateScipEdges(nodes, derived);
@@ -117,62 +167,81 @@ describe("aggregateScipEdges — símbolo→nó→aresta-de-sistema", () => {
   });
 });
 
-describe("mergeScipEdges — promove/adiciona sem mutar a entrada", () => {
-  it("PROMOVE aresta heurística existente a compiler (remove synthetic)", () => {
+describe("mergeScipEdges (A5) — materializa sub-nós de função + arestas, sem mutar a entrada", () => {
+  it("ADICIONA a aresta função→função e MATERIALIZA os sub-nós de função", () => {
     const raw = fixtureGraph();
     const before = JSON.stringify(raw);
     const payload = { edges: [{ from: SYM.tenantMiddleware, to: SYM.tenantService, resolution: "compiler" as const }] };
     const { graph, stats } = mergeScipEdges(raw, payload);
-    assert.equal(stats.upgraded, 1);
-    assert.equal(stats.added, 0);
-    const e = graph.edges.find((x) => x.fromNode === "node:server/middleware/tenant.ts" && x.toNode === "node:server/services/tenant.service.ts");
+    assert.equal(stats.added, 1);
+    assert.equal(stats.functionNodesAdded, 2);
+    // a aresta função→função existe com resolution compiler
+    const e = graph.edges.find((x) => x.fromNode === FN.tenantMiddleware && x.toNode === FN.tenantResolve);
+    assert.ok(e);
     assert.equal((e!.metadata as any).resolution, "compiler");
-    assert.equal((e!.metadata as any).synthetic, undefined);
+    assert.equal((e!.metadata as any).scipProven, true);
+    // os sub-nós de função existem, com proveniência de arquivo
+    const mw = graph.nodes.find((n) => n.id === FN.tenantMiddleware)!;
+    assert.ok(mw);
+    assert.equal((mw.metadata as any).sourceFile, "server/middleware/tenant.ts");
+    assert.equal((mw.metadata as any).parentModule, "node:server/middleware/tenant.ts");
+    assert.equal((mw.metadata as any).scipProven, true);
+    // a aresta HEURÍSTICA módulo→módulo permanece intocada (não é o par provado)
+    const chain = graph.edges.find((x) => x.fromNode === "node:server/middleware/tenant.ts" && x.toNode === "node:server/services/tenant.service.ts");
+    assert.equal((chain!.metadata as any).synthetic, true);
+    assert.equal((chain!.metadata as any).resolution, "syntactic-declared");
     // entrada intocada (clone defensivo)
     assert.equal(JSON.stringify(raw), before);
   });
-  it("ADICIONA aresta nova quando não há aresta crua correspondente", () => {
-    const raw = fixtureGraph();
-    const payload = { edges: [{ from: SYM.tenantMiddleware, to: SYM.jwtVerify, resolution: "compiler" as const }] };
-    const { graph, stats } = mergeScipEdges(raw, payload);
-    assert.equal(stats.added, 1);
-    const e = graph.edges.find((x) => x.fromNode === "node:server/middleware/tenant.ts" && x.toNode === "node:server/auth/jwt.ts");
-    assert.ok(e);
-    assert.equal((e!.metadata as any).resolution, "compiler");
-  });
+
   it("payload nulo/vazio → grafo byte-a-byte (mesma referência)", () => {
     const raw = fixtureGraph();
     assert.equal(mergeScipEdges(raw, null).graph, raw);
     assert.equal(mergeScipEdges(raw, { edges: [] }).graph, raw);
   });
+
+  it("aresta só de órfãos → nenhuma agregação → grafo byte-a-byte (mesma referência)", () => {
+    const raw = fixtureGraph();
+    const payload = { edges: [{ from: SYM.utilCn, to: SYM.external, resolution: "compiler" as const }] };
+    const { graph, stats } = mergeScipEdges(raw, payload);
+    assert.equal(stats.aggregated, 0);
+    assert.equal(graph, raw);
+  });
 });
 
-// ── O 1º teste do DoD (ADR-0031 §6 A3): uma aresta que vira STATIC_PROVEN ──
-describe("fim-a-fim: a aresta provada sobe o STATIC_PROVEN do censo de 0 para >0", () => {
-  it("merge + shapeSystemGraph classifica a aresta como STATIC_PROVEN (resolution compiler)", () => {
+// ── O 1º teste do DoD (ADR-0031 §6 A3/A5): o STATIC_PROVEN sobe, e a
+// granularidade de FUNÇÃO faz o par intra-arquivo contar (antes descartado). ──
+describe("fim-a-fim: função→função sobe o STATIC_PROVEN do censo — inclusive intra-arquivo", () => {
+  it("merge + shapeSystemGraph classifica as arestas de função como STATIC_PROVEN", () => {
     const raw = fixtureGraph();
 
     // ANTES: nenhuma aresta provada.
     const before = shapeSystemGraph(raw, "class");
     assert.equal(before.coverage.edges.byMethod.STATIC_PROVEN, 0);
 
-    // Ingere a aresta compiler + uma nova service→service.
     const payload = {
       edges: [
+        // cross-módulo
         { from: SYM.tenantMiddleware, to: SYM.tenantService, resolution: "compiler" as const },
         { from: SYM.tenantMiddleware, to: SYM.jwtVerify, resolution: "compiler" as const },
+        // MESMO arquivo (o ganho central de A5 — antes intra-nó descartado)
+        { from: SYM.tenantMiddleware, to: SYM.tenantLoadClaims, resolution: "compiler" as const },
       ],
     };
     const { graph } = mergeScipEdges(raw, payload);
     const after = shapeSystemGraph(graph, "class");
 
-    assert.ok(after.coverage.edges.byMethod.STATIC_PROVEN >= 2, `esperado >=2 STATIC_PROVEN, veio ${after.coverage.edges.byMethod.STATIC_PROVEN}`);
-    // a aresta promovida saiu de STATIC_UNRESOLVED
+    // 3 arestas função→função distintas, TODAS contadas (incl. a intra-arquivo)
+    assert.equal(after.coverage.edges.byMethod.STATIC_PROVEN, 3);
     const proven = after.edges.filter((e) => e.evidence.method === "STATIC_PROVEN");
+    assert.equal(proven.length, 3);
     assert.ok(proven.every((e) => e.resolution === "compiler"));
-    // e a promovida não é mais synthetic (deixou de ser DECLARADA)
-    const promoted = after.edges.find((e) => e.fromNode.includes("tenant.ts") && e.toNode.includes("tenant.service.ts"));
-    assert.equal(promoted!.evidence.method, "STATIC_PROVEN");
-    assert.equal(promoted!.synthetic, undefined);
+    // a aresta intra-arquivo (duas funções de tenant.ts) está entre as provadas
+    const intraFile = after.edges.find((e) => e.fromNode === FN.tenantMiddleware && e.toNode === FN.tenantLoadClaims);
+    assert.ok(intraFile, "esperado a aresta função→função intra-arquivo");
+    assert.equal(intraFile!.evidence.method, "STATIC_PROVEN");
+    // os sub-nós de função aparecem no grafo shaped (nós atômicos no class-level)
+    assert.ok(after.nodes.some((n) => n.id === FN.tenantMiddleware));
+    assert.ok(after.nodes.some((n) => n.id === FN.tenantResolve));
   });
 });
