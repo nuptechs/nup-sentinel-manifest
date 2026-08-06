@@ -46,7 +46,11 @@ const pos = (l, c) => l * 1_000_000 + c;
 const rng = (r) =>
   r.length >= 4 ? [pos(r[0], r[1]), pos(r[2], r[3])] : [pos(r[0], r[1]), pos(r[0], r[2] ?? r[1])];
 
-const isMethodSym = (s) => typeof s === 'string' && s.endsWith('().');
+// Método em SCIP: descriptor `nome(<disambiguator>).`. scip-typescript emite o
+// disambiguator VAZIO ("()."); scip-java (semanticdb) emite NÃO-vazio (ex.
+// "(+1)." p/ overload, ou assinatura). O regex cobre ambos — backward-compatible
+// com o TS. (Antes: `endsWith('().')` casava só TS → 0 arestas no Java.)
+const isMethodSym = (s) => typeof s === 'string' && /\([^)]*\)\.$/.test(s);
 // SymbolRole (bit flags): Definition=1, Import=2.
 const DEFINITION = 1;
 const IMPORT = 2;
@@ -64,6 +68,10 @@ for (const d of idx.documents)
 const proven = new Set(); // "A => B" (chamada direta resolvida pelo checker)
 const ifaceImpl = new Set(); // "A => impl" (via interface, K candidatos)
 
+// Diagnóstico multi-linguagem: distingue 0-arestas por MATCHING (0 defs/refs)
+// vs por ATRIBUIÇÃO (refs achadas mas fora de qualquer corpo de método).
+let nMethodDefs = 0, nMethodRefs = 0, nWithEnclosing = 0, nAttributed = 0, nOrphan = 0;
+
 for (const d of idx.documents) {
   // Corpos dos métodos (potenciais chamadores). enclosing_range quando há;
   // senão, aproxima o corpo por [def.start, próxima-def.start).
@@ -78,7 +86,9 @@ for (const d of idx.documents) {
       const er = rng(o.enclosing_range);
       bodyStart = er[0];
       bodyEnd = er[1];
+      nWithEnclosing++;
     }
+    nMethodDefs++;
     defs.push({ sym: o.symbol, start: s, bodyStart, bodyEnd });
   }
   defs.sort((a, b) => a.start - b.start);
@@ -91,10 +101,13 @@ for (const d of idx.documents) {
     if (!isMethodSym(o.symbol)) continue;
     const roles = o.symbol_roles | 0;
     if (roles & DEFINITION || roles & IMPORT) continue;
+    nMethodRefs++;
     const [p] = rng(o.range);
     let caller = null;
     for (const def of defs) if (p >= def.bodyStart && p < def.bodyEnd) caller = def; // o mais interno vence
-    if (!caller || caller.sym === o.symbol) continue;
+    if (!caller) { nOrphan++; continue; }
+    nAttributed++;
+    if (caller.sym === o.symbol) continue;
     proven.add(caller.sym + ' => ' + o.symbol);
     if (implsOf.has(o.symbol))
       for (const impl of implsOf.get(o.symbol)) ifaceImpl.add(caller.sym + ' => ' + impl);
@@ -118,5 +131,6 @@ process.stdout.write(
   ) + '\n',
 );
 console.error(
-  `[derive-edges] STATIC_PROVEN=${proven.size} interface-impl=${ifaceImpl.size} (de ${idx.documents.length} documentos)`,
+  `[derive-edges] STATIC_PROVEN=${proven.size} interface-impl=${ifaceImpl.size} (de ${idx.documents.length} documentos)` +
+    ` | diag: methodDefs=${nMethodDefs} methodRefs=${nMethodRefs} withEnclosing=${nWithEnclosing} attributed=${nAttributed} orphan=${nOrphan}`,
 );
