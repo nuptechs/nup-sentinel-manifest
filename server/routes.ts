@@ -27,6 +27,26 @@ import {
 } from "./manifest-lookup";
 import { z } from "zod";
 
+// ADR-0031 — payload do `POST /scip-edges`: saída do `derive-edges.mjs`
+// (símbolo→símbolo). `resolution` restrito às classes PRECISAS (compiler /
+// interface-impl); qualquer outra é rejeitada (não abrimos a porta a heurística
+// carimbada como provada). Cap defensivo de arestas contra abuso.
+const scipEdgesSchema = z.object({
+  tool: z.string().max(120).optional(),
+  schema: z.string().max(120).optional(),
+  counts: z.unknown().optional(),
+  edges: z
+    .array(
+      z.object({
+        from: z.string().min(1),
+        to: z.string().min(1),
+        kind: z.string().max(60).optional(),
+        resolution: z.enum(["compiler", "interface-impl"]),
+      }),
+    )
+    .max(500_000),
+});
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: os.tmpdir(),
@@ -423,6 +443,61 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error ingesting codelens extraction:", error);
       const msg = error instanceof Error ? error.message : "Failed to ingest extraction";
+      res.status(500).json({ message: msg });
+    }
+  });
+
+  // ADR-0031 — Motor de Agregação SCIP→System-Graph. O CI do repo-alvo roda
+  // `scip-typescript index` → `derive-edges.mjs` (arestas call-graph COMPILER-
+  // ACCURATE símbolo→símbolo) e POSTa o resultado aqui. É um OVERLAY out-of-band
+  // sobre o `systemGraph` já persistido (como os traços Jaeger, runtime-overlay),
+  // NÃO uma re-extração (por isso endpoint próprio, não `codelens-extraction`).
+  // O store lateral (`projects.scipEdges`) é idempotente por projeto; o `/graph`
+  // agrega/mescla na leitura como STATIC_PROVEN. Sem POST, `/graph` é byte-a-byte.
+  app.post("/api/projects/:projectId/scip-edges", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+
+      const parsed = scipEdgesSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid payload", issues: parsed.error.format() });
+      }
+
+      const payload = {
+        tool: parsed.data.tool ?? "scip-typescript",
+        schema: parsed.data.schema ?? "adr-0031.p2",
+        edges: parsed.data.edges,
+        ingestedAt: new Date().toISOString(),
+      };
+      await storage.updateProjectScipEdges(projectId, payload);
+
+      // Prévia honesta: quantas arestas de SISTEMA proven a agregação produz
+      // contra o systemGraph mais recente (fail-soft; 0 se ainda não há análise).
+      let systemEdgesProven = 0;
+      try {
+        const snaps = await storage.getAnalysisSnapshots(projectId);
+        const sg = ((snaps[0]?.manifestJson as any) || {}).systemGraph;
+        if (sg && Array.isArray(sg.nodes)) {
+          const { aggregateScipEdges } = await import("./analyzers/scip-aggregate");
+          systemEdgesProven = aggregateScipEdges(sg.nodes, payload.edges).edges.length;
+        }
+      } catch (e) {
+        console.error("scip-edges preview aggregation failed (non-fatal):", e);
+      }
+
+      res.status(201).json({
+        projectId,
+        received: payload.edges.length,
+        systemEdgesProven,
+        schema: payload.schema,
+        ingestedAt: payload.ingestedAt,
+      });
+    } catch (error) {
+      console.error("Error ingesting scip edges:", error);
+      const msg = error instanceof Error ? error.message : "Failed to ingest scip edges";
       res.status(500).json({ message: msg });
     }
   });
@@ -1563,12 +1638,28 @@ export async function registerRoutes(
         return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
       }
       const manifest = (snapshots[0].manifestJson as any) || {};
-      const systemGraph = manifest.systemGraph;
+      let systemGraph = manifest.systemGraph;
       if (!systemGraph || !Array.isArray(systemGraph.nodes)) {
         return res.status(404).json({
           message: "This snapshot predates the system graph — re-run the analysis to populate the System Map.",
           code: "GRAPH_NOT_IN_SNAPSHOT",
         });
+      }
+      // ADR-0031 — mescla (na leitura) as arestas SCIP provadas como STATIC_PROVEN.
+      // GATED + fail-soft: sem `scipEdges`, byte-a-byte; erro de merge não derruba
+      // o `/graph` (mantém o grafo cru).
+      let scipStats: unknown = undefined;
+      try {
+        const project = await storage.getProject(projectId);
+        const scip = (project as any)?.scipEdges;
+        if (scip && Array.isArray(scip.edges) && scip.edges.length) {
+          const { mergeScipEdges } = await import("./analyzers/scip-aggregate");
+          const merged = mergeScipEdges(systemGraph, scip);
+          systemGraph = merged.graph;
+          scipStats = merged.stats;
+        }
+      } catch (e) {
+        console.error("scip-edges merge failed (fail-soft, serving raw graph):", e);
       }
       const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const level = req.query.level === "method" ? "method" : "class";
@@ -1576,6 +1667,7 @@ export async function registerRoutes(
       res.json({
         projectId,
         analysisRunId: snapshots[0].analysisRunId,
+        ...(scipStats ? { scipOverlay: scipStats } : {}),
         ...shaped,
       });
     } catch (error) {

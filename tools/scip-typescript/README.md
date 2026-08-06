@@ -43,10 +43,29 @@ dependência concreta, dispatch dinâmico, `import()` dinâmico, reflexão,
 higher-order/event-bus. **PROVEN (estático) + OBSERVED (runtime) convergem** —
 nunca fingir PROVEN onde só há candidato.
 
-## O que falta (P2.2 restante → P2.5, ver ADR-0030 §6)
+## O motor de agregação (P2.2→P2.5, ADR-0031 — IMPLEMENTADO)
 Estas arestas são **símbolo→símbolo**. O **system-graph** do Manifest é no nível
-de **serviço/endpoint/entidade**. Falta **agregar** o call-graph a essa
-granularidade (qual serviço/rota/entidade cada função sustenta) e **ingerir** no
-grafo do projeto com `resolution:'compiler'`, espelhando o `reconstructGraph` do
-`backend-java-client`. Só então o `STATIC_PROVEN` do system-graph do identify
-sai de 0. Este tool entrega a base provada (P2.1 índice + P2.2 derivação).
+de **serviço/endpoint/entidade**. O **motor de agregação** (ADR-0031,
+`server/analyzers/scip-aggregate.ts`) faz a ponte: junta símbolo→nó-de-sistema
+por **arquivo** e mescla as arestas provadas no `systemGraph` com
+`resolution:'compiler'`/'interface-impl' — que o `classifyEdgeEvidence`
+(`system-graph.ts:210`) já classifica como `STATIC_PROVEN`.
+
+### Pipeline completo (CI do repo-alvo)
+```
+scip-typescript index --no-global-caches --output index.scip
+node tools/scip-typescript/derive-edges.mjs index.scip > edges.json
+curl -X POST "$MANIFEST_URL/api/projects/$PROJECT_ID/scip-edges" \
+     -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
+     --data-binary @edges.json
+```
+O `POST /api/projects/:id/scip-edges` guarda as arestas no store lateral
+(`projects.scipEdges`, idempotente) e o `GET /graph` as agrega/mescla **na
+leitura** (fail-soft: sem POST, byte-a-byte). A agregação é por **arquivo** —
+símbolo cujo arquivo não casa nó (util puro) é descartado (nunca inventa nó);
+`interface-impl` vira K arestas; intra-nó é descartado. O muro de Rice permanece
+(§ acima): o dinâmico fica com o `RUNTIME_OBSERVED`.
+
+**Provado ao vivo (NuPIdentify, projeto 38):** `STATIC_PROVEN` do system-graph
+saiu de **0 → 14** (`compiler`; rotas→middleware→services→auth), 9 arestas
+heurísticas promovidas + 5 novas.
