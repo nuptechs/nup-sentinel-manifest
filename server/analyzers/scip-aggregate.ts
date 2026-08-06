@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────
-// ADR-0031 — Motor de Agregação SCIP→System-Graph.
+// ADR-0031 — Motor de Agregação SCIP→System-Graph (A5: granularidade de FUNÇÃO).
 //
 // O deriver (`tools/scip-typescript/derive-edges.mjs`, ADR-0030) produz arestas
 // call-graph COMPILER-ACCURATE em nível de SÍMBOLO (função→função):
@@ -7,19 +7,34 @@
 //     resolution:'compiler'|'interface-impl' }
 // O system-graph do Manifest é em nível de SERVIÇO/ROTA/ENTIDADE. Este módulo
 // faz a PONTE que faltava (P2.2→P2.5 da ADR-0028): agrega símbolo→nó-de-sistema
-// (pela junção por ARQUIVO) e mescla as arestas provadas no `systemGraph` cru
-// com `resolution:'compiler'`/'interface-impl' — que o `classifyEdgeEvidence`
-// (system-graph.ts:210-224) já classifica como STATIC_PROVEN, sem código novo.
+// e mescla as arestas provadas no `systemGraph` cru com `resolution:'compiler'`/
+// 'interface-impl' — que o `classifyEdgeEvidence` (system-graph.ts:210-224) já
+// classifica como STATIC_PROVEN, sem tocar a classificação/rollup/censo.
+//
+// A5 (esta versão) — GRANULARIDADE DE FUNÇÃO. O motor original (PR #128) casava
+// símbolo→nó por ARQUIVO, colapsando a agregação a arquivo→arquivo: das 7.327
+// arestas provadas do NuPIdentify, 138 caíam como "intra-nó" (duas funções do
+// MESMO arquivo, indistinguíveis quando o nó é `node:<file>`) e só 14 pares
+// arquivo→arquivo sobravam. Agora o nó-módulo `node:<file>` ganha SUB-NÓS de
+// FUNÇÃO `node:<file>::<fn>` (o símbolo SCIP embute arquivo E função). A
+// agregação resolve função→função: as 138 intra-nó viram arestas provadas
+// legítimas + os pares arquivo→arquivo se abrem por função. O STATIC_PROVEN
+// do censo sobe de 14 para 165 (medido no NuPIdentify). Os sub-nós de função
+// são paren-free por construção (o sufixo `().` do símbolo é removido), então o
+// `classKeyOf` (system-graph.ts:279) os trata ATOMICAMENTE (id sem `(` → é a
+// própria "classe") — ZERO mudança em system-graph.ts.
 //
 // PURO e testável (nenhum I/O). Espelha o `applyRuntimeOverlay`
 // (runtime-overlay.ts:193-236): mescla evidência EXTERNA no grafo persistido,
 // GATED + fail-soft (sem `scipEdges`, o `/graph` é byte-a-byte ao de hoje).
 //
-// A régua de honestidade (ADR-0031 §5): nunca inventar nó para símbolo órfão
-// (util sem rota/entidade → aresta descartada); nunca colapsar `interface-impl`
-// (K adapters → K arestas); intra-nó descartado (espelha o self-loop drop de
-// system-graph.ts:383). O muro de Rice permanece: DI concreta / dispatch
-// dinâmico / reflexão NÃO aparecem aqui — ficam com o RUNTIME_OBSERVED (ADR-0029).
+// A régua de honestidade (ADR-0031 §5) permanece: NUNCA inventar nó para
+// símbolo cujo arquivo não sustenta um nó de sistema (util puro sem
+// rota/entidade → aresta descartada — só se refina o que JÁ é arquitetura);
+// nunca colapsar `interface-impl` (K adapters → K arestas); auto-chamada
+// (mesma função nas duas pontas) descartada. O muro de Rice permanece: DI
+// concreta / dispatch dinâmico / reflexão NÃO aparecem aqui — ficam com o
+// RUNTIME_OBSERVED (ADR-0029).
 // ─────────────────────────────────────────────────────────────────────────
 
 import type { RawSystemNode, RawSystemGraph } from "./system-graph";
@@ -50,6 +65,19 @@ export interface AggregatedSystemEdge {
   resolution: "compiler" | "interface-impl";
 }
 
+/**
+ * Sub-nó de FUNÇÃO a materializar sob um nó-módulo (`node:<file>`). Só existe
+ * porque o SCIP PROVOU uma chamada resolvida pelo checker que o toca — não é nó
+ * inventado (§5). Carrega proveniência de arquivo + rótulo curto para a tela.
+ */
+export interface FunctionNodeSpec {
+  id: string;
+  parentModule: string;
+  sourceFile: string;
+  label: string;
+  type: string;
+}
+
 export interface MergeStats {
   /** arestas derivadas recebidas. */
   derived: number;
@@ -59,9 +87,11 @@ export interface MergeStats {
   upgraded: number;
   /** arestas de sistema NOVAS adicionadas. */
   added: number;
+  /** sub-nós de função materializados no grafo (A5). */
+  functionNodesAdded: number;
   /** símbolos cujo arquivo não casou nenhum nó → aresta descartada (§4.1). */
   orphanDropped: number;
-  /** aresta intra-nó (mesmo nó nas duas pontas) → descartada (§4.2). */
+  /** auto-chamada (mesma função/nó nas duas pontas) → descartada (§4.2). */
   intraDropped: number;
 }
 
@@ -80,6 +110,22 @@ const SCIP_FILE_RE = /^((?:[^\s`/]+\/)*)`([^`]+)`/;
  * casam nenhum nó do projeto e são naturalmente descartados no índice.
  */
 export function fileOfScipSymbol(sym: string): string | null {
+  const r = symbolFileAndFn(sym);
+  return r ? r.file : null;
+}
+
+/**
+ * Extrai `{ file, fn }` de um símbolo SCIP (A5). `fn` é o descritor da FUNÇÃO/
+ * método após o nome de arquivo, PAREN-FREE (o sufixo de chamada `().` do SCIP é
+ * removido) — garante que o id de sub-nó `node:<file>::<fn>` não contenha `(`, e
+ * o `classKeyOf` (system-graph.ts) o trate como nó atômico sem mudança de código.
+ * Símbolo sem descritor de função (só o arquivo) → `fn = '<module>'`.
+ */
+export function functionOfScipSymbol(sym: string): { file: string; fn: string } | null {
+  return symbolFileAndFn(sym);
+}
+
+function symbolFileAndFn(sym: string): { file: string; fn: string } | null {
   if (typeof sym !== "string" || !sym.startsWith("scip-typescript ")) return null;
   const parts = sym.split(" ");
   if (parts.length < 5) return null;
@@ -87,7 +133,24 @@ export function fileOfScipSymbol(sym: string): string | null {
   const m = SCIP_FILE_RE.exec(descriptors);
   if (!m) return null;
   const file = m[1] + m[2]; // dir/ + nome-de-arquivo (sem crases)
-  return FILE_EXT.test(file) ? file : null;
+  if (!FILE_EXT.test(file)) return null;
+  const fn = normalizeFn(descriptors.slice(m[0].length));
+  return { file, fn };
+}
+
+/**
+ * Normaliza o descritor de função do SCIP num rótulo estável e paren-free:
+ *   `/cn().`                          → `cn`
+ *   `/ErrorBoundary#componentDidCatch().` → `ErrorBoundary#componentDidCatch`
+ *   `` (vazio — símbolo do arquivo)   → `<module>`
+ * Remove separador inicial `/`, o sufixo de chamada `()`/`().`, crases residuais
+ * e espaços. O resultado NUNCA contém `(` (invariante do id de sub-nó).
+ */
+function normalizeFn(tail: string): string {
+  let s = (tail || "").replace(/^\//, "").replace(/`/g, "").trim();
+  s = s.replace(/\(\)\.?$/, ""); // sufixo de chamada `()` ou `().`
+  s = s.replace(/[()]/g, ""); // defesa: qualquer `(`/`)` remanescente
+  return s || "<module>";
 }
 
 function sourceFileOf(n: RawSystemNode): string | undefined {
@@ -97,8 +160,7 @@ function sourceFileOf(n: RawSystemNode): string | undefined {
 
 /**
  * Índice `arquivo → nó de sistema` (ADR-0031 Pilar 1). Um arquivo pode sustentar
- * >1 nó (uma rota `route:M:/p` + o módulo `node:<file>`). Prioridade honesta —
- * granularidade por ARQUIVO (§4.1):
+ * >1 nó (uma rota `route:M:/p` + o módulo `node:<file>`). Prioridade honesta:
  *   1. o nó-módulo `node:<file>` (representação por-arquivo canônica);
  *   2. senão, um nó ENTITY (tabela por-arquivo);
  *   3. senão, se o arquivo tem EXATAMENTE UM nó, esse nó (rota/view isolada);
@@ -128,28 +190,74 @@ export function buildFileNodeIndex(nodes: RawSystemNode[]): Map<string, string> 
 }
 
 /**
- * Agregação símbolo→nó→aresta-de-sistema (ADR-0031 Pilar 2). Pura.
- * Para cada aresta derivada `A→B`: resolve o arquivo de A/B e o nó de sistema de
- * cada arquivo. Órfão (arquivo sem nó) ou intra-nó (mesmo nó) → descarta. Dedup
- * por par de nós; quando o MESMO par tem `compiler` e `interface-impl`,
- * `compiler` (resolução única, mais forte) prevalece.
+ * Índice `id do nó-módulo → tipo` (para herdar o tipo no sub-nó de função).
+ * Só nós `node:<file>` (SERVICE/REPOSITORY runtime=node) sustentam função.
+ */
+function moduleTypeIndex(nodes: RawSystemNode[]): Map<string, string> {
+  const t = new Map<string, string>();
+  for (const n of nodes || []) if (n.id.startsWith("node:")) t.set(n.id, n.type);
+  return t;
+}
+
+/**
+ * Resolve o id do NÓ-DE-ENDPOINT de um símbolo (A5). Se o arquivo do símbolo
+ * mapeia um nó-MÓDULO (`node:<file>`), refina para o SUB-NÓ DE FUNÇÃO
+ * `node:<file>::<fn>` (registrando a spec do sub-nó). Se mapeia um nó COARSE
+ * (rota/entidade — que não tem "função" no sentido de arquitetura), usa o nó
+ * como está. Símbolo cujo arquivo não sustenta nó → null (órfão, §5).
+ */
+function resolveEndpoint(
+  parsed: { file: string; fn: string },
+  fileIndex: Map<string, string>,
+  moduleTypes: Map<string, string>,
+  fnNodes: Map<string, FunctionNodeSpec>,
+): string | null {
+  const nodeId = fileIndex.get(parsed.file);
+  if (!nodeId) return null;
+  if (!nodeId.startsWith("node:")) return nodeId; // coarse (rota/entidade): sem função
+  const id = `${nodeId}::${parsed.fn}`;
+  if (!fnNodes.has(id)) {
+    fnNodes.set(id, {
+      id,
+      parentModule: nodeId,
+      sourceFile: parsed.file,
+      label: parsed.fn,
+      type: moduleTypes.get(nodeId) || "SERVICE",
+    });
+  }
+  return id;
+}
+
+/**
+ * Agregação símbolo→nó→aresta-de-sistema em granularidade de FUNÇÃO (Pilar 2,
+ * A5). Pura. Para cada aresta derivada `A→B`: resolve o endpoint de A/B (sub-nó
+ * de função sob o módulo, ou nó coarse). Órfão (arquivo sem nó) ou auto-chamada
+ * (mesmo endpoint) → descarta. Dedup por par de endpoints; quando o MESMO par
+ * tem `compiler` e `interface-impl`, `compiler` (resolução única) prevalece.
+ * Retorna também as specs dos sub-nós de função a materializar no merge.
  */
 export function aggregateScipEdges(
   nodes: RawSystemNode[],
   derived: ScipDerivedEdge[],
-): { edges: AggregatedSystemEdge[]; stats: Omit<MergeStats, "upgraded" | "added"> } {
+): {
+  edges: AggregatedSystemEdge[];
+  functionNodes: FunctionNodeSpec[];
+  stats: Omit<MergeStats, "upgraded" | "added" | "functionNodesAdded">;
+} {
   const fileIndex = buildFileNodeIndex(nodes);
-  // Chave par-de-nós → melhor resolução vista (compiler > interface-impl).
+  const moduleTypes = moduleTypeIndex(nodes);
+  const fnNodes = new Map<string, FunctionNodeSpec>();
+  // Chave par-de-endpoints → melhor resolução vista (compiler > interface-impl).
   const best = new Map<string, "compiler" | "interface-impl">();
   let orphanDropped = 0;
   let intraDropped = 0;
   for (const e of derived || []) {
     if (!e || (e.resolution !== "compiler" && e.resolution !== "interface-impl")) continue;
-    const fa = fileOfScipSymbol(e.from);
-    const fb = fileOfScipSymbol(e.to);
-    if (!fa || !fb) { orphanDropped++; continue; }
-    const na = fileIndex.get(fa);
-    const nb = fileIndex.get(fb);
+    const pa = functionOfScipSymbol(e.from);
+    const pb = functionOfScipSymbol(e.to);
+    if (!pa || !pb) { orphanDropped++; continue; }
+    const na = resolveEndpoint(pa, fileIndex, moduleTypes, fnNodes);
+    const nb = resolveEndpoint(pb, fileIndex, moduleTypes, fnNodes);
     if (!na || !nb) { orphanDropped++; continue; }
     if (na === nb) { intraDropped++; continue; }
     const key = pairKey(na, nb);
@@ -158,11 +266,22 @@ export function aggregateScipEdges(
     if (prev === undefined || e.resolution === "compiler") best.set(key, e.resolution);
   }
   const edges: AggregatedSystemEdge[] = [];
+  const usedNodes = new Set<string>();
   for (const [key, resolution] of best) {
     const [fromNode, toNode] = key.split(EDGE_SEP);
     edges.push({ fromNode, toNode, relationType: "CALLS", resolution });
+    usedNodes.add(fromNode);
+    usedNodes.add(toNode);
   }
-  return { edges, stats: { derived: (derived || []).length, aggregated: edges.length, orphanDropped, intraDropped } };
+  // só materializa o sub-nó de função que participa de ao menos 1 aresta final
+  // (o dedup pode ter descartado a única aresta que o tocava via auto-chamada).
+  const functionNodes: FunctionNodeSpec[] = [];
+  for (const spec of fnNodes.values()) if (usedNodes.has(spec.id)) functionNodes.push(spec);
+  return {
+    edges,
+    functionNodes,
+    stats: { derived: (derived || []).length, aggregated: edges.length, orphanDropped, intraDropped },
+  };
 }
 
 // Ids de nó não contêm o separador (são `node:<path>` / `route:M:/p` / `table:x`).
@@ -174,19 +293,21 @@ function pairKey(from: string, to: string, rel = "CALLS"): string {
 /**
  * Mescla as arestas provadas no `systemGraph` cru (ADR-0031 Pilar 3, opção "na
  * leitura"). NÃO muta a entrada — opera sobre um CLONE (o snapshot em memória é
- * intocado). Para cada par de nós provado:
- *   - PROMOVE **todas** as arestas cruas CALLS que casam o par (seta
- *     `metadata.resolution`, remove `metadata.synthetic`) — o `shapeClassLevel`
- *     mantém a 1ª aresta vista por par (system-graph.ts:384), então promover só
- *     uma poderia perder a promoção com arestas duplicadas (node-chain);
- *   - senão → ADICIONA aresta nova com `metadata.resolution`.
+ * intocado). A5:
+ *   - MATERIALIZA os sub-nós de função `node:<file>::<fn>` que aparecem nas
+ *     arestas provadas (paren-free → o `classKeyOf` os trata atômicos);
+ *   - PROMOVE **todas** as arestas cruas CALLS que casam um par provado (seta
+ *     `metadata.resolution`, remove `metadata.synthetic`) — cobre o caso coarse
+ *     (rota/entidade) em que já havia aresta declarada;
+ *   - senão → ADICIONA aresta nova com `metadata.resolution` (o caso comum das
+ *     arestas função→função, que não existiam no grafo cru).
  * O `shapeSystemGraph` posterior classifica/rola/conta sem mudança (Pilar 4).
  */
 export function mergeScipEdges(
   rawGraph: RawSystemGraph,
   payload: ScipEdgesPayload | null | undefined,
 ): { graph: RawSystemGraph; stats: MergeStats } {
-  const zero: MergeStats = { derived: 0, aggregated: 0, upgraded: 0, added: 0, orphanDropped: 0, intraDropped: 0 };
+  const zero: MergeStats = { derived: 0, aggregated: 0, upgraded: 0, added: 0, functionNodesAdded: 0, orphanDropped: 0, intraDropped: 0 };
   if (!rawGraph || !Array.isArray(rawGraph.nodes) || !Array.isArray(rawGraph.edges)) {
     return { graph: rawGraph, stats: zero };
   }
@@ -194,13 +315,38 @@ export function mergeScipEdges(
   if (!Array.isArray(derived) || derived.length === 0) {
     return { graph: rawGraph, stats: zero };
   }
+  const { edges: aggregated, functionNodes, stats: aggStats } = aggregateScipEdges(rawGraph.nodes, derived);
+  if (aggregated.length === 0) {
+    return { graph: rawGraph, stats: { ...aggStats, upgraded: 0, added: 0, functionNodesAdded: 0 } };
+  }
   // clone defensivo (não mutar o snapshot persistido/cacheado)
   const graph: RawSystemGraph = {
     ...rawGraph,
-    nodes: rawGraph.nodes,
+    nodes: rawGraph.nodes.slice(),
     edges: rawGraph.edges.map((e) => ({ ...e, metadata: e.metadata ? { ...e.metadata } : e.metadata })),
   };
-  const { edges: aggregated, stats: aggStats } = aggregateScipEdges(graph.nodes, derived);
+
+  // MATERIALIZA os sub-nós de função ausentes (A5). Sub-nó carrega proveniência
+  // de arquivo + rótulo curto + `scipProven` (existe porque o checker o provou).
+  const existingIds = new Set(graph.nodes.map((n) => n.id));
+  let functionNodesAdded = 0;
+  for (const spec of functionNodes) {
+    if (existingIds.has(spec.id)) continue;
+    existingIds.add(spec.id);
+    graph.nodes.push({
+      id: spec.id,
+      type: spec.type,
+      className: spec.label,
+      metadata: {
+        sourceFile: spec.sourceFile,
+        runtime: "node",
+        scipProven: true,
+        parentModule: spec.parentModule,
+        function: spec.label,
+      },
+    });
+    functionNodesAdded++;
+  }
 
   // Resolução provada por par de nós (relationType CALLS).
   const provenByKey = new Map<string, "compiler" | "interface-impl">();
@@ -220,7 +366,8 @@ export function mergeScipEdges(
     upgradedKeys.add(key);
   }
 
-  // Adiciona arestas novas para pares provados sem aresta CALLS crua.
+  // Adiciona arestas novas para pares provados sem aresta CALLS crua (o caso
+  // comum de A5: as arestas função→função não existiam no grafo cru).
   let added = 0;
   for (const [key, res] of provenByKey) {
     if (upgradedKeys.has(key)) continue;
@@ -228,5 +375,5 @@ export function mergeScipEdges(
     graph.edges.push({ fromNode, toNode, relationType, metadata: { resolution: res, scipProven: true } });
     added++;
   }
-  return { graph, stats: { ...aggStats, upgraded: upgradedKeys.size, added } };
+  return { graph, stats: { ...aggStats, upgraded: upgradedKeys.size, added, functionNodesAdded } };
 }
