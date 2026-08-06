@@ -68,6 +68,8 @@ import {
   EvidenceLegend,
   CoverageBadge,
 } from "./system-map-evidence";
+import { NarrativeView } from "./system-map-narrative";
+import { BookOpen } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 cytoscape.use(elk as any);
@@ -160,7 +162,7 @@ function labelOf(n: GraphNode): string {
   return n.className || n.qualifiedSignature || n.id;
 }
 
-type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord" | "er";
+type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord" | "er" | "narrative";
 
 export default function SystemMapPage() {
   const projectsQuery = useQuery<Project[]>({ queryKey: ["/api/projects"] });
@@ -252,6 +254,15 @@ export default function SystemMapPage() {
             >
               <Database className="h-4 w-4" /> Dados
             </Button>
+            <Button
+              variant={viewMode === "narrative" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setViewMode("narrative")}
+              data-testid="view-narrative"
+            >
+              <BookOpen className="h-4 w-4" /> Narrativa
+            </Button>
           </div>
           <Select
             value={projectId != null ? String(projectId) : undefined}
@@ -285,9 +296,13 @@ export default function SystemMapPage() {
         <ProjectListEmpty />
       )}
 
-      {graphQuery.isLoading && <MapSkeleton />}
+      {/* A vista Narrativa busca a própria fonte (endpoint /narrative) — não
+          depende do graph payload; renderiza mesmo com o grafo carregando. */}
+      {!projectsQuery.isError && projectId != null && viewMode === "narrative" && <NarrativeView projectId={projectId} />}
 
-      {!projectsQuery.isError && graphQuery.isError && (
+      {graphQuery.isLoading && viewMode !== "narrative" && <MapSkeleton />}
+
+      {!projectsQuery.isError && graphQuery.isError && viewMode !== "narrative" && (
         <GraphEmptyOrError error={graphQuery.error as Error} />
       )}
 

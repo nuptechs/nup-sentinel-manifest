@@ -118,6 +118,29 @@ export interface Evidence {
   confidence: number;
 }
 
+/**
+ * ADR-0033 P4.5 — grau honesto da refutação de uma aresta pelo laço ativo de
+ * fechamento (ADR-0032 P3, no `nup-sentinel`). NUNCA destrutivo (não apaga a
+ * aresta) — só grada a confiança para baixo e vira entrada advisory (ADR-0032 §4).
+ */
+export type RefutationSubtype = 'REFUTED_LIKELY_DEAD' | 'REFUTED_UNREACHABLE_BY_ROBOT';
+
+export interface EdgeRefutation {
+  /**
+   * `REFUTED_LIKELY_DEAD`  = dirigida N×/M-janelas, jamais promovida, pai-OK →
+   * forte candidata a falso-positivo/código morto.
+   * `REFUTED_UNREACHABLE_BY_ROBOT` = não-dirigível (auth/admin/sem-sandbox) →
+   * **UNKNOWN honesto**, NÃO é morta (ADR-0032 §5 muro).
+   */
+  subtype: RefutationSubtype;
+  /** nº de tentativas dirigidas independentes acumuladas. */
+  attempts?: number;
+  /** nº de janelas distintas em que foi dirigida. */
+  windows?: number;
+  /** motivo pt-BR (pai-OK-aresta-ausente | auth/admin/sem-sandbox/sem-gatilho). */
+  reason?: string;
+}
+
 export interface ShapedEdge {
   fromNode: string;
   toNode: string;
@@ -136,6 +159,19 @@ export interface ShapedEdge {
    * UNKNOWN, não omitida). Aditivo aos campos crus acima.
    */
   evidence: Evidence;
+  /**
+   * ADR-0033 P4.5 — a aresta foi REFUTADA pelo laço ativo (ADR-0032 P3): o
+   * estático a desenhou, o robô dirigiu tráfego e ela NÃO apareceu. É um eixo
+   * ORTOGONAL a `evidence` (`evidence` = como sabemos que a aresta EXISTE;
+   * `refuted` = evidência de que ela NÃO roda na prática). A narrativa (P4.5)
+   * a tira da espinha andável — nunca a cita como fato.
+   *
+   * DEPENDÊNCIA HONESTA: o produtor (overlay do laço) ainda NÃO popula este
+   * campo no manifest — o P3 vive no `nup-sentinel` e está gated OFF. Lido
+   * defensivamente do metadata cru (`refuted`/`refutation`); ausente hoje =
+   * comportamento byte-a-byte. A convergência VIVA depende do P3 ligado.
+   */
+  refuted?: EdgeRefutation;
 }
 
 /**
@@ -174,17 +210,48 @@ function isSensitive(node: RawSystemNode): boolean {
 function sourceFileOf(node: RawSystemNode): string | undefined {
   return typeof node.metadata?.sourceFile === 'string' ? (node.metadata.sourceFile as string) : undefined;
 }
-function edgeProvenance(e: RawSystemEdge): { resolution?: string; synthetic?: boolean; observed?: boolean; count?: number } {
+function edgeProvenance(e: RawSystemEdge): { resolution?: string; synthetic?: boolean; observed?: boolean; count?: number; refuted?: EdgeRefutation } {
   const m = (e.metadata || {}) as Record<string, unknown>;
   const resolution = typeof m.resolution === 'string' ? (m.resolution as string) : undefined;
   const synthetic = m.synthetic === true ? true : undefined;
   const observed = m.observed === true ? true : undefined;
   const count = typeof m.count === 'number' ? (m.count as number) : undefined;
+  const refuted = readRefutation(m);
   return {
     ...(resolution ? { resolution } : {}),
     ...(synthetic ? { synthetic } : {}),
     ...(observed ? { observed } : {}),
     ...(observed && count ? { count } : {}),
+    ...(refuted ? { refuted } : {}),
+  };
+}
+
+/**
+ * ADR-0033 P4.5 — lê a refutação do laço ativo do metadata cru, DEFENSIVAMENTE
+ * (o produtor vive no `nup-sentinel`, ainda não popula aqui). Aceita a forma
+ * rica `refutation: {subtype, attempts, windows, reason}` (o que o
+ * `buildRefutationFinding` do P3 emite) OU um booleano `refuted: true`. Subtype
+ * inválido/ausente cai no default HONESTO `REFUTED_UNREACHABLE_BY_ROBOT`
+ * (UNKNOWN honesto — "na dúvida entre morta e não-exercitei", ADR-0032 §5),
+ * nunca acusa "morta" sem evidência. Nunca lança.
+ */
+function normalizeRefutationSubtype(raw: unknown): RefutationSubtype {
+  return raw === 'REFUTED_LIKELY_DEAD' ? 'REFUTED_LIKELY_DEAD' : 'REFUTED_UNREACHABLE_BY_ROBOT';
+}
+function readRefutation(m: Record<string, unknown>): EdgeRefutation | undefined {
+  const raw = m.refutation ?? m.refuted;
+  if (raw === true) return { subtype: 'REFUTED_UNREACHABLE_BY_ROBOT' };
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const subtype = normalizeRefutationSubtype(r.subtype);
+  const attempts = typeof r.attempts === 'number' && r.attempts >= 0 ? r.attempts : undefined;
+  const windows = typeof r.windows === 'number' && r.windows >= 0 ? r.windows : undefined;
+  const reason = typeof r.reason === 'string' && r.reason.trim() ? r.reason.trim() : undefined;
+  return {
+    subtype,
+    ...(attempts !== undefined ? { attempts } : {}),
+    ...(windows !== undefined ? { windows } : {}),
+    ...(reason ? { reason } : {}),
   };
 }
 

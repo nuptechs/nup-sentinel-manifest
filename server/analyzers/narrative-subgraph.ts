@@ -17,7 +17,7 @@
 // fora do grafo → subgrafo vazio (não crasha) → a narrativa se abstém (P4.3).
 // ─────────────────────────────────────────────
 
-import type { ShapedGraph, ShapedNode, ShapedEdge, EvidenceMethod, GraphCoverage } from "./system-graph";
+import type { ShapedGraph, ShapedNode, ShapedEdge, EvidenceMethod, GraphCoverage, EdgeRefutation, RefutationSubtype } from "./system-graph";
 import {
   computeImpactConfidence,
   resolveSymbolSeeds,
@@ -29,22 +29,13 @@ import type { AdrLink } from "./adr-tacit-links";
 /** Métodos que a narrativa PODE afirmar como fato (o "andável"). */
 const WALKABLE_METHODS: ReadonlySet<EvidenceMethod> = new Set<EvidenceMethod>(["RUNTIME_OBSERVED", "STATIC_PROVEN"]);
 
-/** Uma aresta VERIFICADA do subgrafo — a unidade que a narrativa cita por `edgeId`. */
-export interface NarrativeEdge {
-  /** id estável, casável pelo gate de grounding (§4 pilar 2). */
-  edgeId: string;
-  fromNode: string;
-  toNode: string;
-  fromLabel: string;
-  toLabel: string;
+/**
+ * Facetas dos extremos de uma aresta — o que uma projeção por perspectiva
+ * filtra SEM recomputar (§4 pilar 4). Comum à aresta andável e à refutada, para
+ * o mesmo predicado de lente valer nas duas.
+ */
+export interface EdgeFacets {
   relationType: string;
-  method: EvidenceMethod; // RUNTIME_OBSERVED | STATIC_PROVEN (só verificadas entram)
-  confidence: number;
-  /** nº de traços que exercitaram a aresta (só RUNTIME_OBSERVED). */
-  count?: number;
-  /** proveniência humana pt-BR: "observada em N traços" | "resolvida pelo compilador". */
-  provenance: string;
-  // ── facetas dos extremos, para PROJETAR por perspectiva sem recomputar (§4 pilar 4) ──
   fromType: string;
   toType: string;
   fromSensitive: boolean;
@@ -53,6 +44,44 @@ export interface NarrativeEdge {
   toLayer?: string;
   fromStack?: string;
   toStack?: string;
+}
+
+/** Uma aresta VERIFICADA do subgrafo — a unidade que a narrativa cita por `edgeId`. */
+export interface NarrativeEdge extends EdgeFacets {
+  /** id estável, casável pelo gate de grounding (§4 pilar 2). */
+  edgeId: string;
+  fromNode: string;
+  toNode: string;
+  fromLabel: string;
+  toLabel: string;
+  method: EvidenceMethod; // RUNTIME_OBSERVED | STATIC_PROVEN (só verificadas entram)
+  confidence: number;
+  /** nº de traços que exercitaram a aresta (só RUNTIME_OBSERVED). */
+  count?: number;
+  /** proveniência humana pt-BR: "observada em N traços" | "resolvida pelo compilador". */
+  provenance: string;
+}
+
+/**
+ * ADR-0033 P4.5 — uma aresta REFUTADA pelo laço ativo (ADR-0032 P3): o estático
+ * a desenhou, o robô dirigiu tráfego e NÃO a confirmou. FORA da espinha andável
+ * (a narrativa nunca a cita como fato); vive no "não-andável, NOMEADO" junto dos
+ * blindSpots. Carrega as MESMAS facetas para ser projetável por perspectiva.
+ */
+export interface RefutedNarrativeEdge extends EdgeFacets {
+  edgeId: string;
+  fromNode: string;
+  toNode: string;
+  fromLabel: string;
+  toLabel: string;
+  /** o método estrutural que o compilador/heurística deu à aresta refutada. */
+  method: EvidenceMethod;
+  subtype: RefutationSubtype;
+  attempts?: number;
+  windows?: number;
+  reason?: string;
+  /** proveniência pt-BR honesta da refutação (dead-candidate × UNKNOWN honesto). */
+  provenance: string;
 }
 
 /** Ligação de decisão (ADR) que governa um símbolo do subgrafo — proveniência `arquivo:linha`. */
@@ -75,6 +104,14 @@ export interface NarrativeSubgraph {
   /** o "não-andável, NOMEADO": arestas cegas que tocam o raio (reuso de P4). */
   blindSpots: BlindSpotEdge[];
   blindSpotCount: number;
+  /**
+   * ADR-0033 P4.5 — arestas REFUTADAS pelo laço ativo (P3) que tocam o raio:
+   * o estático as previu, o runtime dirigido NÃO as confirmou. FORA da espinha
+   * andável (nunca citadas como fato) — a narrativa as NOMEIA como refutadas.
+   * Vazio hoje até o P3 popular o campo (dependência honesta, ver §4/§8).
+   */
+  refutedEdges: RefutedNarrativeEdge[];
+  refutedCount: number;
   /** partição já pronta (reuso) para a abertura garante×possível×cego (P4.3). */
   proven: AffectedNode[];
   possible: AffectedNode[];
@@ -112,6 +149,16 @@ function edgeProvenance(e: ShapedEdge): string {
   return "provada estaticamente pela fonte";
 }
 
+/** Proveniência humana pt-BR de uma aresta REFUTADA (grau honesto, ADR-0032 §4). */
+function refutedProvenance(r: EdgeRefutation): string {
+  const tries = r.attempts ? `${r.attempts} tentativa(s) dirigida(s)` : "tentativa(s) dirigida(s)";
+  const wins = r.windows ? ` em ${r.windows} janela(s)` : "";
+  if (r.subtype === "REFUTED_LIKELY_DEAD") {
+    return `refutada pelo laço ativo (provável falso-positivo/código morto — ${tries}${wins}, pai exercitado sem gerá-la${r.reason ? `: ${r.reason}` : ""})`;
+  }
+  return `não-confirmada pelo robô — UNKNOWN honesto, NÃO é morta${r.reason ? ` (${r.reason})` : ""}`;
+}
+
 /**
  * Monta o subgrafo de narrativa de um símbolo. Puro.
  *
@@ -135,6 +182,8 @@ export function buildNarrativeSubgraph(
     edgeIds: new Set<string>(),
     blindSpots: conf.blindSpots,
     blindSpotCount: conf.blindSpotCount,
+    refutedEdges: [],
+    refutedCount: 0,
     proven: conf.proven,
     possible: conf.possible,
     disclosure: conf.disclosure,
@@ -162,28 +211,19 @@ export function buildNarrativeSubgraph(
   for (const a of conf.proven) radius.add(a.id);
   for (const a of conf.possible) radius.add(a.id);
 
-  // espinha ANDÁVEL: arestas VERIFICADAS com os dois extremos no raio. Dedup por edgeId.
+  // espinha ANDÁVEL: arestas VERIFICADAS com os dois extremos no raio. Dedup por
+  // edgeId (compartilhado com o bucket refutado — uma aresta nunca cai nos dois).
   const seen = new Set<string>();
   for (const e of g.edges) {
-    const method: EvidenceMethod = e.evidence?.method ?? "UNKNOWN";
-    if (!WALKABLE_METHODS.has(method)) continue;
     if (!radius.has(e.fromNode) || !radius.has(e.toNode)) continue;
     const edgeId = `${e.fromNode}|${e.toNode}|${e.relationType}`;
     if (seen.has(edgeId)) continue;
-    seen.add(edgeId);
+    const method: EvidenceMethod = e.evidence?.method ?? "UNKNOWN";
+    const observed = method === "RUNTIME_OBSERVED";
     const fromN = byId.get(e.fromNode);
     const toN = byId.get(e.toNode);
-    base.edges.push({
-      edgeId,
-      fromNode: e.fromNode,
-      toNode: e.toNode,
-      fromLabel: labelOf(fromN, e.fromNode),
-      toLabel: labelOf(toN, e.toNode),
+    const facets = {
       relationType: e.relationType,
-      method,
-      confidence: e.evidence?.confidence ?? (method === "RUNTIME_OBSERVED" ? 0.95 : 0.8),
-      ...(method === "RUNTIME_OBSERVED" && typeof e.count === "number" && e.count > 0 ? { count: e.count } : {}),
-      provenance: edgeProvenance(e),
       fromType: fromN?.type ?? "UNKNOWN",
       toType: toN?.type ?? "UNKNOWN",
       fromSensitive: fromN?.sensitive === true,
@@ -192,6 +232,44 @@ export function buildNarrativeSubgraph(
       ...(toN?.layer ? { toLayer: toN.layer } : {}),
       ...(fromN?.stack ? { fromStack: fromN.stack } : {}),
       ...(toN?.stack ? { toStack: toN.stack } : {}),
+    };
+
+    // P4.5 — REFUTADA pelo laço ativo: FORA da espinha andável (a narrativa
+    // nunca a cita como fato). PROMOÇÃO VENCE REFUTAÇÃO: se a aresta foi
+    // OBSERVADA em runtime, a refutação (mais antiga) é ignorada e ela sobe
+    // para a espinha PROVADA (POSSÍVEL→PROVADO ao promover a RUNTIME_OBSERVED).
+    if (e.refuted && !observed) {
+      seen.add(edgeId);
+      base.refutedEdges.push({
+        edgeId,
+        fromNode: e.fromNode,
+        toNode: e.toNode,
+        fromLabel: labelOf(fromN, e.fromNode),
+        toLabel: labelOf(toN, e.toNode),
+        method,
+        subtype: e.refuted.subtype,
+        ...(e.refuted.attempts !== undefined ? { attempts: e.refuted.attempts } : {}),
+        ...(e.refuted.windows !== undefined ? { windows: e.refuted.windows } : {}),
+        ...(e.refuted.reason ? { reason: e.refuted.reason } : {}),
+        provenance: refutedProvenance(e.refuted),
+        ...facets,
+      });
+      continue;
+    }
+
+    if (!WALKABLE_METHODS.has(method)) continue;
+    seen.add(edgeId);
+    base.edges.push({
+      edgeId,
+      fromNode: e.fromNode,
+      toNode: e.toNode,
+      fromLabel: labelOf(fromN, e.fromNode),
+      toLabel: labelOf(toN, e.toNode),
+      method,
+      confidence: e.evidence?.confidence ?? (observed ? 0.95 : 0.8),
+      ...(observed && typeof e.count === "number" && e.count > 0 ? { count: e.count } : {}),
+      provenance: edgeProvenance(e),
+      ...facets,
     });
   }
   // ordena por força (runtime antes de estático), depois por label — determinístico.
@@ -203,6 +281,14 @@ export function buildNarrativeSubgraph(
       a.toLabel.localeCompare(b.toLabel),
   );
   base.edgeIds = new Set(base.edges.map((e) => e.edgeId));
+  // refutadas: dead-candidate antes de UNKNOWN-honesto, depois por label — determinístico.
+  base.refutedEdges.sort(
+    (a, b) =>
+      (a.subtype === "REFUTED_LIKELY_DEAD" ? 0 : 1) - (b.subtype === "REFUTED_LIKELY_DEAD" ? 0 : 1) ||
+      a.fromLabel.localeCompare(b.fromLabel) ||
+      a.toLabel.localeCompare(b.toLabel),
+  );
+  base.refutedCount = base.refutedEdges.length;
 
   // proveniência tácita: só as ADR links cujos símbolos aparecem no raio.
   const radiusLabels = new Set<string>();
