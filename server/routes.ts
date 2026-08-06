@@ -1547,6 +1547,86 @@ export async function registerRoutes(
     }
   });
 
+  // ADR-0033 P4 — Narrativa VERIFICÁVEL travada ao grafo + projeções multi-
+  // perspectiva. "Explique o impacto de mudar X, sem inventar aresta": monta o
+  // subgrafo ANDÁVEL (só arestas verificadas que tocam o raio), narra passando por
+  // um GATE de grounding estrutural (afirmação sem edgeId verificado é DESCARTADA)
+  // e projeta a MESMA espinha por perspectiva (?perspective=security|dev|data|
+  // architect|business|impact — omitido = todas). Sem chave de LLM → narrativa-
+  // template determinística. Lê o snapshot já persistido; não re-analisa.
+  app.get("/api/projects/:projectId/narrative", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const symbol = typeof req.query.symbol === "string" ? req.query.symbol.trim() : "";
+      if (!symbol) return res.status(400).json({ message: "query param 'symbol' is required (ex: FooService, Contract)" });
+
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const sg = manifest.systemGraph;
+      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
+        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
+      }
+
+      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { buildNarrativeSubgraph } = await import("./analyzers/narrative-subgraph");
+      const { narrate } = await import("./analyzers/narrative");
+      const { projectAllPerspectives, projectPerspective, parsePersona } = await import("./analyzers/narrative-projections");
+
+      const shaped = shapeSystemGraph(sg, "class");
+      const adrLinks = manifest?.adrLinks?.links; // AdrLink[] persistido (ou undefined)
+      const sub = buildNarrativeSubgraph(shaped, symbol, {
+        adrLinks: Array.isArray(adrLinks) ? adrLinks : undefined,
+      });
+
+      // LLM opcional (§4 pilar 5): sem chave → generator null → template determinístico.
+      // O gate de grounding é aplicado de qualquer forma dentro de `narrate`.
+      let edgeClaims: import("./analyzers/narrative").EdgeClaim[] | undefined;
+      if (sub.edges.length > 0) {
+        try {
+          const { resolveEdgeClaimGenerator } = await import("./analyzers/narrative-llm");
+          const gen = resolveEdgeClaimGenerator();
+          if (gen) edgeClaims = await gen(sub);
+        } catch (e) {
+          console.error("[narrative] gerador de LLM falhou (fallback template):", e);
+        }
+      }
+
+      const narrative = narrate(sub, edgeClaims);
+
+      const personaParam = parsePersona(req.query.perspective);
+      const perspectives = personaParam
+        ? { [personaParam]: projectPerspective(sub, personaParam) }
+        : projectAllPerspectives(sub);
+
+      res.json({
+        projectId,
+        analysisRunId: snapshots[0].analysisRunId,
+        symbol,
+        narrative,
+        perspectives,
+        subgraph: {
+          edges: sub.edges,
+          edgeCount: sub.edges.length,
+          blindSpots: sub.blindSpots,
+          blindSpotCount: sub.blindSpotCount,
+          proven: sub.proven,
+          possible: sub.possible,
+          adrLinks: sub.adrLinks,
+          overallConfidence: sub.overallConfidence,
+          overallMethod: sub.overallMethod,
+          ...(sub.coverage ? { coverage: sub.coverage } : {}),
+        },
+      });
+    } catch (error) {
+      console.error("Error computing narrative:", error);
+      res.status(500).json({ message: "Failed to compute narrative" });
+    }
+  });
+
   // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
   // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
