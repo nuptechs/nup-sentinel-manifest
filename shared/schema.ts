@@ -61,6 +61,11 @@ export const projects = pgTable("projects", {
   // Fim da liturgia de ALTER manual (convention_profile/git_token_encrypted
   // foram as últimas manuais).
   conventionProfile: jsonb("convention_profile"),
+  // ADR-0031 — arestas call-graph COMPILER-ACCURATE (scip-typescript, símbolo→
+  // símbolo) POSTadas pelo CI do repo-alvo e mescladas no `/graph` como
+  // STATIC_PROVEN (store lateral idempotente por projeto; ADITIVO — nulo ⇒
+  // `/graph` byte-a-byte). Shape: {tool, schema, edges:[{from,to,kind,resolution}]}.
+  scipEdges: jsonb("scip_edges"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 
