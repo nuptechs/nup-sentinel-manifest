@@ -248,11 +248,12 @@ describe("shapeSystemGraph — ADR-0028 P0.1 evidence por NÓ + censo de cobertu
     assert.equal(frio.observed, undefined);
   });
 
-  it("censo de arestas: byMethod (LLM=0) + total + observedRatio", () => {
+  it("censo de arestas: byMethod (LLM=0, CONFIG=0) + total + observedRatio", () => {
     const g = shapeSystemGraph(raw, "method");
     assert.deepEqual(g.coverage.edges.byMethod, {
       RUNTIME_OBSERVED: 1,
       STATIC_PROVEN: 2,
+      CONFIG_PROVEN: 0, // ADR-0035 §4 — coluna do censo (=0 sem config-edges)
       STATIC_UNRESOLVED: 2,
       LLM_CONJECTURED: 0,
       UNKNOWN: 1,
@@ -274,7 +275,7 @@ describe("shapeSystemGraph — ADR-0028 P0.1 evidence por NÓ + censo de cobertu
     assert.equal(g.coverage.edges.total, 0);
     assert.equal(g.coverage.edges.observedRatio, 0);
     assert.deepEqual(g.coverage.edges.byMethod, {
-      RUNTIME_OBSERVED: 0, STATIC_PROVEN: 0, STATIC_UNRESOLVED: 0, LLM_CONJECTURED: 0, UNKNOWN: 0,
+      RUNTIME_OBSERVED: 0, STATIC_PROVEN: 0, CONFIG_PROVEN: 0, STATIC_UNRESOLVED: 0, LLM_CONJECTURED: 0, UNKNOWN: 0,
     });
     assert.deepEqual(g.coverage.nodes, { observed: 0, total: 0 });
   });
