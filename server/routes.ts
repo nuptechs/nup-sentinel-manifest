@@ -42,6 +42,10 @@ const scipEdgesSchema = z.object({
         to: z.string().min(1),
         kind: z.string().max(60).optional(),
         resolution: z.enum(["compiler", "interface-impl"]),
+        // ADR-0035 F1 — arquivo-fonte de definição de cada ponta (fornecido pelo
+        // deriver; obrigatório p/ agregar arestas scip-JAVA, opcional p/ TS).
+        fromFile: z.string().max(1024).optional(),
+        toFile: z.string().max(1024).optional(),
       }),
     )
     .max(500_000),

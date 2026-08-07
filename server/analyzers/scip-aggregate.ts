@@ -24,6 +24,18 @@
 // `classKeyOf` (system-graph.ts:279) os trata ATOMICAMENTE (id sem `(` → é a
 // própria "classe") — ZERO mudança em system-graph.ts.
 //
+// F1 (ADR-0035) — IDENTIDADE CANÔNICA AGNÓSTICA À LINGUAGEM. O símbolo scip-JAVA
+// carrega pacote/CLASSE (`easynup/services/…/Foo#execute(+1).`), não o arquivo em
+// crases que o scip-typescript embute — então o parse-de-crases herdado rejeitava
+// TODA aresta Java (→ `systemEdgesProven:0`). Agora o deriver fornece o arquivo-
+// fonte de DEFINIÇÃO de cada ponta (`fromFile`/`toFile`) e a agregação o usa direto,
+// independente da linguagem. Sem esses campos, o parse-de-crases TS segue valendo
+// (retrocompat total com o payload antigo). O rótulo de função sai do descritor do
+// símbolo (paren-free) em ambas as linguagens. E o sub-nó de função passa a poder
+// pendurar em QUALQUER nó file-backed (`route:`/`class:`/`node:`), não só `node:` —
+// controllers/services Java (mapeados como rota/classe) ganham granularidade de
+// método sem tocar o comportamento dos nós `node:` (byte-a-byte no TS).
+//
 // PURO e testável (nenhum I/O). Espelha o `applyRuntimeOverlay`
 // (runtime-overlay.ts:193-236): mescla evidência EXTERNA no grafo persistido,
 // GATED + fail-soft (sem `scipEdges`, o `/graph` é byte-a-byte ao de hoje).
@@ -45,6 +57,16 @@ export interface ScipDerivedEdge {
   to: string;
   kind?: string;
   resolution: "compiler" | "interface-impl";
+  /**
+   * ADR-0035 F1 — arquivo-fonte de DEFINIÇÃO de cada endpoint da aresta, fornecido
+   * pelo deriver (`derive-edges.mjs`). Torna a identidade canônica AGNÓSTICA à
+   * linguagem: símbolos scip-JAVA carregam pacote/CLASSE (não o arquivo em crases
+   * que o scip-typescript embute), então o arquivo tem de vir do índice do deriver,
+   * não de parse do símbolo. Opcionais para retrocompatibilidade com o payload TS
+   * antigo (sem estes campos, cai no parse-de-crases herdado — só TS).
+   */
+  fromFile?: string;
+  toFile?: string;
 }
 
 /** Payload que o CI POSTa em `/api/projects/:id/scip-edges`. */
@@ -76,6 +98,8 @@ export interface FunctionNodeSpec {
   sourceFile: string;
   label: string;
   type: string;
+  /** runtime herdado do nó-pai (`node`, `java`, …) para preservar o facet de stack. */
+  runtime?: string;
 }
 
 export interface MergeStats {
@@ -97,10 +121,27 @@ export interface MergeStats {
 
 // Extensões de arquivo TS/JS que um símbolo SCIP pode carregar.
 const FILE_EXT = /\.(?:d\.ts|tsx?|mts|cts|jsx?)$/;
-// Um símbolo SCIP local é `scip-typescript npm <pkg> <ver> <descritores>`, onde os
-// descritores começam com o caminho: `seg/seg/`file.ext`/<Type>#<method>().`.
+// Um símbolo SCIP local é `<scheme> <manager> <pkg> <ver> <descritores>`. Para o
+// scip-typescript os descritores começam com o caminho: `seg/seg/`file.ext`/<Type>#<method>().`.
 // Captura o prefixo de diretórios (sem crase) + o nome de arquivo em crases.
 const SCIP_FILE_RE = /^((?:[^\s`/]+\/)*)`([^`]+)`/;
+// Segmentos de diretório/pacote iniciais de um descritor SCIP (`seg/seg/…`). Comum
+// a scip-typescript (dirs até o arquivo em crases) e scip-java (pacote até o tipo).
+const PKG_SEGMENTS_RE = /^(?:[^\s`/]+\/)*/;
+// Componente de ARQUIVO em crases do scip-typescript (`file.ext`/), quando presente.
+const BACKTICK_FILE_RE = /^`[^`]+`\/?/;
+// Um símbolo SCIP com pacote é `scip-<lang> <manager> <pkg> <ver> <descritores>`
+// (spec SCIP). Aceita QUALQUER linguagem (scip-typescript, scip-java, scip-python…)
+// — a identidade canônica é agnóstica (ADR-0035 F1). `local 0` / texto solto não casam.
+const SCIP_SCHEME_RE = /^scip-[a-z0-9]+ /;
+
+/** Descritores de um símbolo SCIP (`parts.slice(4)`), ou null se não for um símbolo com pacote. */
+function descriptorsOf(sym: string): string | null {
+  if (typeof sym !== "string" || !SCIP_SCHEME_RE.test(sym)) return null;
+  const parts = sym.split(" ");
+  if (parts.length < 5) return null;
+  return parts.slice(4).join(" ");
+}
 
 /**
  * Extrai o caminho de arquivo (relativo ao repo) embutido num símbolo SCIP.
@@ -108,6 +149,11 @@ const SCIP_FILE_RE = /^((?:[^\s`/]+\/)*)`([^`]+)`/;
  * componente em crases não é um arquivo TS/JS. NÃO filtra por pacote — símbolos
  * de pacotes externos (typescript, @types/node, clsx) produzem caminhos que não
  * casam nenhum nó do projeto e são naturalmente descartados no índice.
+ *
+ * NOTA (F1): este parse-de-crases é específico do scip-typescript. Para scip-JAVA
+ * o arquivo NÃO está no símbolo (Java carrega pacote/classe) — o arquivo chega pelo
+ * deriver via `functionOfScipSymbol(sym, file)`. Aqui, sem `file`, um símbolo Java
+ * retorna null (sem componente em crases), como esperado.
  */
 export function fileOfScipSymbol(sym: string): string | null {
   const r = symbolFileAndFn(sym);
@@ -115,40 +161,63 @@ export function fileOfScipSymbol(sym: string): string | null {
 }
 
 /**
- * Extrai `{ file, fn }` de um símbolo SCIP (A5). `fn` é o descritor da FUNÇÃO/
- * método após o nome de arquivo, PAREN-FREE (o sufixo de chamada `().` do SCIP é
- * removido) — garante que o id de sub-nó `node:<file>::<fn>` não contenha `(`, e
- * o `classKeyOf` (system-graph.ts) o trate como nó atômico sem mudança de código.
- * Símbolo sem descritor de função (só o arquivo) → `fn = '<module>'`.
+ * Extrai `{ file, fn }` de um símbolo SCIP (A5, agnóstico à linguagem — ADR-0035 F1).
+ * `fn` é o descritor da FUNÇÃO/método, PAREN-FREE (o sufixo de chamada `(<disamb>).`
+ * do SCIP é removido — vazio no TS, não-vazio no Java) — garante que o id de sub-nó
+ * `<nodeId>::<fn>` não contenha `(`, e o `classKeyOf` (system-graph.ts) o trate como
+ * nó atômico sem mudança de código.
+ *
+ * Quando `file` é fornecido (pelo deriver: `fromFile`/`toFile`), ele é usado DIRETO
+ * como arquivo — caminho AGNÓSTICO que funciona para Java (símbolo sem arquivo em
+ * crases). O rótulo `fn` sai do descritor do símbolo em ambos os casos. Sem `file`,
+ * cai no parse-de-crases herdado (retrocompat total com o payload TS antigo).
  */
-export function functionOfScipSymbol(sym: string): { file: string; fn: string } | null {
-  return symbolFileAndFn(sym);
+export function functionOfScipSymbol(sym: string, file?: string | null): { file: string; fn: string } | null {
+  return symbolFileAndFn(sym, file);
 }
 
-function symbolFileAndFn(sym: string): { file: string; fn: string } | null {
-  if (typeof sym !== "string" || !sym.startsWith("scip-typescript ")) return null;
-  const parts = sym.split(" ");
-  if (parts.length < 5) return null;
-  const descriptors = parts.slice(4).join(" ");
+function symbolFileAndFn(sym: string, file?: string | null): { file: string; fn: string } | null {
+  const descriptors = descriptorsOf(sym);
+  if (descriptors == null) return null;
+  // (F1) arquivo fornecido pelo deriver → identidade agnóstica à linguagem.
+  if (typeof file === "string" && file) {
+    return { file, fn: fnLabelFromDescriptors(descriptors) };
+  }
+  // Retrocompat scip-typescript: extrai o arquivo do componente em crases + FILE_EXT.
   const m = SCIP_FILE_RE.exec(descriptors);
   if (!m) return null;
-  const file = m[1] + m[2]; // dir/ + nome-de-arquivo (sem crases)
-  if (!FILE_EXT.test(file)) return null;
+  const f = m[1] + m[2]; // dir/ + nome-de-arquivo (sem crases)
+  if (!FILE_EXT.test(f)) return null;
   const fn = normalizeFn(descriptors.slice(m[0].length));
-  return { file, fn };
+  return { file: f, fn };
+}
+
+/**
+ * Deriva o rótulo de função de um descritor SCIP, AGNÓSTICO à linguagem: remove os
+ * segmentos de diretório/pacote iniciais e o componente de arquivo em crases (TS),
+ * restando o `<Type>#<method>(<disamb>).` (ou só `<method>(<disamb>).`), que o
+ * `normalizeFn` deixa paren-free.
+ *   TS   `server/x/`f.ts`/Svc#run().`                → `Svc#run`
+ *   Java `easynup/services/web/Foo#execute(+1).`     → `Foo#execute`
+ */
+function fnLabelFromDescriptors(descriptors: string): string {
+  let rest = descriptors.replace(PKG_SEGMENTS_RE, ""); // dirs (TS) ou pacote (Java)
+  rest = rest.replace(BACKTICK_FILE_RE, ""); // arquivo em crases (só TS)
+  return normalizeFn(rest);
 }
 
 /**
  * Normaliza o descritor de função do SCIP num rótulo estável e paren-free:
  *   `/cn().`                          → `cn`
  *   `/ErrorBoundary#componentDidCatch().` → `ErrorBoundary#componentDidCatch`
+ *   `Foo#execute(+1).`                → `Foo#execute`   (scip-java: disambiguator não-vazio)
  *   `` (vazio — símbolo do arquivo)   → `<module>`
- * Remove separador inicial `/`, o sufixo de chamada `()`/`().`, crases residuais
- * e espaços. O resultado NUNCA contém `(` (invariante do id de sub-nó).
+ * Remove separador inicial `/`, o sufixo de chamada `(<disamb>)`/`(<disamb>).`, crases
+ * residuais e espaços. O resultado NUNCA contém `(` (invariante do id de sub-nó).
  */
 function normalizeFn(tail: string): string {
   let s = (tail || "").replace(/^\//, "").replace(/`/g, "").trim();
-  s = s.replace(/\(\)\.?$/, ""); // sufixo de chamada `()` ou `().`
+  s = s.replace(/\([^)]*\)\.?$/, ""); // sufixo de chamada `(<disamb>)` ou `(<disamb>).` — vazio (TS) ou não (Java)
   s = s.replace(/[()]/g, ""); // defesa: qualquer `(`/`)` remanescente
   return s || "<module>";
 }
@@ -189,40 +258,46 @@ export function buildFileNodeIndex(nodes: RawSystemNode[]): Map<string, string> 
   return index;
 }
 
-/**
- * Índice `id do nó-módulo → tipo` (para herdar o tipo no sub-nó de função).
- * Só nós `node:<file>` (SERVICE/REPOSITORY runtime=node) sustentam função.
- */
-function moduleTypeIndex(nodes: RawSystemNode[]): Map<string, string> {
-  const t = new Map<string, string>();
-  for (const n of nodes || []) if (n.id.startsWith("node:")) t.set(n.id, n.type);
+/** Índice `id do nó → nó` (para herdar tipo/runtime no sub-nó de função). */
+function nodeByIdIndex(nodes: RawSystemNode[]): Map<string, RawSystemNode> {
+  const t = new Map<string, RawSystemNode>();
+  for (const n of nodes || []) if (n && typeof n.id === "string") t.set(n.id, n);
   return t;
 }
 
+/** runtime declarado no nó-pai (`node`/`java`/…), para herdar no sub-nó. */
+function runtimeOfNode(n: RawSystemNode | undefined): string | undefined {
+  const r = n?.metadata?.runtime;
+  return typeof r === "string" && r ? r : undefined;
+}
+
 /**
- * Resolve o id do NÓ-DE-ENDPOINT de um símbolo (A5). Se o arquivo do símbolo
- * mapeia um nó-MÓDULO (`node:<file>`), refina para o SUB-NÓ DE FUNÇÃO
- * `node:<file>::<fn>` (registrando a spec do sub-nó). Se mapeia um nó COARSE
- * (rota/entidade — que não tem "função" no sentido de arquitetura), usa o nó
- * como está. Símbolo cujo arquivo não sustenta nó → null (órfão, §5).
+ * Resolve o id do NÓ-DE-ENDPOINT de um símbolo (A5, agnóstico à linguagem —
+ * ADR-0035 F1). O `buildFileNodeIndex` só indexa nós que têm `metadata.sourceFile`,
+ * então QUALQUER nó resolvido é file-backed e pode sustentar um sub-nó de função
+ * `<nodeId>::<fn>` — cobrindo controllers/services Java mapeados como `route:`/
+ * `class:` (e não só o `node:<file>` do runtime Node). O sub-nó herda tipo e
+ * runtime do nó-pai — para nós `node:` o resultado é IDÊNTICO ao anterior (byte-a-
+ * byte no TS). Símbolo cujo arquivo não sustenta nó → null (órfão, §5).
  */
 function resolveEndpoint(
   parsed: { file: string; fn: string },
   fileIndex: Map<string, string>,
-  moduleTypes: Map<string, string>,
+  nodeById: Map<string, RawSystemNode>,
   fnNodes: Map<string, FunctionNodeSpec>,
 ): string | null {
   const nodeId = fileIndex.get(parsed.file);
   if (!nodeId) return null;
-  if (!nodeId.startsWith("node:")) return nodeId; // coarse (rota/entidade): sem função
   const id = `${nodeId}::${parsed.fn}`;
   if (!fnNodes.has(id)) {
+    const parent = nodeById.get(nodeId);
     fnNodes.set(id, {
       id,
       parentModule: nodeId,
       sourceFile: parsed.file,
       label: parsed.fn,
-      type: moduleTypes.get(nodeId) || "SERVICE",
+      type: parent?.type || "SERVICE",
+      runtime: runtimeOfNode(parent),
     });
   }
   return id;
@@ -245,7 +320,7 @@ export function aggregateScipEdges(
   stats: Omit<MergeStats, "upgraded" | "added" | "functionNodesAdded">;
 } {
   const fileIndex = buildFileNodeIndex(nodes);
-  const moduleTypes = moduleTypeIndex(nodes);
+  const nodeById = nodeByIdIndex(nodes);
   const fnNodes = new Map<string, FunctionNodeSpec>();
   // Chave par-de-endpoints → melhor resolução vista (compiler > interface-impl).
   const best = new Map<string, "compiler" | "interface-impl">();
@@ -253,11 +328,13 @@ export function aggregateScipEdges(
   let intraDropped = 0;
   for (const e of derived || []) {
     if (!e || (e.resolution !== "compiler" && e.resolution !== "interface-impl")) continue;
-    const pa = functionOfScipSymbol(e.from);
-    const pb = functionOfScipSymbol(e.to);
+    // (F1) usa o arquivo fornecido pelo deriver quando presente — agnóstico à
+    // linguagem (obrigatório p/ Java); sem ele, cai no parse-de-crases TS.
+    const pa = functionOfScipSymbol(e.from, e.fromFile);
+    const pb = functionOfScipSymbol(e.to, e.toFile);
     if (!pa || !pb) { orphanDropped++; continue; }
-    const na = resolveEndpoint(pa, fileIndex, moduleTypes, fnNodes);
-    const nb = resolveEndpoint(pb, fileIndex, moduleTypes, fnNodes);
+    const na = resolveEndpoint(pa, fileIndex, nodeById, fnNodes);
+    const nb = resolveEndpoint(pb, fileIndex, nodeById, fnNodes);
     if (!na || !nb) { orphanDropped++; continue; }
     if (na === nb) { intraDropped++; continue; }
     const key = pairKey(na, nb);
@@ -339,7 +416,9 @@ export function mergeScipEdges(
       className: spec.label,
       metadata: {
         sourceFile: spec.sourceFile,
-        runtime: "node",
+        // runtime HERDADO do nó-pai (`node` p/ Node — byte-a-byte no TS; `java`
+        // p/ controllers/services Java). Omite a chave se o pai não a declara.
+        ...(spec.runtime ? { runtime: spec.runtime } : {}),
         scipProven: true,
         parentModule: spec.parentModule,
         function: spec.label,

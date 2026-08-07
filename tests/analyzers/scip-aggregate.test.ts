@@ -209,6 +209,157 @@ describe("mergeScipEdges (A5) — materializa sub-nós de função + arestas, se
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────
+// ADR-0035 F1 — scip-JAVA: identidade canônica AGNÓSTICA à linguagem.
+// O símbolo scip-java carrega pacote/CLASSE (não o arquivo em crases do TS); o
+// deriver fornece o arquivo-fonte por ponta (`fromFile`/`toFile`) e a agregação
+// o usa direto. Sem esses campos, o símbolo Java é órfão (sem crase → sem file).
+// ─────────────────────────────────────────────────────────────────────────
+const JSYM = {
+  createContract: "scip-java maven easynup 0.0.0 easynup/services/web/contract/CreateContractServiceV1#execute(+1).",
+  createContractValidate: "scip-java maven easynup 0.0.0 easynup/services/web/contract/CreateContractServiceV1#validate().",
+  contractRepoSave: "scip-java maven easynup 0.0.0 easynup/persistence/ContractRepository#save(+1).",
+  externalJava: "scip-java maven org.springframework 6.0.0 org/springframework/data/Repository#save().",
+};
+const JFILE = {
+  createSvc: "src/main/java/easynup/services/web/contract/CreateContractServiceV1.java",
+  repo: "src/main/java/easynup/persistence/ContractRepository.java",
+};
+
+describe("scip-JAVA (F1) — símbolo→função com arquivo fornecido pelo deriver", () => {
+  it("descriptorsOf agnóstico: scip-java aceito, `local`/lixo rejeitado", () => {
+    // parse-de-crases (sem file) → Java NÃO tem arquivo no símbolo → null (órfão honesto)
+    assert.equal(fileOfScipSymbol(JSYM.createContract), null);
+    assert.equal(functionOfScipSymbol(JSYM.createContract), null);
+  });
+  it("com `file` fornecido, extrai {file, fn} — fn = Classe#metodo PAREN-FREE", () => {
+    const r = functionOfScipSymbol(JSYM.createContract, JFILE.createSvc)!;
+    assert.deepEqual(r, { file: JFILE.createSvc, fn: "CreateContractServiceV1#execute" });
+    assert.ok(!r.fn.includes("("), "fn Java não pode conter (");
+    // método com disambiguator VAZIO (herança de assinatura) também vira paren-free
+    assert.equal(functionOfScipSymbol(JSYM.createContractValidate, JFILE.createSvc)!.fn, "CreateContractServiceV1#validate");
+    assert.equal(functionOfScipSymbol(JSYM.contractRepoSave, JFILE.repo)!.fn, "ContractRepository#save");
+  });
+});
+
+// Grafo Java: DOIS sabores de nó file-backed — um nó-MÓDULO `node:<file>.java` E
+// um nó `route:` com `metadata.sourceFile` apontando pro `.java` — para provar que
+// a generalização pendura sub-nó de função em AMBOS (route:/node:), não só `node:`.
+function javaFixtureGraph(): RawSystemGraph {
+  return {
+    nodes: [
+      // controller mapeado como ROTA (sem nó-módulo `node:` para este arquivo)
+      { id: "route:POST:/easynup/createContract.v1", type: "ROUTE", className: "CreateContractServiceV1", metadata: { sourceFile: JFILE.createSvc, httpMethod: "POST", runtime: "java", synthetic: true } },
+      // repositório mapeado como nó-MÓDULO
+      { id: `node:${JFILE.repo}`, type: "REPOSITORY", className: "ContractRepository", metadata: { sourceFile: JFILE.repo, runtime: "java", synthetic: true } },
+    ],
+    edges: [],
+  };
+}
+const JFN = {
+  createExecute: "route:POST:/easynup/createContract.v1::CreateContractServiceV1#execute",
+  createValidate: "route:POST:/easynup/createContract.v1::CreateContractServiceV1#validate",
+  repoSave: `node:${JFILE.repo}::ContractRepository#save`,
+};
+
+describe("aggregateScipEdges (F1) — arestas scip-JAVA agregam a STATIC_PROVEN", () => {
+  it("chamada controller(route:)→repo(node:) vira aresta função→função compiler", () => {
+    const nodes = javaFixtureGraph().nodes;
+    const derived: ScipDerivedEdge[] = [
+      { from: JSYM.createContract, to: JSYM.contractRepoSave, resolution: "compiler", fromFile: JFILE.createSvc, toFile: JFILE.repo },
+    ];
+    const { edges, functionNodes, stats } = aggregateScipEdges(nodes, derived);
+    assert.equal(stats.aggregated, 1);
+    assert.deepEqual(edges[0], { fromNode: JFN.createExecute, toNode: JFN.repoSave, relationType: "CALLS", resolution: "compiler" });
+    // sub-nó pendura no nó ROTA (não-`node:`) — a generalização em ação
+    const ctrl = functionNodes.find((n) => n.id === JFN.createExecute)!;
+    assert.equal(ctrl.parentModule, "route:POST:/easynup/createContract.v1");
+    assert.equal(ctrl.sourceFile, JFILE.createSvc);
+    assert.equal(ctrl.type, "ROUTE"); // tipo herdado do pai
+    assert.equal(ctrl.runtime, "java"); // runtime herdado do pai
+    const repo = functionNodes.find((n) => n.id === JFN.repoSave)!;
+    assert.equal(repo.type, "REPOSITORY");
+    // o `fn` no id é paren-free (classKeyOf atômico)
+    assert.ok(!ctrl.id.includes("(") && !repo.id.includes("("));
+  });
+
+  it("sub-nó de função pendura em nó `route:` (não só `node:`)", () => {
+    const nodes = javaFixtureGraph().nodes;
+    const derived: ScipDerivedEdge[] = [
+      { from: JSYM.createContract, to: JSYM.contractRepoSave, resolution: "compiler", fromFile: JFILE.createSvc, toFile: JFILE.repo },
+    ];
+    const { functionNodes } = aggregateScipEdges(nodes, derived);
+    assert.ok(functionNodes.some((n) => n.id.startsWith("route:") && n.id.includes("::")));
+  });
+
+  it("órfão: símbolo Java cujo `toFile` não casa nenhum nó → aresta descartada", () => {
+    const nodes = javaFixtureGraph().nodes;
+    const derived: ScipDerivedEdge[] = [
+      { from: JSYM.createContract, to: JSYM.externalJava, resolution: "compiler", fromFile: JFILE.createSvc, toFile: "org/springframework/data/Repository.java" },
+    ];
+    const { edges, stats } = aggregateScipEdges(nodes, derived);
+    assert.equal(edges.length, 0);
+    assert.equal(stats.orphanDropped, 1);
+  });
+
+  it("intra: auto-chamada Java (mesmo arquivo+método) descartada; duas funções do mesmo arquivo contam", () => {
+    const nodes = javaFixtureGraph().nodes;
+    // auto-chamada: mesmo símbolo/arquivo → mesmo endpoint → intra
+    const selfCall: ScipDerivedEdge[] = [
+      { from: JSYM.createContract, to: JSYM.createContract, resolution: "compiler", fromFile: JFILE.createSvc, toFile: JFILE.createSvc },
+    ];
+    assert.equal(aggregateScipEdges(nodes, selfCall).stats.intraDropped, 1);
+    // duas funções DISTINTAS do mesmo arquivo → aresta função→função legítima
+    const twoFns: ScipDerivedEdge[] = [
+      { from: JSYM.createContract, to: JSYM.createContractValidate, resolution: "compiler", fromFile: JFILE.createSvc, toFile: JFILE.createSvc },
+    ];
+    const { edges, stats } = aggregateScipEdges(nodes, twoFns);
+    assert.equal(stats.intraDropped, 0);
+    assert.deepEqual(edges[0], { fromNode: JFN.createExecute, toNode: JFN.createValidate, relationType: "CALLS", resolution: "compiler" });
+  });
+
+  it("interface-impl Java NÃO é colapsado; dedup compiler>interface-impl no mesmo par", () => {
+    const nodes = javaFixtureGraph().nodes;
+    const impls: ScipDerivedEdge[] = [
+      { from: JSYM.createContract, to: JSYM.contractRepoSave, resolution: "interface-impl", fromFile: JFILE.createSvc, toFile: JFILE.repo },
+    ];
+    assert.equal(aggregateScipEdges(nodes, impls).edges[0].resolution, "interface-impl");
+    const both: ScipDerivedEdge[] = [
+      { from: JSYM.createContract, to: JSYM.contractRepoSave, resolution: "interface-impl", fromFile: JFILE.createSvc, toFile: JFILE.repo },
+      { from: JSYM.createContract, to: JSYM.contractRepoSave, resolution: "compiler", fromFile: JFILE.createSvc, toFile: JFILE.repo },
+    ];
+    const { edges } = aggregateScipEdges(nodes, both);
+    assert.equal(edges.length, 1);
+    assert.equal(edges[0].resolution, "compiler");
+  });
+});
+
+describe("mergeScipEdges + shapeSystemGraph (F1) — arestas Java viram STATIC_PROVEN", () => {
+  it("Java function→function agrega e é classificada STATIC_PROVEN (systemEdgesProven>0)", () => {
+    const raw = javaFixtureGraph();
+    const before = shapeSystemGraph(raw, "class");
+    assert.equal(before.coverage.edges.byMethod.STATIC_PROVEN, 0);
+
+    const payload = {
+      edges: [
+        { from: JSYM.createContract, to: JSYM.contractRepoSave, resolution: "compiler" as const, fromFile: JFILE.createSvc, toFile: JFILE.repo },
+        { from: JSYM.createContract, to: JSYM.createContractValidate, resolution: "compiler" as const, fromFile: JFILE.createSvc, toFile: JFILE.createSvc },
+      ],
+    };
+    const { graph, stats } = mergeScipEdges(raw, payload);
+    assert.equal(stats.aggregated, 2);
+    assert.ok(stats.functionNodesAdded >= 3); // execute, validate, save
+    // o sub-nó Java carrega runtime herdado `java` (facet de stack preservado)
+    const execNode = graph.nodes.find((n) => n.id === JFN.createExecute)!;
+    assert.equal((execNode.metadata as any).runtime, "java");
+    assert.equal((execNode.metadata as any).scipProven, true);
+
+    const after = shapeSystemGraph(graph, "class");
+    assert.equal(after.coverage.edges.byMethod.STATIC_PROVEN, 2);
+    assert.ok(after.edges.filter((e) => e.evidence.method === "STATIC_PROVEN").length === 2);
+  });
+});
+
 // ── O 1º teste do DoD (ADR-0031 §6 A3/A5): o STATIC_PROVEN sobe, e a
 // granularidade de FUNÇÃO faz o par intra-arquivo contar (antes descartado). ──
 describe("fim-a-fim: função→função sobe o STATIC_PROVEN do censo — inclusive intra-arquivo", () => {
