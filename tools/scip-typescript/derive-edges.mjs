@@ -15,6 +15,12 @@
 //                     resolution:'compiler'/'interface-impl' (espelha o
 //                     backend-java-client). Ver ADR-0030 §4.
 //
+// ADR-0035 F1 — cada aresta carrega `fromFile`/`toFile` (arquivo-fonte de DEFINIÇÃO
+// de cada ponta). O `toFile` sai de um índice GLOBAL símbolo→documento-de-definição
+// (o callee é definido noutro doc). Isso torna a agregação no Manifest AGNÓSTICA à
+// linguagem: o símbolo scip-JAVA carrega pacote/classe, não o arquivo — sem estes
+// campos, a agregação não conseguia mapear arestas Java a nós de sistema.
+//
 // O MURO honesto (ADR-0030 §5): o que fica aqui é chamada DIRETA resolvida pelo
 // checker + interface→K-candidatos. DI concreta / dispatch dinâmico / reflexão
 // NÃO aparecem aqui — ficam com o RUNTIME_OBSERVED (ADR-0029, hub OTel).
@@ -73,6 +79,8 @@ const rangeArr = (tr) => {
 // range do binário (array direto) OU do JSON do CLI (TypedRange aninhado).
 const rangeOf = (o) => (Array.isArray(o.range) && o.range.length ? o.range : rangeArr(o.TypedRange));
 const isImpl = (r) => r.is_implementation ?? r.isImplementation;
+// Caminho relativo do documento: snake_case (binário) e lowerCamelCase (--json).
+const relPathOf = (d) => d.relative_path ?? d.relativePath ?? null;
 
 // SCIP range: [startLine, startChar, endLine, endChar] ou [line, startChar, endChar].
 const pos = (l, c) => l * 1_000_000 + c;
@@ -103,14 +111,32 @@ for (const d of idx.documents)
         implsOf.get(r.symbol).add(s.symbol);
       }
 
-const proven = new Set(); // "A => B" (chamada direta resolvida pelo checker)
-const ifaceImpl = new Set(); // "A => impl" (via interface, K candidatos)
+// ADR-0035 F1 — índice GLOBAL símbolo→arquivo-de-DEFINIÇÃO. O símbolo scip-JAVA
+// carrega pacote/classe, não o arquivo — então a agregação no Manifest precisa do
+// arquivo-fonte por ponta da aresta. Varre TODAS as ocorrências de método marcadas
+// Definition e mapeia o símbolo ao `relative_path` do documento que o define.
+// (scip-typescript também ganha o campo; lá o arquivo coincide com o parse-de-crases.)
+const defDoc = new Map(); // symbol → relative_path da def
+for (const d of idx.documents) {
+  const rel = relPathOf(d);
+  if (!rel) continue;
+  for (const o of d.occurrences || []) {
+    if (!isMethodSym(o.symbol)) continue;
+    if (!(rolesOf(o) & DEFINITION)) continue;
+    if (!defDoc.has(o.symbol)) defDoc.set(o.symbol, rel);
+  }
+}
+
+// "A => B" → { from, to, fromFile, toFile } (dedup por chave, preserva o 1º visto).
+const proven = new Map(); // chamada direta resolvida pelo checker
+const ifaceImpl = new Map(); // via interface, K candidatos
 
 // Diagnóstico multi-linguagem: distingue 0-arestas por MATCHING (0 defs/refs)
 // vs por ATRIBUIÇÃO (refs achadas mas fora de qualquer corpo de método).
 let nMethodDefs = 0, nMethodRefs = 0, nWithEnclosing = 0, nAttributed = 0, nOrphan = 0;
 
 for (const d of idx.documents) {
+  const docRel = relPathOf(d); // arquivo de DEFINIÇÃO do chamador (mesmo doc)
   // Corpos dos métodos (potenciais chamadores). enclosing_range quando há;
   // senão, aproxima o corpo por [def.start, próxima-def.start).
   const defs = [];
@@ -147,19 +173,30 @@ for (const d of idx.documents) {
     if (!caller) { nOrphan++; continue; }
     nAttributed++;
     if (caller.sym === o.symbol) continue;
-    proven.add(caller.sym + ' => ' + o.symbol);
+    const key = caller.sym + ' => ' + o.symbol;
+    if (!proven.has(key))
+      proven.set(key, { from: caller.sym, to: o.symbol, fromFile: docRel, toFile: defDoc.get(o.symbol) });
     if (implsOf.has(o.symbol))
-      for (const impl of implsOf.get(o.symbol)) ifaceImpl.add(caller.sym + ' => ' + impl);
+      for (const impl of implsOf.get(o.symbol)) {
+        const ik = caller.sym + ' => ' + impl;
+        if (!ifaceImpl.has(ik))
+          ifaceImpl.set(ik, { from: caller.sym, to: impl, fromFile: docRel, toFile: defDoc.get(impl) });
+      }
   }
 }
 
-const toEdge = (line, resolution) => {
-  const [from, to] = line.split(' => ');
-  return { from, to, kind: 'CALLS', resolution };
+// Aresta com o arquivo-fonte por ponta (F1). `fromFile`/`toFile` omitidos quando
+// desconhecidos (símbolo externo sem def indexada) — a agregação então os trata
+// como órfãos (correto: sem arquivo, não há nó de sistema para pendurar).
+const toEdge = (rec, resolution) => {
+  const e = { from: rec.from, to: rec.to, kind: 'CALLS', resolution };
+  if (rec.fromFile) e.fromFile = rec.fromFile;
+  if (rec.toFile) e.toFile = rec.toFile;
+  return e;
 };
 const edges = [
-  ...[...proven].map((e) => toEdge(e, 'compiler')),
-  ...[...ifaceImpl].map((e) => toEdge(e, 'interface-impl')),
+  ...[...proven.values()].map((e) => toEdge(e, 'compiler')),
+  ...[...ifaceImpl.values()].map((e) => toEdge(e, 'interface-impl')),
 ];
 
 // Compacto (sem indentação): 338k arestas indentadas passavam de 85MB → 413.
