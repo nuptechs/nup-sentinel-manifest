@@ -106,6 +106,17 @@ function dbOpOf(tg: Record<string, string>): string {
   return (tg["db.operation.name"] || tg["db.operation"] || "").toUpperCase();
 }
 
+/**
+ * Normaliza o nome de uma tabela vinda do span: tira o SCHEMA/db (`railway.
+ * audit_log` → `audit_log`), aspas/colchetes, e reduz a snake_case minúsculo.
+ * O `db.name`/schema é ruído — só o nome da tabela importa para casar a entidade.
+ */
+export function normalizeTableName(raw: string): string {
+  if (!raw || typeof raw !== "string") return "";
+  const bare = raw.replace(/[`"[\]]/g, "").split(".").pop() || raw;
+  return toSnakeCase(bare).toLowerCase();
+}
+
 function tagsOf(sp: JaegerSpan): Record<string, string> {
   const o: Record<string, string> = {};
   for (const t of sp?.tags || []) o[t.key] = String(t.value ?? "");
@@ -161,7 +172,7 @@ export function extractRuntimePairs(
     for (const s of spans) {
       const tg = tagsOf(s);
       const op = dbOpOf(tg);
-      for (const tbl of tablesFromDbSpan(tg)) tables.push({ table: toSnakeCase(tbl), op });
+      for (const tbl of tablesFromDbSpan(tg)) tables.push({ table: normalizeTableName(tbl), op });
       const hr = tg["http.route"] || "";
       const opMatch = hr.match(opRe);
       if (opMatch) javaEndpoints.add(opMatch[0]);
@@ -295,6 +306,164 @@ export function applyRuntimeOverlay(
   return res;
 }
 
+// ─────────────────────────────────────────────
+// Mapeamento DIRETO tabela→ENTITY (independente de rota) — o caso do TRAÇO
+// FRAGMENTO.
+//
+// Achado ao vivo (2026-08-07): no hub, os traços `easynup-backend` são
+// FRAGMENTOS — carregam spans de DB com `db.sql.table` mas NÃO o span de rota
+// HTTP (o Gateway, que emite o span-raiz com `http.route`/`url.path`, roda deploy
+// antigo e exporta pro collector morto). Logo `extractRuntimePairs` (que precisa
+// do par rota→tabela) acha 0 pares e o `RUNTIME_OBSERVED` fica 0 mesmo com o hub
+// cheio de spans de DB.
+//
+// Correção: se um span de runtime TOCA a tabela `T`, a ENTIDADE correspondente
+// foi PROVADAMENTE acessada em runtime — evidência de 1ª classe do que o mapa
+// quer ("isto executou de fato"), SEM depender da rota. Marca o nó ENTITY como
+// `runtimeHot` (→ `coverage.nodes.observed` + `evidence.method=RUNTIME_OBSERVED`)
+// e emite uma aresta `RUNTIME_OBSERVED` de uma fonte de runtime sintética e
+// TRANSPARENTE (`runtime:db:<serviço>`, `dbFragment:true`) → a entidade, para o
+// censo de arestas (`coverage.byMethod.RUNTIME_OBSERVED`) também acender. A fonte
+// diz honestamente "acesso a DB observado, rota indisponível (traço fragmentado)".
+// Continua valendo o par rota→tabela quando o traço COMPLETO existir.
+// ─────────────────────────────────────────────
+
+/** Tabela tocada em runtime, agregada por nome (snake, schema-stripped). */
+export interface RuntimeTableHit {
+  table: string;                 // nome normalizado (audit_log, sla_indicator)
+  count: number;                 // nº de spans de DB que a tocaram
+  ops: Set<string>;              // verbos observados (SELECT/INSERT/…)
+  services: Set<string>;         // serviços OTel cujos spans a tocaram
+  traceIds: string[];            // amostra (≤5)
+  lastSeenMs: number;
+}
+
+export interface RuntimeTableObservationResult {
+  tablesObserved: number;   // tabelas distintas tocadas em runtime
+  entitiesResolved: number; // tabela casou uma ENTITY existente
+  tablesMinted: number;     // tabela sem ENTITY → mintou table:<n>
+  nodesMarked: number;      // nós de entidade marcados runtimeHot
+  edges: number;            // arestas RUNTIME_OBSERVED fonte→entidade emitidas
+}
+
+/**
+ * Extrai, de traços crus, o conjunto de TABELAS tocadas por spans de DB —
+ * INDEPENDENTE de rota (funciona no traço fragmento que só tem span de DB). PURO.
+ * Agrega por nome de tabela normalizado. `opts.dbServices` opcional restringe os
+ * serviços considerados (default: qualquer serviço).
+ */
+export function extractRuntimeTableHits(
+  traces: JaegerTrace[],
+  opts: { dbServices?: string[] } = {},
+): RuntimeTableHit[] {
+  const allow = opts.dbServices && opts.dbServices.length ? new Set(opts.dbServices) : null;
+  const byTable = new Map<string, RuntimeTableHit>();
+  for (const t of traces || []) {
+    const spans = Array.isArray(t?.spans) ? t.spans : [];
+    if (!spans.length) continue;
+    const procs = t.processes || {};
+    for (const s of spans) {
+      const svc = procs[s?.processID || ""]?.serviceName || "";
+      if (allow && !allow.has(svc)) continue;
+      const tg = tagsOf(s);
+      const op = dbOpOf(tg);
+      const seen = new Set<string>();
+      for (const raw of tablesFromDbSpan(tg)) {
+        const table = normalizeTableName(raw);
+        if (!table || seen.has(table)) continue;
+        seen.add(table);
+        let hit = byTable.get(table);
+        if (!hit) {
+          hit = { table, count: 0, ops: new Set(), services: new Set(), traceIds: [], lastSeenMs: 0 };
+          byTable.set(table, hit);
+        }
+        hit.count++;
+        if (op) hit.ops.add(op);
+        if (svc) hit.services.add(svc);
+        if (hit.traceIds.length < 5 && t.traceID && !hit.traceIds.includes(t.traceID)) hit.traceIds.push(t.traceID);
+        if (typeof s.startTime === "number") hit.lastSeenMs = Math.max(hit.lastSeenMs, Math.round(s.startTime / 1000));
+      }
+    }
+  }
+  return Array.from(byTable.values());
+}
+
+/**
+ * Mescla os hits de tabela como observação de runtime da ENTIDADE. PURO (muta o
+ * grafo, sem rede). Reusa `toSnakeCase(className)` — a MESMA convenção do índice
+ * de entidade do `applyRuntimeOverlay` — então `sla_indicator`→`SlaIndicator`,
+ * `audit_log`→`AuditLog`, `snap_point_category`→`SnapPointCategory` casam.
+ */
+export function applyRuntimeTableObservations(
+  graph: ApplicationGraph,
+  hits: RuntimeTableHit[],
+): RuntimeTableObservationResult {
+  const res: RuntimeTableObservationResult = {
+    tablesObserved: hits.length, entitiesResolved: 0, tablesMinted: 0, nodesMarked: 0, edges: 0,
+  };
+  // índice tabela(snake) → id de nó ENTITY (mesma convenção do overlay de rota).
+  const entityByTable = new Map<string, string>();
+  for (const n of graph.getNodesByType("ENTITY")) {
+    const cn = n.className || n.id.split(":").pop() || "";
+    const key = toSnakeCase(cn);
+    if (key && !entityByTable.has(key)) entityByTable.set(key, n.id);
+  }
+
+  const markHot = (id: string, count: number, lastSeenMs: number) => {
+    const n = graph.getNode(id);
+    if (!n) return;
+    const md = (n.metadata || {}) as Record<string, unknown>;
+    (n as { metadata?: Record<string, unknown> }).metadata = md;
+    md.runtimeHot = true;
+    md.runtimeCount = (Number(md.runtimeCount) || 0) + count;
+    if (lastSeenMs) md.runtimeLastSeenMs = Math.max(Number(md.runtimeLastSeenMs) || 0, lastSeenMs);
+  };
+  const edgeSeen = new Set<string>();
+  const addObserved = (from: string, to: string, meta: Record<string, unknown>) => {
+    if (from === to) return false;
+    const k = `${from}->${to}`;
+    if (edgeSeen.has(k)) return false;
+    if (graph.getOutgoingEdges(from).some((e) => e.toNode === to && e.relationType === "RUNTIME_OBSERVED")) {
+      edgeSeen.add(k);
+      return false;
+    }
+    edgeSeen.add(k);
+    graph.addEdge(new GraphEdge(from, to, "RUNTIME_OBSERVED", { observed: true, source: "jaeger", ...meta }));
+    return true;
+  };
+
+  for (const h of hits) {
+    let target = entityByTable.get(h.table);
+    if (target) {
+      res.entitiesResolved++;
+    } else {
+      target = `table:${h.table}`;
+      if (!graph.getNode(target)) {
+        graph.addNode(new GraphNode(target, "ENTITY", h.table, null, null, { runtimeOnly: true, observed: true, synthetic: true }));
+        entityByTable.set(h.table, target);
+      }
+      res.tablesMinted++;
+    }
+    markHot(target, h.count, h.lastSeenMs);
+    res.nodesMarked++;
+
+    // Fonte de runtime sintética e TRANSPARENTE (rota indisponível no fragmento).
+    const svc = Array.from(h.services)[0] || "runtime";
+    const src = `runtime:db:${svc}`;
+    if (!graph.getNode(src)) {
+      graph.addNode(new GraphNode(src, "ROUTE", `db@${svc}`, null, null, {
+        runtimeOnly: true, observed: true, synthetic: true, dbFragment: true, service: svc,
+      }));
+    }
+    markHot(src, h.count, h.lastSeenMs);
+    const op = Array.from(h.ops)[0] || undefined;
+    if (addObserved(src, target, { count: h.count, operation: op, dbFragment: true, traceIds: h.traceIds.slice(0, 5), lastSeenMs: h.lastSeenMs || undefined })) {
+      res.edges++;
+    }
+  }
+  return res;
+}
+
 // ─── Leitor Jaeger (rede; gated + fail-soft + time-boxed) ───
 export interface FetchTracesOpts {
   baseUrl: string;
@@ -346,6 +515,85 @@ export async function fetchRecentTraces(opts: FetchTracesOpts): Promise<JaegerTr
     }
   }
   return Array.from(byTrace.values());
+}
+
+// ─── Orquestrador da costura (o que o pipeline invoca) ───
+export interface RuntimeOverlaySummary {
+  traces: number;
+  dbSpanHits: number;      // total de spans de DB (soma dos counts por tabela)
+  routePairs: number;      // rotas observadas com par rota→tabela (traço completo)
+  routeEntityEdges: number;
+  routeJavaEdges: number;
+  tablesObserved: number;
+  entitiesResolved: number;
+  tablesMinted: number;
+  entityNodesMarked: number;
+  tableEntityEdges: number;
+}
+
+export interface RunRuntimeOverlayDeps {
+  /** sink de log SEMPRE chamado (nunca no-op silencioso). */
+  onLog?: (msg: string) => void;
+  /** injeção para teste; default = fetch global via fetchRecentTraces. */
+  fetchFn?: typeof fetch;
+  nowMs?: number;
+}
+
+/**
+ * Orquestra a costura runtime↔estático sobre um grafo: busca traços, aplica o par
+ * rota→tabela (traço COMPLETO) E o mapeamento direto tabela→ENTITY (traço
+ * FRAGMENTO), e LOGA HONESTAMENTE cada etapa (config, nº de traços, nº de spans de
+ * DB, nº de arestas por caminho). Fail-soft: erro de rede → 0, nunca lança. É o
+ * ponto único que o `analysis-pipeline` chama — o teste exercita esse mesmo caminho.
+ */
+export async function runRuntimeOverlay(
+  graph: ApplicationGraph,
+  cfg: ResolvedRuntimeOverlayConfig,
+  deps: RunRuntimeOverlayDeps = {},
+): Promise<RuntimeOverlaySummary> {
+  const log = (m: string) => deps.onLog?.(m);
+  log(`Runtime overlay ON — jaeger=${cfg.jaegerUrl} serviços=[${cfg.services.join(",")}] raízes=[${cfg.gatewayServices.join(",")}]`);
+
+  const traces = await fetchRecentTraces({
+    baseUrl: cfg.jaegerUrl,
+    apiKey: cfg.apiKey,
+    services: cfg.services,
+    lookbackMs: cfg.lookbackMs,
+    limit: cfg.limit,
+    nowMs: deps.nowMs,
+    fetchFn: deps.fetchFn,
+  });
+
+  // (1) par rota→tabela — traço COMPLETO (root HTTP + spans de DB).
+  const pairs = extractRuntimePairs(traces, { gatewayServices: cfg.gatewayServices, opPathPattern: cfg.opPathPattern });
+  const ov = applyRuntimeOverlay(graph, pairs);
+
+  // (2) tabela→ENTITY direto — traço FRAGMENTO (só span de DB, sem rota).
+  const hits = extractRuntimeTableHits(traces, { dbServices: cfg.services });
+  const tobs = applyRuntimeTableObservations(graph, hits);
+  const dbSpanHits = hits.reduce((a, h) => a + h.count, 0);
+
+  log(
+    `Runtime overlay: traços=${traces.length} spans-DB=${dbSpanHits} · ROTA: pares=${pairs.length} arestas=${ov.entityEdges}entidade+${ov.wsv1Edges}java · TABELA→ENTIDADE: tabelas=${tobs.tablesObserved} (${tobs.entitiesResolved}✓/${tobs.tablesMinted}mint) nós=${tobs.nodesMarked} arestas=${tobs.edges}`,
+  );
+  if (traces.length > 0 && ov.routesObserved === 0 && tobs.tablesObserved === 0) {
+    log(`Runtime overlay: ${traces.length} traços mas 0 rota E 0 tabela — spans sem url.path/http.route NEM db.sql.table/db.statement. Confira a instrumentação/serviços OTel [${cfg.services.join(",")}].`);
+  } else if (tobs.tablesObserved > 0 && ov.routesObserved === 0) {
+    log(`Runtime overlay: traços FRAGMENTO (spans de DB sem span de rota) — a entidade foi marcada RUNTIME_OBSERVED direto pela tabela (rota indisponível; Gateway não exporta pro hub).`);
+  }
+
+  return {
+    traces: traces.length,
+    dbSpanHits,
+    routePairs: pairs.length,
+    routeEntityEdges: ov.entityEdges,
+    routeJavaEdges: ov.wsv1Edges,
+    tablesObserved: tobs.tablesObserved,
+    entitiesResolved: tobs.entitiesResolved,
+    tablesMinted: tobs.tablesMinted,
+    entityNodesMarked: tobs.nodesMarked,
+    tableEntityEdges: tobs.edges,
+  };
 }
 
 // ─── ADR-0028 P1.1 — resolução de config POR PROJETO (pura, testável) ───

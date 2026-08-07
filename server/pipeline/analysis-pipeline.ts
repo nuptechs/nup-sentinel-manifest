@@ -198,15 +198,23 @@ export class AnalysisPipeline {
       // grafo persistido (a cadeia clique→dado vira navegável no System Map).
       // Idempotente: no cache-hit de backend o grafo cacheado é só-Java e o
       // augment re-roda; addNode/addEdge dedupam.
-      const fsAug = augmentGraphWithFullStack(appGraph, frontendInteractions, extractExpressRoutes(frontendFiles), frontendFiles);
-      // Onda 6b: cadeia componente→api/*.ts→URL resolvida deterministicamente
-      const apiAug = linkViewsViaApiLayer(appGraph, frontendFiles);
-      if (apiAug.edges > 0) this.progress("Step 3/4", `API-layer: +${apiAug.views} telas, +${apiAug.edges} arestas tela→backend`);
-      // Onda 6b-2: salto de composable + URL inline no componente
-      const compAug = linkViewsViaComposablesAndInline(appGraph, frontendFiles);
-      if (compAug.edges > 0) this.progress("Step 3/4", `Composable/inline: +${compAug.views} telas, +${compAug.edges} arestas`);
-      if (fsAug.views + fsAug.routes + fsAug.edges > 0) {
-        this.progress("Step 3/4", `Full-stack: +${fsAug.views} telas, +${fsAug.routes} rotas gateway, +${fsAug.edges} arestas`);
+      // FAIL-SOFT: um erro num augment de frontend NÃO pode abortar a análise e
+      // pular a costura de runtime + o snapshot (era uma causa possível do
+      // "overlay nem loga"). Cada augment é isolado; a análise segue.
+      try {
+        const fsAug = augmentGraphWithFullStack(appGraph, frontendInteractions, extractExpressRoutes(frontendFiles), frontendFiles);
+        // Onda 6b: cadeia componente→api/*.ts→URL resolvida deterministicamente
+        const apiAug = linkViewsViaApiLayer(appGraph, frontendFiles);
+        if (apiAug.edges > 0) this.progress("Step 3/4", `API-layer: +${apiAug.views} telas, +${apiAug.edges} arestas tela→backend`);
+        // Onda 6b-2: salto de composable + URL inline no componente
+        const compAug = linkViewsViaComposablesAndInline(appGraph, frontendFiles);
+        if (compAug.edges > 0) this.progress("Step 3/4", `Composable/inline: +${compAug.views} telas, +${compAug.edges} arestas`);
+        if (fsAug.views + fsAug.routes + fsAug.edges > 0) {
+          this.progress("Step 3/4", `Full-stack: +${fsAug.views} telas, +${fsAug.routes} rotas gateway, +${fsAug.edges} arestas`);
+        }
+      } catch (err) {
+        console.error(`[pipeline] full-stack augment falhou (fail-soft, segue p/ overlay+snapshot): ${err}`);
+        this.progress("Step 3/4", `Full-stack augment falhou (fail-soft): ${(err as Error)?.message || err}`);
       }
 
       // COSTURA runtime↔estático (ADR-0026 / ADR-073 / ADR-0028 P1.1): arestas
@@ -218,7 +226,7 @@ export class AnalysisPipeline {
       // projeto (ex. NuPIdentify) e o observedRatio fica 0. GATED/fail-soft/
       // time-boxed — sem config em nenhuma camada = byte-a-byte ao de hoje.
       try {
-        const { fetchRecentTraces, extractRuntimePairs, applyRuntimeOverlay, resolveRuntimeOverlayConfig, projectOverlayConfig } =
+        const { runRuntimeOverlay, resolveRuntimeOverlayConfig, projectOverlayConfig } =
           await import("../analyzers/runtime-overlay");
         const overlayProject = await storage.getProject(projectId).catch(() => null);
         const cfg = resolveRuntimeOverlayConfig(projectOverlayConfig(overlayProject), process.env);
@@ -230,39 +238,16 @@ export class AnalysisPipeline {
             `Runtime overlay OFF — sem JAEGER_QUERY_URL/RUNTIME_OVERLAY_JAEGER_URL no env do processo nem conventionProfile.runtimeOverlay no projeto (byte-a-byte, sem costura).`,
           );
         } else {
-          this.progress(
-            "Step 3/4",
-            `Runtime overlay ON — jaeger=${cfg.jaegerUrl} serviços=[${cfg.services.join(",")}] raízes=[${cfg.gatewayServices.join(",")}]`,
-          );
-          const traces = await fetchRecentTraces({
-            baseUrl: cfg.jaegerUrl,
-            apiKey: cfg.apiKey,
-            services: cfg.services,
-            lookbackMs: cfg.lookbackMs,
-            limit: cfg.limit,
+          // Orquestrador único: par rota→tabela (traço completo) + mapeamento
+          // DIRETO tabela→ENTITY (traço fragmento). Loga SEMPRE (config, traços,
+          // spans-DB, arestas por caminho). Mesmo caminho que o teste exercita.
+          await runRuntimeOverlay(appGraph, cfg, {
+            onLog: (m) => this.progress("Step 3/4", m),
           });
-          // TODOS os serviços da allowlist são raízes candidatas (não só o de
-          // fronteira): um traço rooteado no BACKEND — o que carrega os spans de
-          // DB — precisa ser minerado, senão o overlay produz 0 aresta mesmo com
-          // o hub cheio de traços de `easynup-backend`.
-          const pairs = extractRuntimePairs(traces, {
-            gatewayServices: cfg.gatewayServices,
-            opPathPattern: cfg.opPathPattern,
-          });
-          const ov = applyRuntimeOverlay(appGraph, pairs);
-          this.progress(
-            "Step 3/4",
-            `Runtime overlay: traços=${traces.length} pares=${pairs.length} rotas obs=${ov.routesMatched}✓+${ov.routesMinted}novas · arestas obs=${ov.entityEdges} rota→entidade +${ov.wsv1Edges} rota→Java · tabelas ${ov.tablesResolved}✓/${ov.tablesMinted}mint · hot=${ov.hotNodes}`,
-          );
-          if (traces.length > 0 && pairs.length === 0) {
-            this.progress(
-              "Step 3/4",
-              `Runtime overlay: ${traces.length} traços mas 0 pares — nenhum span-raiz dos serviços [${cfg.gatewayServices.join(",")}] com url.path/http.route/http.target. Confira os nomes de serviço OTel (services/RUNTIME_OVERLAY_SERVICES).`,
-            );
-          }
         }
       } catch (err) {
         console.error(`[pipeline] runtime overlay falhou (fail-soft): ${err}`);
+        this.progress("Step 3/4", `Runtime overlay falhou (fail-soft): ${(err as Error)?.message || err}`);
       }
 
       let catalogEntryData = this.connectGraph(
@@ -386,6 +371,11 @@ export class AnalysisPipeline {
       return { ...result, cacheStatus, securityFindings, securityMetrics };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "Analysis failed";
+      // LOG LOUD (o catch era SILENCIOSO): uma falha ANTES da costura de runtime
+      // deixava o `/graph` servir um snapshot velho (RUNTIME_OBSERVED=0) sem
+      // NENHUM rastro nos logs — indiagnosticável. Agora a falha é visível.
+      console.error(`[pipeline] runFullAnalysis FALHOU (projeto ${projectId}, run ${analysisRun.id}): ${errorMsg}`, error instanceof Error ? error.stack : "");
+      this.progress("Analysis", `FALHOU: ${errorMsg}`);
       await storage.updateAnalysisRun(analysisRun.id, {
         status: "failed",
         completedAt: new Date(),
