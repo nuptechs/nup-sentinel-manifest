@@ -28,6 +28,20 @@
 // ao contrário do scip (que abre sub-nós de FUNÇÃO) — NÃO materializamos nós novos;
 // só ligamos nós de classe que JÁ existem no grafo.
 //
+// ⚠️ IDENTIDADE DE NÓ NO GRAFO REAL (o bug do #140, corrigido aqui). O comentário
+// original supunha que o nó Java tem id `<STEREOTYPE>:<FQN>`
+// (`SERVICE:easynup.services.x.MyPort`), mas o `java-analyzer.ts` do Engine A usa o
+// NOME SIMPLES da classe no id (`SERVICE:MyPort.metodo`, `ENTITY:Contract`,
+// `REPOSITORY:Foo.findById`, `CONTROLLER:Bar.get`) — o PACOTE só aparece em
+// `metadata.sourceFile` (o caminho do arquivo). Como as config-edges vêm em FQN
+// PONTUADO com pacote (`easynup.services.x.MyPort`), casar o FQN pelo id (nome
+// simples) resulta em ZERO match (o `configEdgesProven:0` medido no projeto 27).
+// Por isso o índice reconstrói o FQN de cada nó a partir de `sourceFile` + nome de
+// classe (os SUFIXOS pontuados do caminho, terminando na classe) — exatamente como
+// o scip resolve por ARQUIVO (`buildFileNodeIndex`), mas mantendo a identidade FQN
+// que a config-edge carrega. O caminho legado (FQN-embutido-no-id) segue suportado
+// (retrocompat com o símbolo scip-java e fixtures FQN-in-id).
+//
 // PURO e testável (nenhum I/O). Espelha o `mergeScipEdges`: mescla evidência EXTERNA
 // no grafo persistido, GATED + fail-soft (sem `configEdges`, o `/graph` é byte-a-byte).
 //
@@ -142,30 +156,110 @@ function fqnOfClassKey(classKey: string): string {
   return i >= 0 ? classKey.slice(i + 1) : classKey;
 }
 
+/** `metadata.sourceFile` de um nó, se for string não-vazia. */
+function sourceFileOf(n: RawSystemNode): string | undefined {
+  const sf = n?.metadata?.sourceFile;
+  return typeof sf === "string" && sf ? sf : undefined;
+}
+
+// Extensões de arquivo de código que um `sourceFile` pode carregar (removidas antes
+// de pontilhar o caminho). Java é o caso das config-edges; as demais são inócuas.
+const CODE_EXT_RE = /\.(?:java|kt|kts|scala|groovy|tsx?|jsx?|mts|cts)$/i;
+
 /**
- * Índice `FQN-de-tipo → id de nó REAL` (o nó de CLASSE, preferido; senão um membro
- * existente). Usar um id que EXISTE no grafo garante que a aresta mesclada
- * sobreviva tanto ao shape method-level (ambas as pontas têm de ser nós) quanto ao
- * class-level (o `keyOf` mapeia o membro → chave de classe). Um FQN pode reduzir de
- * vários nós (a classe + seus métodos): o nó de classe (id sem `.metodo(...)`) vence.
+ * Reconstrói os FQN-de-tipo candidatos de um nó a partir do CAMINHO do arquivo:
+ * tira a extensão, troca `/`|`\` por `.`, e devolve TODOS os sufixos pontuados
+ * (do mais longo ao nome de classe sozinho). Um arquivo Java `.../easynup/services/
+ * x/Foo.java` gera `[easynup.services.x.Foo, services.x.Foo, x.Foo, Foo, …]` — a
+ * config-edge (`easynup.services.x.Foo`) é UM desses sufixos, então casa por
+ * lookup exato SEM precisar conhecer a raiz de fonte (`src/main/java`, etc.).
+ * Puro; nunca lança; `[]` para caminho vazio. O último segmento do caminho é o
+ * nome de arquivo (== nome da classe pública em Java), garantindo que todo sufixo
+ * TERMINA na classe.
+ */
+export function fqnSuffixesFromSourceFile(sourceFile: string | undefined): string[] {
+  if (!sourceFile || typeof sourceFile !== "string") return [];
+  const noExt = sourceFile.replace(CODE_EXT_RE, "");
+  const segs = noExt.split(/[/\\]/).filter(Boolean);
+  if (!segs.length) return [];
+  const out: string[] = [];
+  for (let i = 0; i < segs.length; i++) {
+    out.push(segs.slice(i).join("."));
+  }
+  return out; // do mais longo (caminho inteiro pontuado) ao mais curto (só a classe)
+}
+
+/**
+ * Índice `FQN-de-tipo → id de nó REAL`. Duas fontes de identidade, nesta ordem:
+ *
+ *   1. FQN EMBUTIDO NO ID (`fqnOfClassKey(classKeyOf(id))`) — retrocompat com o
+ *      esquema em que o id JÁ carrega o FQN (símbolo scip-java, fixtures FQN-in-id).
+ *   2. FQN RECONSTRUÍDO DO `sourceFile` — o esquema REAL do `java-analyzer`, cujo id
+ *      só tem o NOME SIMPLES da classe (`SERVICE:Foo.metodo`) e o pacote vive no
+ *      caminho do arquivo. Registra os sufixos pontuados do caminho → nó
+ *      representativo da classe. É o que faz a config-edge (FQN pontuado) casar no
+ *      parque real (o `configEdgesProven:0` do #140).
+ *
+ * Preferência de nó por FQN: nó de CLASSE (id === chave de classe, ex. `ENTITY:Foo`)
+ * vence; senão um membro real (colapsa para a classe no rollup class-level). Para
+ * não gerar ambiguidade intra-classe entre os N nós de método de uma classe, a
+ * fonte (2) agrupa por ARQUIVO (1 classe pública por arquivo em Java) e registra
+ * uma vez por arquivo. Um sufixo reivindicado por DUAS classes distintas (mesmo
+ * nome simples em pacotes diferentes → só colide nos sufixos curtos) é marcado
+ * AMBÍGUO e removido — honesto: prefere não casar a mis-atribuir (a config-edge usa
+ * o FQN pontuado longo, que é único, então nunca cai nessa colisão).
  */
 export function buildFqnNodeIndex(nodes: RawSystemNode[]): Map<string, string> {
   const index = new Map<string, string>();
-  const hasBareClass = new Set<string>();
+  const hasBareClass = new Set<string>();       // FQN → tem nó de CLASSE (bare) reivindicando
+  const ambiguous = new Set<string>();          // FQN reivindicado por >1 classe distinta
+  const ownerClass = new Map<string, string>(); // FQN → assinatura da classe que o reivindicou (p/ detectar colisão real)
+
+  const put = (fqn: string, nodeId: string, isBare: boolean, classSig: string) => {
+    if (!fqn) return;
+    if (isBare) {
+      // nó de CLASSE (a melhor representação por-FQN) — sempre vence, resolve dúvida.
+      index.set(fqn, nodeId);
+      hasBareClass.add(fqn);
+      ambiguous.delete(fqn);
+      ownerClass.set(fqn, classSig);
+      return;
+    }
+    if (hasBareClass.has(fqn)) return;            // classe bare já reivindicou
+    if (!index.has(fqn)) {
+      index.set(fqn, nodeId);
+      ownerClass.set(fqn, classSig);
+      return;
+    }
+    // já reivindicado: se por OUTRA classe → ambíguo (não mis-atribui)
+    if (ownerClass.get(fqn) !== classSig) ambiguous.add(fqn);
+  };
+
+  // Fonte 1 — FQN embutido no id (retrocompat exata). Assinatura de classe = a
+  // chave de classe do id (agrupa métodos da mesma classe já pelo `classKeyOf`).
   for (const n of nodes || []) {
     if (!n || typeof n.id !== "string") continue;
     const ck = classKeyOf(n.id);
-    const fqn = fqnOfClassKey(ck);
-    if (!fqn) continue;
-    if (n.id === ck) {
-      // nó de CLASSE (id === chave de classe) — a melhor representação por-FQN.
-      index.set(fqn, n.id);
-      hasBareClass.add(fqn);
-    } else if (!hasBareClass.has(fqn) && !index.has(fqn)) {
-      // fallback: um membro real (colapsa para a classe no rollup class-level).
-      index.set(fqn, n.id);
-    }
+    put(fqnOfClassKey(ck), n.id, n.id === ck, `id:${ck}`);
   }
+
+  // Fonte 2 — FQN reconstruído do `sourceFile`, agrupado por arquivo (1 classe
+  // pública por arquivo em Java) para escolher UM nó representativo por classe.
+  const repByFile = new Map<string, RawSystemNode>();
+  for (const n of nodes || []) {
+    if (!n || typeof n.id !== "string") continue;
+    const sf = sourceFileOf(n);
+    if (!sf) continue;
+    const cur = repByFile.get(sf);
+    // representante preferido: o nó de CLASSE (sem método) — ex. `ENTITY:Foo`.
+    if (!cur || (!n.methodName && cur.methodName)) repByFile.set(sf, n);
+  }
+  for (const [sf, rep] of repByFile) {
+    const isBare = rep.id === classKeyOf(rep.id) && !rep.methodName;
+    for (const fqn of fqnSuffixesFromSourceFile(sf)) put(fqn, rep.id, isBare, `file:${sf}`);
+  }
+
+  for (const a of ambiguous) index.delete(a);
   return index;
 }
 

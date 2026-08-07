@@ -23,10 +23,23 @@ describe("ADR-0028 P1.1 — resolveRuntimeOverlayConfig (cascata pura)", () => {
     assert.equal(cfg!.jaegerUrl, "http://jaeger:16686");
     assert.deepEqual(cfg!.services, ["easynup-gateway", "easynup-backend"]);
     assert.equal(cfg!.gatewayService, "easynup-gateway");
+    // Correção do RUNTIME_OBSERVED:0 — TODOS os serviços buscados são raízes
+    // candidatas de traço (não só o de fronteira), senão os traços rooteados no
+    // BACKEND (que carregam os spans de DB) seriam descartados.
+    assert.deepEqual(cfg!.gatewayServices, ["easynup-gateway", "easynup-backend"]);
     assert.equal(cfg!.lookbackMs, 86400000);
     assert.equal(cfg!.limit, 400);
     assert.equal(cfg!.apiKey, null);
     assert.equal(cfg!.opPathPattern, undefined);
+  });
+
+  it("gatewayServices = fronteira explícita + allowlist, dedup e ordem preservada", () => {
+    const cfg = resolveRuntimeOverlayConfig(
+      { jaegerUrl: "http://j", services: ["auth", "auth-worker"], gatewayService: "auth" },
+      {},
+    );
+    // o de fronteira primeiro, sem duplicar (auth aparece em ambos)
+    assert.deepEqual(cfg!.gatewayServices, ["auth", "auth-worker"]);
   });
 
   it("env RUNTIME_OVERLAY_* sobrepõe o default (URL/serviços/apiKey/lookback/limit)", () => {

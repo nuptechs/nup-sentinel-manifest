@@ -222,7 +222,18 @@ export class AnalysisPipeline {
           await import("../analyzers/runtime-overlay");
         const overlayProject = await storage.getProject(projectId).catch(() => null);
         const cfg = resolveRuntimeOverlayConfig(projectOverlayConfig(overlayProject), process.env);
-        if (cfg) {
+        if (!cfg) {
+          // LOG HONESTO (nunca no-op silencioso): o overlay é gated, mas o silêncio
+          // torna o `RUNTIME_OBSERVED:0` indiagnosticável. Diz POR QUE está off.
+          this.progress(
+            "Step 3/4",
+            `Runtime overlay OFF — sem JAEGER_QUERY_URL/RUNTIME_OVERLAY_JAEGER_URL no env do processo nem conventionProfile.runtimeOverlay no projeto (byte-a-byte, sem costura).`,
+          );
+        } else {
+          this.progress(
+            "Step 3/4",
+            `Runtime overlay ON — jaeger=${cfg.jaegerUrl} serviços=[${cfg.services.join(",")}] raízes=[${cfg.gatewayServices.join(",")}]`,
+          );
           const traces = await fetchRecentTraces({
             baseUrl: cfg.jaegerUrl,
             apiKey: cfg.apiKey,
@@ -230,15 +241,25 @@ export class AnalysisPipeline {
             lookbackMs: cfg.lookbackMs,
             limit: cfg.limit,
           });
+          // TODOS os serviços da allowlist são raízes candidatas (não só o de
+          // fronteira): um traço rooteado no BACKEND — o que carrega os spans de
+          // DB — precisa ser minerado, senão o overlay produz 0 aresta mesmo com
+          // o hub cheio de traços de `easynup-backend`.
           const pairs = extractRuntimePairs(traces, {
-            gatewayServices: [cfg.gatewayService],
+            gatewayServices: cfg.gatewayServices,
             opPathPattern: cfg.opPathPattern,
           });
           const ov = applyRuntimeOverlay(appGraph, pairs);
           this.progress(
             "Step 3/4",
-            `Runtime overlay [${cfg.gatewayService}]: traços=${traces.length} rotas obs=${ov.routesMatched}✓+${ov.routesMinted}novas · arestas obs=${ov.entityEdges} rota→entidade +${ov.wsv1Edges} rota→Java · hot=${ov.hotNodes}`,
+            `Runtime overlay: traços=${traces.length} pares=${pairs.length} rotas obs=${ov.routesMatched}✓+${ov.routesMinted}novas · arestas obs=${ov.entityEdges} rota→entidade +${ov.wsv1Edges} rota→Java · tabelas ${ov.tablesResolved}✓/${ov.tablesMinted}mint · hot=${ov.hotNodes}`,
           );
+          if (traces.length > 0 && pairs.length === 0) {
+            this.progress(
+              "Step 3/4",
+              `Runtime overlay: ${traces.length} traços mas 0 pares — nenhum span-raiz dos serviços [${cfg.gatewayServices.join(",")}] com url.path/http.route/http.target. Confira os nomes de serviço OTel (services/RUNTIME_OVERLAY_SERVICES).`,
+            );
+          }
         }
       } catch (err) {
         console.error(`[pipeline] runtime overlay falhou (fail-soft): ${err}`);
