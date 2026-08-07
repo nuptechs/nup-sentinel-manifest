@@ -60,7 +60,20 @@ const isImpl = (r) => r.is_implementation ?? r.isImplementation;
 // SCIP range: [startLine, startChar, endLine, endChar] ou [line, startChar, endChar].
 const pos = (l, c) => l * 1_000_000 + c;
 const rng = (r) =>
-  r.length >= 4 ? [pos(r[0], r[1]), pos(r[2], r[3])] : [pos(r[0], r[1]), pos(r[0], r[2] ?? r[1])];
+  !Array.isArray(r) || r.length < 2
+    ? [NaN, NaN]
+    : r.length >= 4
+      ? [pos(r[0], r[1]), pos(r[2], r[3])]
+      : [pos(r[0], r[1]), pos(r[0], r[2] ?? r[1])];
+
+// DIAG temporário: estrutura real do índice (doc keys + 2 primeiras ocorrências).
+{
+  const d0 = (idx.documents || [])[0] || {};
+  console.error('[dbg] nDocs=' + (idx.documents || []).length + ' docKeys=' + JSON.stringify(Object.keys(d0)));
+  const occ = d0.occurrences || [];
+  console.error('[dbg] occ0=' + JSON.stringify(occ[0]));
+  console.error('[dbg] occ1=' + JSON.stringify(occ[1]));
+}
 
 // Método em SCIP: descriptor `nome(<disambiguator>).`. scip-typescript emite o
 // disambiguator VAZIO ("()."); scip-java (semanticdb) emite NÃO-vazio (ex.
