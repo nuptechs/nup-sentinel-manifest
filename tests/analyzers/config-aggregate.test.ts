@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   typeFqnOfConfigEndpoint,
   buildFqnNodeIndex,
+  fqnSuffixesFromSourceFile,
   aggregateConfigEdges,
   mergeConfigEdges,
   type ConfigDerivedEdge,
@@ -290,5 +291,108 @@ describe("PRECEDÊNCIA scip > config — scip + config coexistem sem colisão", 
     assert.equal(shaped.coverage.edges.byMethod.CONFIG_PROVEN, 1, "config CONFIG_PROVEN presente");
     const notif = findEdge(shaped.edges, `SERVICE:${FQN.notifPort}`, `SERVICE:${FQN.notifImpl}`, "DI_RESOLVES");
     assert.equal(notif!.evidence.method, "CONFIG_PROVEN");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// REGRESSÃO do #140 (o `configEdgesProven:0` medido no projeto 27). O grafo REAL
+// do `java-analyzer` NÃO usa `<STEREOTYPE>:<FQN>` no id — usa o NOME SIMPLES da
+// classe (`SERVICE:Foo.metodo`, `ENTITY:Contract`) e guarda o pacote só em
+// `metadata.sourceFile` (o caminho do arquivo). As config-edges vêm em FQN
+// PONTUADO. Estes testes provam que o índice reconstrói o FQN do `sourceFile` e
+// casa — a causa-raiz do bug.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Grafo Java como o `java-analyzer` REALMENTE produz: id = nome SIMPLES + método;
+// o pacote vive só no `metadata.sourceFile`. Ports/adapters dos exemplos do easynup.
+function realJavaGraph(): RawSystemGraph {
+  return {
+    nodes: [
+      // interface (port) classificada como SERVICE — nós de MÉTODO (sem nó bare de classe)
+      { id: "SERVICE:DeductionAdapter.calculate", type: "SERVICE", className: "DeductionAdapter", methodName: "calculate", metadata: { sourceFile: "src/main/java/easynup/services/common/rules/adapters/DeductionAdapter.java" } },
+      // impl (adapter) — 2 métodos, provando o agrupamento por arquivo (1 rep/classe)
+      { id: "SERVICE:EasyNupDeductionAdapter.calculate", type: "SERVICE", className: "EasyNupDeductionAdapter", methodName: "calculate", metadata: { sourceFile: "src/main/java/easynup/services/common/rules/adapters/impl/EasyNupDeductionAdapter.java" } },
+      { id: "SERVICE:EasyNupDeductionAdapter.init", type: "SERVICE", className: "EasyNupDeductionAdapter", methodName: "init", metadata: { sourceFile: "src/main/java/easynup/services/common/rules/adapters/impl/EasyNupDeductionAdapter.java" } },
+      // uma ENTITY (nó bare de classe, id sem método) p/ provar a preferência de rep
+      { id: "ENTITY:Contract", type: "ENTITY", className: "Contract", metadata: { sourceFile: "src/main/java/easynup/persistence/entities/Contract.java" } },
+    ],
+    edges: [],
+  };
+}
+
+const REAL_FQN = {
+  deductionPort: "easynup.services.common.rules.adapters.DeductionAdapter",
+  deductionImpl: "easynup.services.common.rules.adapters.impl.EasyNupDeductionAdapter",
+  contract: "easynup.persistence.entities.Contract",
+};
+
+describe("fqnSuffixesFromSourceFile — reconstrução de FQN a partir do caminho", () => {
+  it("gera todos os sufixos pontuados (do caminho inteiro à classe), sem extensão", () => {
+    const suffixes = fqnSuffixesFromSourceFile("src/main/java/easynup/services/x/Foo.java");
+    assert.ok(suffixes.includes("easynup.services.x.Foo"), "o FQN da config-edge está entre os sufixos");
+    assert.equal(suffixes[0], "src.main.java.easynup.services.x.Foo"); // mais longo primeiro
+    assert.equal(suffixes[suffixes.length - 1], "Foo");                 // classe sozinha por último
+  });
+  it("caminho já sem raiz (o cron pode POSTar relativo) casa exato", () => {
+    const suffixes = fqnSuffixesFromSourceFile("easynup/services/x/Foo.java");
+    assert.equal(suffixes[0], "easynup.services.x.Foo");
+  });
+  it("Windows (`\\`), sem extensão, vazio → nunca lança", () => {
+    assert.ok(fqnSuffixesFromSourceFile("a\\b\\C.kt").includes("a.b.C"));
+    assert.deepEqual(fqnSuffixesFromSourceFile(""), []);
+    assert.deepEqual(fqnSuffixesFromSourceFile(undefined), []);
+  });
+});
+
+describe("buildFqnNodeIndex — esquema REAL (id nome-simples + sourceFile pontuado)", () => {
+  const idx = buildFqnNodeIndex(realJavaGraph().nodes);
+  it("casa o FQN da config-edge com o nó, via sourceFile (a correção do bug)", () => {
+    assert.equal(idx.get(REAL_FQN.deductionPort), "SERVICE:DeductionAdapter.calculate");
+    // impl: 2 métodos no mesmo arquivo → 1 representante (não ambíguo)
+    assert.ok(idx.get(REAL_FQN.deductionImpl)?.startsWith("SERVICE:EasyNupDeductionAdapter."));
+  });
+  it("nó de CLASSE (ENTITY, id sem método) é o representante preferido", () => {
+    assert.equal(idx.get(REAL_FQN.contract), "ENTITY:Contract");
+  });
+});
+
+describe("aggregateConfigEdges — esquema REAL vira CONFIG_PROVEN > 0", () => {
+  it("interface→impl (FQN pontuado) casa e conta no censo — prova do fim do bug", () => {
+    const derived: ConfigDerivedEdge[] = [
+      { from: REAL_FQN.deductionPort, to: REAL_FQN.deductionImpl, kind: "DI_RESOLVES", resolution: "config", reason: "spring-single-bean" },
+    ];
+    const { edges, stats } = aggregateConfigEdges(realJavaGraph().nodes, derived);
+    assert.equal(edges.length, 1, "1 aresta agregada (era 0 antes da correção)");
+    assert.equal(stats.orphanDropped, 0);
+
+    const { graph } = mergeConfigEdges(realJavaGraph(), configPayload(derived));
+    const shaped = shapeSystemGraph(graph, "class");
+    assert.ok(shaped.coverage.edges.byMethod.CONFIG_PROVEN >= 1, "CONFIG_PROVEN > 0 no /graph");
+  });
+
+  it("port que NÃO é nó (lib/interface fora do escopo) → órfão honesto (§5)", () => {
+    const derived: ConfigDerivedEdge[] = [
+      { from: "org.springframework.SomeLibPort", to: REAL_FQN.deductionImpl, resolution: "config" },
+    ];
+    const { edges, stats } = aggregateConfigEdges(realJavaGraph().nodes, derived);
+    assert.equal(edges.length, 0);
+    assert.equal(stats.orphanDropped, 1);
+  });
+});
+
+describe("buildFqnNodeIndex — desambiguação por pacote (nome simples colidente)", () => {
+  it("mesmo nome simples em pacotes distintos: cada FQN longo resolve ao seu nó; o nome curto é ambíguo→ausente", () => {
+    // Nós com ids DISTINTOS (métodos diferentes) mas mesmo nome simples em pacotes
+    // diferentes — o cenário real que só o FQN pontuado longo desambigua.
+    const nodes: RawSystemNode[] = [
+      { id: "SERVICE:Helper.run", type: "SERVICE", className: "Helper", methodName: "run", metadata: { sourceFile: "src/main/java/easynup/a/Helper.java" } },
+      { id: "SERVICE:Helper.exec", type: "SERVICE", className: "Helper", methodName: "exec", metadata: { sourceFile: "src/main/java/easynup/b/Helper.java" } },
+    ];
+    const idx = buildFqnNodeIndex(nodes);
+    // FQN longo (o que a config-edge usa) é único → resolve corretamente ao seu nó
+    assert.equal(idx.get("easynup.a.Helper"), "SERVICE:Helper.run");
+    assert.equal(idx.get("easynup.b.Helper"), "SERVICE:Helper.exec");
+    // o nome curto colidiu entre 2 classes → removido (não mis-atribui)
+    assert.equal(idx.get("Helper"), undefined);
   });
 });

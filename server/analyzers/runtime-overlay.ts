@@ -393,7 +393,19 @@ export interface ResolvedRuntimeOverlayConfig {
   jaegerUrl: string;
   apiKey: string | null;
   services: string[];
+  /** serviço de fronteira "canônico" (services[0] ou o explícito). Mantido p/ retrocompat. */
   gatewayService: string;
+  /**
+   * TODOS os serviços que podem ser a RAIZ de um traço (span de entrada). Um
+   * traço rooteia no serviço que RECEBE a requisição — no easynup pode ser o
+   * gateway Node (`easynup-gateway`) OU o backend Java (`easynup-backend`) quando
+   * o tráfego bate direto no Java (robô nup-sentinel, cron, chamada interna). Se
+   * só o `gatewayService` fosse aceito como raiz, os traços rooteados no BACKEND
+   * — justamente os que carregam os spans de DB (`db.sql.table`) — seriam
+   * descartados e o overlay produziria 0 aresta RUNTIME_OBSERVED mesmo com o hub
+   * cheio de traços. Inclui o `gatewayService` + toda a allowlist `services`.
+   */
+  gatewayServices: string[];
   lookbackMs: number;
   limit: number;
   opPathPattern?: RegExp;
@@ -445,12 +457,17 @@ export function resolveRuntimeOverlayConfig(
         : [...DEFAULT_OVERLAY_SERVICES];
 
   const gatewayService = firstStr(pp.gatewayService) || services[0];
+  // Raízes de traço aceitas = o serviço de fronteira explícito + TODA a allowlist
+  // buscada, dedup preservando a ordem (o de fronteira primeiro). Assim um traço
+  // rooteado no backend (que carrega os spans de DB) é minerado, não descartado.
+  const gatewayServices = Array.from(new Set([gatewayService, ...services].filter(Boolean)));
 
   return {
     jaegerUrl,
     apiKey: firstStr(pp.apiKey, env.JAEGER_QUERY_API_KEY) || null,
     services,
     gatewayService,
+    gatewayServices,
     lookbackMs: firstNum(pp.lookbackMs, env.RUNTIME_OVERLAY_LOOKBACK_MS) ?? 86400000,
     limit: firstNum(pp.limit, env.RUNTIME_OVERLAY_LIMIT) ?? 400,
     opPathPattern: compileOpPattern(pp.opPathPattern),

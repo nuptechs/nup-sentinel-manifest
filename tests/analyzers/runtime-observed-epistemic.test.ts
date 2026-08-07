@@ -83,3 +83,40 @@ describe("ADR-0028 P1.1 — observedRatio flui do traço ao grafo servido", () =
     assert.equal(shaped.coverage.edges.observedRatio, 0);
   });
 });
+
+// ── Correção do RUNTIME_OBSERVED:0 (o cenário AO VIVO) ──
+// O hub tinha traços `easynup-backend` COM spans de DB, mas a análise passava só
+// `[cfg.gatewayService]` (= 'easynup-gateway') como raiz. Um traço rooteado no
+// BACKEND (Java recebendo `/easynup/op.v1` + JDBC) não era minerado → 0 aresta,
+// mesmo com o hub cheio. Este teste PROVA a regressão e o conserto.
+describe("RUNTIME_OBSERVED:0 — traço rooteado no BACKEND é minerado quando o serviço é raiz", () => {
+  // Um traço 100% no easynup-backend: SERVER span Java (http de entrada) + JDBC.
+  const backendTrace = () =>
+    trace("t-be-1", [
+      { svc: "easynup-backend", id: "srv", tags: { "url.path": "/api/users/7", "http.route": "/api/users/:id", "http.request.method": "GET" } },
+      { svc: "easynup-backend", id: "jdbc", parent: "srv", tags: { "db.sql.table": "user", "db.operation": "SELECT" } },
+    ]);
+
+  it("SÓ o gateway como raiz (o bug) → 0 pares, 0 aresta observada", () => {
+    const pairs = extractRuntimePairs([backendTrace()], { gatewayServices: ["easynup-gateway"] });
+    assert.equal(pairs.length, 0, "backend-rooted trace descartado quando só o gateway é raiz");
+    const ov = applyRuntimeOverlay(staticGraph(), pairs);
+    assert.equal(ov.entityEdges, 0);
+  });
+
+  it("backend na lista de raízes (o conserto) → mina o traço e produz RUNTIME_OBSERVED", () => {
+    // = o que o pipeline agora passa: cfg.gatewayServices (gateway + backend).
+    const pairs = extractRuntimePairs([backendTrace()], { gatewayServices: ["easynup-gateway", "easynup-backend"] });
+    assert.equal(pairs.length, 1);
+
+    const g = staticGraph();
+    const ov = applyRuntimeOverlay(g, pairs);
+    assert.equal(ov.routesMatched, 1);   // casou a rota estática :id
+    assert.equal(ov.entityEdges, 1);     // rota→entidade OBSERVADA
+    assert.equal(ov.tablesResolved, 1);  // tabela `user` → ENTITY `User`
+
+    const shaped = shapeSystemGraph(g.toJSON(), "method");
+    assert.equal(shaped.coverage.edges.byMethod.RUNTIME_OBSERVED, 1);
+    assert.ok(shaped.coverage.edges.observedRatio > 0);
+  });
+});
