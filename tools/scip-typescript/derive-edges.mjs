@@ -162,12 +162,14 @@ const edges = [
   ...[...ifaceImpl].map((e) => toEdge(e, 'interface-impl')),
 ];
 
+// Compacto (sem indentação): 338k arestas indentadas passavam de 85MB → 413.
 process.stdout.write(
-  JSON.stringify(
-    { tool: 'scip-typescript', schema: 'adr-0030.p2.2', counts: { proven: proven.size, interfaceImpl: ifaceImpl.size }, edges },
-    null,
-    2,
-  ) + '\n',
+  JSON.stringify({
+    tool: 'scip-typescript',
+    schema: 'adr-0030.p2.2',
+    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size },
+    edges,
+  }) + '\n',
 );
 console.error(
   `[derive-edges] STATIC_PROVEN=${proven.size} interface-impl=${ifaceImpl.size} (de ${idx.documents.length} documentos)` +

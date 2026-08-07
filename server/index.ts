@@ -31,8 +31,11 @@ declare module "http" {
 }
 
 app.use(
+    // 200mb: o call-graph STATIC_PROVEN do easynup Java (scip-java) chega a
+    // ~60MB compacto (338k arestas); o cap de 50mb dava 413. Endpoint é
+    // protegido por api-key (POST /scip-edges), ingest infrequente.
   express.json({
-    limit: "50mb",
+    limit: "200mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
