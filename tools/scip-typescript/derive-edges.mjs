@@ -54,7 +54,24 @@ if (jsonFlag >= 0) {
 
 // Acessores tolerantes a snake_case (binário) e lowerCamelCase (protojson/--json).
 const rolesOf = (o) => (o.symbol_roles ?? o.symbolRoles ?? 0) | 0;
-const enclOf = (o) => o.enclosing_range ?? o.enclosingRange;
+const enclOf = (o) => {
+  const b = o.enclosing_range ?? o.enclosingRange;
+  if (Array.isArray(b) && b.length) return b;
+  return rangeArr(o.TypedEnclosingRange);
+};
+// `scip print --json` (CLI Go do sourcegraph/scip) aninha o range num struct
+// tipado: TypedRange.{SingleLineRange|MultiLineRange}. Normaliza p/ o array
+// [line, sc, ec] (mesma linha) ou [sl, sc, el, ec] (multi-linha) que o `rng` usa.
+const rangeArr = (tr) => {
+  if (!tr) return null;
+  const s = tr.SingleLineRange;
+  if (s) return [s.line, s.start_character, s.end_character];
+  const m = tr.MultiLineRange;
+  if (m) return [m.start_line, m.start_character, m.end_line, m.end_character];
+  return null;
+};
+// range do binário (array direto) OU do JSON do CLI (TypedRange aninhado).
+const rangeOf = (o) => (Array.isArray(o.range) && o.range.length ? o.range : rangeArr(o.TypedRange));
 const isImpl = (r) => r.is_implementation ?? r.isImplementation;
 
 // SCIP range: [startLine, startChar, endLine, endChar] ou [line, startChar, endChar].
@@ -66,14 +83,6 @@ const rng = (r) =>
       ? [pos(r[0], r[1]), pos(r[2], r[3])]
       : [pos(r[0], r[1]), pos(r[0], r[2] ?? r[1])];
 
-// DIAG temporário: estrutura real do índice (doc keys + 2 primeiras ocorrências).
-{
-  const d0 = (idx.documents || [])[0] || {};
-  console.error('[dbg] nDocs=' + (idx.documents || []).length + ' docKeys=' + JSON.stringify(Object.keys(d0)));
-  const occ = d0.occurrences || [];
-  console.error('[dbg] occ0=' + JSON.stringify(occ[0]));
-  console.error('[dbg] occ1=' + JSON.stringify(occ[1]));
-}
 
 // Método em SCIP: descriptor `nome(<disambiguator>).`. scip-typescript emite o
 // disambiguator VAZIO ("()."); scip-java (semanticdb) emite NÃO-vazio (ex.
@@ -108,7 +117,7 @@ for (const d of idx.documents) {
   for (const o of d.occurrences) {
     if (!isMethodSym(o.symbol)) continue;
     if (!(rolesOf(o) & DEFINITION)) continue;
-    const [s] = rng(o.range);
+    const [s] = rng(rangeOf(o));
     let bodyStart = s;
     let bodyEnd = Infinity;
     const er0 = enclOf(o);
@@ -132,7 +141,7 @@ for (const d of idx.documents) {
     const roles = rolesOf(o);
     if (roles & DEFINITION || roles & IMPORT) continue;
     nMethodRefs++;
-    const [p] = rng(o.range);
+    const [p] = rng(rangeOf(o));
     let caller = null;
     for (const def of defs) if (p >= def.bodyStart && p < def.bodyEnd) caller = def; // o mais interno vence
     if (!caller) { nOrphan++; continue; }
