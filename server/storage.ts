@@ -47,6 +47,7 @@ export interface IStorage {
   updateProjectOntology(projectId: number, ontology: unknown): Promise<void>;
   updateProjectConventionProfile(projectId: number, profile: unknown): Promise<void>;
   updateProjectScipEdges(projectId: number, scipEdges: unknown): Promise<void>;
+  updateProjectConfigEdges(projectId: number, configEdges: unknown): Promise<void>;
   createSourceFile(file: InsertSourceFile): Promise<SourceFile>;
   deleteSourceFilesByProject(projectId: number): Promise<void>;
 
@@ -172,6 +173,12 @@ export class DatabaseStorage implements IStorage {
   // ADR-0031 — store lateral das arestas SCIP provadas (idempotente: substitui).
   async updateProjectScipEdges(projectId: number, scipEdges: unknown): Promise<void> {
     await db.update(projects).set({ scipEdges: scipEdges as any }).where(eq(projects.id, projectId));
+  }
+
+  // ADR-0035 §4 — store lateral das arestas CONFIG_PROVEN (idempotente: substitui).
+  // Separado de `scipEdges` para não sobrescrever as arestas STATIC_PROVEN.
+  async updateProjectConfigEdges(projectId: number, configEdges: unknown): Promise<void> {
+    await db.update(projects).set({ configEdges: configEdges as any }).where(eq(projects.id, projectId));
   }
 
   async getSourceFiles(projectId: number): Promise<SourceFile[]> {

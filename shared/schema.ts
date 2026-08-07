@@ -66,6 +66,12 @@ export const projects = pgTable("projects", {
   // STATIC_PROVEN (store lateral idempotente por projeto; ADITIVO — nulo ⇒
   // `/graph` byte-a-byte). Shape: {tool, schema, edges:[{from,to,kind,resolution}]}.
   scipEdges: jsonb("scip_edges"),
+  // ADR-0035 §4 — camada CONFIG_PROVEN (6º tier de proveniência): arestas
+  // interface→impl cuja resolução o wiring do Spring torna DETERMINÍSTICA
+  // (`resolution:'config'`), derivadas do fonte SEM runtime. Store lateral
+  // SEPARADO das `scipEdges` (não sobrescreve as arestas STATIC_PROVEN).
+  // Shape: {tool, schema, edges:[{from,to,kind,resolution:'config',reason}]}.
+  configEdges: jsonb("config_edges"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

@@ -47,6 +47,28 @@ const scipEdgesSchema = z.object({
     .max(500_000),
 });
 
+// ADR-0035 §4 — payload do `POST /config-edges`: saída do resolvedor
+// `config-proven` do repo-alvo (interface→impl provada pelo wiring do Spring,
+// SEM runtime). `resolution` restrito a `config` (o 6º tier de proveniência);
+// `reason` documenta a evidência (spring-single-bean / spring-primary). Store
+// SEPARADO das scip-edges. Cap defensivo.
+const configEdgesSchema = z.object({
+  tool: z.string().max(120).optional(),
+  schema: z.string().max(120).optional(),
+  counts: z.unknown().optional(),
+  edges: z
+    .array(
+      z.object({
+        from: z.string().min(1),
+        to: z.string().min(1),
+        kind: z.string().max(60).optional(),
+        resolution: z.enum(["config"]),
+        reason: z.string().max(120).optional(),
+      }),
+    )
+    .max(100_000),
+});
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: os.tmpdir(),
@@ -498,6 +520,45 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error ingesting scip edges:", error);
       const msg = error instanceof Error ? error.message : "Failed to ingest scip edges";
+      res.status(500).json({ message: msg });
+    }
+  });
+
+  // ADR-0035 §4 — camada CONFIG_PROVEN (6º tier de proveniência). O resolvedor
+  // `config-proven` do repo-alvo lê o WIRING do Spring (SEM runtime, SEM LLM) e
+  // POSTa aqui as arestas interface→impl cuja resolução é DETERMINÍSTICA
+  // (`resolution:'config'`). OVERLAY out-of-band, store lateral `configEdges`
+  // idempotente por projeto — SEPARADO de `scipEdges` (não sobrescreve as
+  // arestas STATIC_PROVEN). Mesma proteção api-key (middleware global).
+  app.post("/api/projects/:projectId/config-edges", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+
+      const parsed = configEdgesSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid payload", issues: parsed.error.format() });
+      }
+
+      const payload = {
+        tool: parsed.data.tool ?? "config-proven",
+        schema: parsed.data.schema ?? "adr-0035.config-proven.v1",
+        edges: parsed.data.edges,
+        ingestedAt: new Date().toISOString(),
+      };
+      await storage.updateProjectConfigEdges(projectId, payload);
+
+      res.status(201).json({
+        projectId,
+        received: payload.edges.length,
+        schema: payload.schema,
+        ingestedAt: payload.ingestedAt,
+      });
+    } catch (error) {
+      console.error("Error ingesting config edges:", error);
+      const msg = error instanceof Error ? error.message : "Failed to ingest config edges";
       res.status(500).json({ message: msg });
     }
   });
