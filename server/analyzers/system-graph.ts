@@ -103,6 +103,14 @@ export type EvidenceMethod =
   | 'RUNTIME_OBSERVED'
   // resolvido pelo compilador/tipo (Engine A emite `compiler` / `interface-impl`)
   | 'STATIC_PROVEN'
+  // ADR-0035 §4 — DI resolvida DETERMINISTICAMENTE pelo wiring do container
+  // (Spring: interface→impl com 1 bean concreto, ou @Primary desempatando).
+  // O resolvedor `config-proven` lê `src/main/java` SEM runtime e SEM LLM e emite
+  // `resolution:'config'`. É PROVA, mas de CONFIGURAÇÃO — não compiler-accurate
+  // como o scip (K adapters concorrentes sem @Primary NÃO entram; ficam UNKNOWN
+  // até o RUNTIME_OBSERVED). Por isso senta ENTRE STATIC_PROVEN e a heurística
+  // DECLARADA: mais forte que convenção, mais fraca que o checker.
+  | 'CONFIG_PROVEN'
   // convenção/sintaxe/heurística: DECLARADA, não provada
   // (`synthetic:true`, `convention-name`, família `syntactic-*`, `dynamic`)
   | 'STATIC_UNRESOLVED'
@@ -153,6 +161,8 @@ export interface ShapedEdge {
   observed?: boolean;
   /** nº de traços que exercitaram a aresta observada. */
   count?: number;
+  /** ADR-0035 §4: aresta DI provada pelo wiring do container (CONFIG_PROVEN). */
+  configProven?: boolean;
   /**
    * ADR-0028 P0.1 — método+confiança de evidência DESTA aresta, derivado de
    * resolution/synthetic/observed. Sempre presente (aresta sem proveniência =
@@ -210,18 +220,20 @@ function isSensitive(node: RawSystemNode): boolean {
 function sourceFileOf(node: RawSystemNode): string | undefined {
   return typeof node.metadata?.sourceFile === 'string' ? (node.metadata.sourceFile as string) : undefined;
 }
-function edgeProvenance(e: RawSystemEdge): { resolution?: string; synthetic?: boolean; observed?: boolean; count?: number; refuted?: EdgeRefutation } {
+function edgeProvenance(e: RawSystemEdge): { resolution?: string; synthetic?: boolean; observed?: boolean; count?: number; configProven?: boolean; refuted?: EdgeRefutation } {
   const m = (e.metadata || {}) as Record<string, unknown>;
   const resolution = typeof m.resolution === 'string' ? (m.resolution as string) : undefined;
   const synthetic = m.synthetic === true ? true : undefined;
   const observed = m.observed === true ? true : undefined;
   const count = typeof m.count === 'number' ? (m.count as number) : undefined;
+  const configProven = m.configProven === true ? true : undefined;
   const refuted = readRefutation(m);
   return {
     ...(resolution ? { resolution } : {}),
     ...(synthetic ? { synthetic } : {}),
     ...(observed ? { observed } : {}),
     ...(observed && count ? { count } : {}),
+    ...(configProven ? { configProven } : {}),
     ...(refuted ? { refuted } : {}),
   };
 }
@@ -274,14 +286,19 @@ function entryPointOf(node: RawSystemNode): string | undefined {
 //   synthetic:true), `convention-name`. Os genéricos exact/type/import/direct/
 //   dynamic estão previstos no vocabulário T1 mesmo sem produtor atual — mapeados
 //   para não cair em UNKNOWN se um analisador novo os emitir.
-const PRECISE_RESOLUTIONS = new Set(['compiler', 'interface-impl', 'exact', 'type', 'import', 'direct']);
+export const PRECISE_RESOLUTIONS = new Set(['compiler', 'interface-impl', 'exact', 'type', 'import', 'direct']);
 function isHeuristicResolution(r: string): boolean {
   return r === 'convention-name' || r === 'dynamic' || r === 'heuristic' || r.startsWith('syntactic');
 }
 
 /** Deriva {method, confidence} de uma aresta a partir da proveniência crua. */
-function classifyEdgeEvidence(p: { resolution?: string; synthetic?: boolean; observed?: boolean }): Evidence {
+function classifyEdgeEvidence(p: { resolution?: string; synthetic?: boolean; observed?: boolean; configProven?: boolean }): Evidence {
   if (p.observed === true) return { method: 'RUNTIME_OBSERVED', confidence: 0.95 };
+  // ADR-0035 §4 — CONFIG_PROVEN: DI resolvida pelo wiring do container. Provada
+  // (não synthetic), mas por configuração — 0.78 senta entre STATIC_PROVEN (0.80,
+  // compiler-accurate) e a heurística DECLARADA (0.40). Checa ANTES do precise
+  // porque `config` não está em PRECISE_RESOLUTIONS (cairia em UNKNOWN sem isto).
+  if (p.configProven === true || p.resolution === 'config') return { method: 'CONFIG_PROVEN', confidence: 0.78 };
   const r = p.resolution;
   if (p.synthetic === true || (r !== undefined && isHeuristicResolution(r))) {
     return { method: 'STATIC_UNRESOLVED', confidence: 0.40 };
@@ -299,7 +316,7 @@ function classifyNodeEvidence(observed: boolean): Evidence {
 
 /** Record zerado com TODAS as colunas do censo (LLM_CONJECTURED inclusa, hoje =0). */
 function emptyEdgeByMethod(): Record<EvidenceMethod, number> {
-  return { RUNTIME_OBSERVED: 0, STATIC_PROVEN: 0, STATIC_UNRESOLVED: 0, LLM_CONJECTURED: 0, UNKNOWN: 0 };
+  return { RUNTIME_OBSERVED: 0, STATIC_PROVEN: 0, CONFIG_PROVEN: 0, STATIC_UNRESOLVED: 0, LLM_CONJECTURED: 0, UNKNOWN: 0 };
 }
 
 /** Monta o censo `coverage` (aritmética de divisão-por-zero segura). */

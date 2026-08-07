@@ -76,14 +76,20 @@ export interface ImpactConfidence {
 }
 
 // Ranking dos métodos (mais forte = maior). Alimenta o "elo mais fraco".
+// ADR-0035 §4: CONFIG_PROVEN entra ENTRE STATIC_PROVEN (compiler) e a conjectura —
+// é prova de WIRING determinístico, mais forte que heurística/LLM, mais fraca que o
+// checker. Insere em 3; STATIC_PROVEN/RUNTIME_OBSERVED sobem 1 (só a ordem importa).
 const METHOD_RANK: Record<EvidenceMethod, number> = {
   UNKNOWN: 0,
   STATIC_UNRESOLVED: 1,
   LLM_CONJECTURED: 2,
-  STATIC_PROVEN: 3,
-  RUNTIME_OBSERVED: 4,
+  CONFIG_PROVEN: 3,
+  STATIC_PROVEN: 4,
+  RUNTIME_OBSERVED: 5,
 };
-const PROVEN_TIER: ReadonlySet<EvidenceMethod> = new Set<EvidenceMethod>(["RUNTIME_OBSERVED", "STATIC_PROVEN"]);
+// CONFIG_PROVEN é caminho PROVADO (DI determinística resolve para AQUELA impl) —
+// não é ponto cego. Entra no tier provado junto de runtime/compilador.
+const PROVEN_TIER: ReadonlySet<EvidenceMethod> = new Set<EvidenceMethod>(["RUNTIME_OBSERVED", "STATIC_PROVEN", "CONFIG_PROVEN"]);
 const BLIND_METHODS: ReadonlySet<EvidenceMethod> = new Set<EvidenceMethod>(["STATIC_UNRESOLVED", "UNKNOWN"]);
 const BLINDSPOT_CAP = 60;
 

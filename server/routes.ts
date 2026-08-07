@@ -554,9 +554,25 @@ export async function registerRoutes(
       };
       await storage.updateProjectConfigEdges(projectId, payload);
 
+      // Prévia honesta: quantas arestas de SISTEMA config a agregação produz contra
+      // o systemGraph mais recente (fail-soft; 0 se ainda não há análise). Espelha
+      // o `systemEdgesProven` do `/scip-edges`.
+      let configEdgesProven = 0;
+      try {
+        const snaps = await storage.getAnalysisSnapshots(projectId);
+        const sg = ((snaps[0]?.manifestJson as any) || {}).systemGraph;
+        if (sg && Array.isArray(sg.nodes)) {
+          const { aggregateConfigEdges } = await import("./analyzers/config-aggregate");
+          configEdgesProven = aggregateConfigEdges(sg.nodes, payload.edges).edges.length;
+        }
+      } catch (e) {
+        console.error("config-edges preview aggregation failed (non-fatal):", e);
+      }
+
       res.status(201).json({
         projectId,
         received: payload.edges.length,
+        configEdgesProven,
         schema: payload.schema,
         ingestedAt: payload.ingestedAt,
       });
@@ -1792,12 +1808,16 @@ export async function registerRoutes(
           code: "GRAPH_NOT_IN_SNAPSHOT",
         });
       }
-      // ADR-0031 — mescla (na leitura) as arestas SCIP provadas como STATIC_PROVEN.
-      // GATED + fail-soft: sem `scipEdges`, byte-a-byte; erro de merge não derruba
-      // o `/graph` (mantém o grafo cru).
+      // ADR-0031 / ADR-0035 — mescla (na leitura) as evidências EXTERNAS provadas.
+      // GATED + fail-soft: sem `scipEdges`/`configEdges`, byte-a-byte; erro de merge
+      // não derruba o `/graph` (mantém o grafo cru). Ordem: scip PRIMEIRO (STATIC_
+      // PROVEN, compiler-accurate) e config DEPOIS (CONFIG_PROVEN) — assim a config
+      // enxerga os pares já provados pelo scip e cede a eles (precedência scip > config).
       let scipStats: unknown = undefined;
+      let configStats: unknown = undefined;
+      let project: unknown;
       try {
-        const project = await storage.getProject(projectId);
+        project = await storage.getProject(projectId);
         const scip = (project as any)?.scipEdges;
         if (scip && Array.isArray(scip.edges) && scip.edges.length) {
           const { mergeScipEdges } = await import("./analyzers/scip-aggregate");
@@ -1808,6 +1828,17 @@ export async function registerRoutes(
       } catch (e) {
         console.error("scip-edges merge failed (fail-soft, serving raw graph):", e);
       }
+      try {
+        const config = (project as any)?.configEdges;
+        if (config && Array.isArray(config.edges) && config.edges.length) {
+          const { mergeConfigEdges } = await import("./analyzers/config-aggregate");
+          const merged = mergeConfigEdges(systemGraph, config);
+          systemGraph = merged.graph;
+          configStats = merged.stats;
+        }
+      } catch (e) {
+        console.error("config-edges merge failed (fail-soft, serving raw graph):", e);
+      }
       const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const level = req.query.level === "method" ? "method" : "class";
       const shaped = shapeSystemGraph(systemGraph, level);
@@ -1815,6 +1846,7 @@ export async function registerRoutes(
         projectId,
         analysisRunId: snapshots[0].analysisRunId,
         ...(scipStats ? { scipOverlay: scipStats } : {}),
+        ...(configStats ? { configOverlay: configStats } : {}),
         ...shaped,
       });
     } catch (error) {
