@@ -11,11 +11,12 @@
 // não mergeada, snapshot antigo, outro stack), nada quebra e o render atual
 // segue byte-a-byte — os acessores caem em `UNKNOWN`/`null`.
 // ─────────────────────────────────────────────
-import { Activity, ShieldCheck, HelpCircle, Bot, CircleOff, Radar } from "lucide-react";
+import { Activity, ShieldCheck, HelpCircle, Bot, CircleOff, Radar, Cable } from "lucide-react";
 
 export type EvidenceMethod =
   | "RUNTIME_OBSERVED"
   | "STATIC_PROVEN"
+  | "CONFIG_PROVEN"
   | "STATIC_UNRESOLVED"
   | "LLM_CONJECTURED"
   | "UNKNOWN";
@@ -37,13 +38,24 @@ export interface GraphCoverage {
 }
 
 // Ordem canônica: do mais forte (visto rodar) ao mais fraco (nunca soubemos).
+// CONFIG_PROVEN entra no TIER PROVADO, logo abaixo do checker de compilador e
+// acima do não-resolvido/conjectura (ADR-0035 §4: prova de WIRING determinístico —
+// DI/rota/env resolve para AQUELA impl, mais forte que heurística).
 export const EVIDENCE_ORDER: readonly EvidenceMethod[] = [
   "RUNTIME_OBSERVED",
   "STATIC_PROVEN",
+  "CONFIG_PROVEN",
   "STATIC_UNRESOLVED",
   "LLM_CONJECTURED",
   "UNKNOWN",
 ] as const;
+
+/** Tier "provado" — caminho verificado (runtime OU compilador OU config/DI determinística). */
+export const PROVEN_TIER: ReadonlySet<EvidenceMethod> = new Set<EvidenceMethod>([
+  "RUNTIME_OBSERVED",
+  "STATIC_PROVEN",
+  "CONFIG_PROVEN",
+]);
 
 // Rótulo pt-BR + cor + estilo de linha por método. As cores funcionam em claro
 // e escuro (o canvas cytoscape não tem tema); o 2º canal (ícone + estilo de
@@ -63,17 +75,31 @@ export const EVIDENCE: Record<
 > = {
   RUNTIME_OBSERVED: { label: "Observado em runtime", color: "#f43f5e", lineStyle: "solid", strong: true, icon: Activity },
   STATIC_PROVEN: { label: "Provado (estático)", color: "#10b981", lineStyle: "solid", icon: ShieldCheck },
+  CONFIG_PROVEN: { label: "Provado por config (DI/rota)", color: "#06b6d4", lineStyle: "dashed", strong: true, icon: Cable },
   STATIC_UNRESOLVED: { label: "Não-resolvido", color: "#f59e0b", lineStyle: "dashed", icon: HelpCircle },
   LLM_CONJECTURED: { label: "Conjecturado (IA)", color: "#a78bfa", lineStyle: "dotted", icon: Bot },
   UNKNOWN: { label: "Desconhecido", color: "#94a3b8", lineStyle: "solid", muted: true, icon: CircleOff },
 };
 
 const RANK: Record<EvidenceMethod, number> = {
-  RUNTIME_OBSERVED: 4,
-  STATIC_PROVEN: 3,
+  RUNTIME_OBSERVED: 5,
+  STATIC_PROVEN: 4,
+  CONFIG_PROVEN: 3,
   STATIC_UNRESOLVED: 2,
   LLM_CONJECTURED: 1,
   UNKNOWN: 0,
+};
+
+// Confiança canônica por método (espelha `classifyEdgeEvidence` do backend,
+// server/analyzers/system-graph.ts). Fallback quando a aresta não traz o número
+// cru — o encoding de opacidade ∝ confiança nunca fica sem dado.
+const METHOD_CONFIDENCE: Record<EvidenceMethod, number> = {
+  RUNTIME_OBSERVED: 0.95,
+  STATIC_PROVEN: 0.8,
+  CONFIG_PROVEN: 0.78,
+  STATIC_UNRESOLVED: 0.4,
+  LLM_CONJECTURED: 0.3,
+  UNKNOWN: 0.2,
 };
 
 /** Força relativa do método (para escolher o representativo ao agregar). */
@@ -89,6 +115,25 @@ export function normalizeEvidenceMethod(m: unknown): EvidenceMethod {
 /** Método de uma aresta bruta — fallback seguro quando `evidence` ausente. */
 export function evidenceMethodOf(edge: { evidence?: { method?: unknown } | null } | null | undefined): EvidenceMethod {
   return normalizeEvidenceMethod(edge?.evidence?.method);
+}
+
+/**
+ * Confiança (0..1) de uma aresta bruta. Usa o número cru quando presente e
+ * finito; senão cai na confiança canônica do método (nunca fica sem valor, para
+ * o encoding de opacidade ∝ confiança). Clampa fora-de-faixa.
+ */
+export function evidenceConfidenceOf(
+  edge: { evidence?: { method?: unknown; confidence?: unknown } | null } | null | undefined,
+): number {
+  const raw = edge?.evidence?.confidence;
+  const method = evidenceMethodOf(edge);
+  const c = typeof raw === "number" && Number.isFinite(raw) ? raw : METHOD_CONFIDENCE[method];
+  return c < 0 ? 0 : c > 1 ? 1 : c;
+}
+
+/** Confiança canônica de um método (fallback determinístico). */
+export function confidenceOfMethod(m: EvidenceMethod): number {
+  return METHOD_CONFIDENCE[m] ?? 0.2;
 }
 
 /** Ao colapsar N arestas em 1, o encoding mostra a evidência MAIS FORTE. */
@@ -108,6 +153,10 @@ export interface CoverageSummary {
   observed: number;
   unobserved: number;
   ratioPct: number;
+  /** arestas no tier PROVADO (runtime + compilador + config/DI). */
+  proven: number;
+  /** % de arestas provadas (não só observadas em runtime). */
+  provenPct: number;
   nodesObserved?: number;
   nodesTotal?: number;
 }
@@ -118,13 +167,18 @@ export function coverageSummary(coverage?: GraphCoverage | null): CoverageSummar
   if (!e) return null;
   const total = Number.isFinite(e.total) ? e.total : 0;
   if (total <= 0) return null;
-  const observed = e.byMethod?.RUNTIME_OBSERVED ?? 0;
+  const bm = e.byMethod ?? {};
+  const observed = bm.RUNTIME_OBSERVED ?? 0;
+  let proven = 0;
+  for (const m of PROVEN_TIER) proven += bm[m] ?? 0;
   const ratio = Number.isFinite(e.observedRatio) ? e.observedRatio : total > 0 ? observed / total : 0;
   return {
     total,
     observed,
     unobserved: Math.max(0, total - observed),
     ratioPct: Math.round(ratio * 100),
+    proven,
+    provenPct: total > 0 ? Math.round((proven / total) * 100) : 0,
     nodesObserved: coverage?.nodes?.observed,
     nodesTotal: coverage?.nodes?.total,
   };

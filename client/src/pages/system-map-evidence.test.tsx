@@ -4,12 +4,15 @@ import {
   coverageSummary,
   coverageBadgeText,
   evidenceMethodOf,
+  evidenceConfidenceOf,
+  confidenceOfMethod,
   normalizeEvidenceMethod,
   strongestEvidence,
   hasEvidenceData,
   EvidenceLegend,
   CoverageBadge,
   EVIDENCE_ORDER,
+  PROVEN_TIER,
   type GraphCoverage,
 } from "./system-map-evidence";
 
@@ -65,20 +68,79 @@ describe("degradação graciosa (contrato P0.1 ausente)", () => {
   });
 });
 
-// ── Legenda dos 5 métodos ─────────────────────────────────────────────
+// ── Legenda dos 6 métodos ─────────────────────────────────────────────
 describe("EvidenceLegend", () => {
-  it("renderiza os 5 métodos com rótulo pt-BR", () => {
+  it("renderiza os 6 métodos com rótulo pt-BR (inclui CONFIG_PROVEN)", () => {
     render(<EvidenceLegend />);
     expect(screen.getByText("Observado em runtime")).toBeInTheDocument();
     expect(screen.getByText("Provado (estático)")).toBeInTheDocument();
+    expect(screen.getByText("Provado por config (DI/rota)")).toBeInTheDocument();
     expect(screen.getByText("Não-resolvido")).toBeInTheDocument();
     expect(screen.getByText("Conjecturado (IA)")).toBeInTheDocument();
     expect(screen.getByText("Desconhecido")).toBeInTheDocument();
     // um item por método
-    expect(EVIDENCE_ORDER).toHaveLength(5);
+    expect(EVIDENCE_ORDER).toHaveLength(6);
     for (const m of EVIDENCE_ORDER) {
       expect(screen.getByTestId(`evidence-legend-item-${m}`)).toBeInTheDocument();
     }
+  });
+});
+
+// ── CONFIG_PROVEN: o método que faltava (bug: caía em UNKNOWN) ─────────
+describe("CONFIG_PROVEN — taxonomia completa (ADR-0035)", () => {
+  it("normalizeEvidenceMethod reconhece CONFIG_PROVEN (antes virava UNKNOWN)", () => {
+    expect(normalizeEvidenceMethod("CONFIG_PROVEN")).toBe("CONFIG_PROVEN");
+    expect(evidenceMethodOf({ evidence: { method: "CONFIG_PROVEN" } })).toBe("CONFIG_PROVEN");
+  });
+
+  it("CONFIG_PROVEN está no tier PROVADO e ranqueia acima de não-resolvido/conjectura", () => {
+    expect(PROVEN_TIER.has("CONFIG_PROVEN")).toBe(true);
+    // ao colapsar arestas, config-proven vence o não-resolvido e a conjectura
+    expect(strongestEvidence(["STATIC_UNRESOLVED", "CONFIG_PROVEN"])).toBe("CONFIG_PROVEN");
+    expect(strongestEvidence(["LLM_CONJECTURED", "CONFIG_PROVEN"])).toBe("CONFIG_PROVEN");
+    // mas cede ao checker de compilador e ao runtime
+    expect(strongestEvidence(["CONFIG_PROVEN", "STATIC_PROVEN"])).toBe("STATIC_PROVEN");
+    expect(strongestEvidence(["CONFIG_PROVEN", "RUNTIME_OBSERVED"])).toBe("RUNTIME_OBSERVED");
+  });
+
+  it("coverageSummary conta CONFIG_PROVEN no total PROVADO (não só observado)", () => {
+    const s = coverageSummary({
+      edges: {
+        byMethod: { RUNTIME_OBSERVED: 10, STATIC_PROVEN: 20, CONFIG_PROVEN: 15, STATIC_UNRESOLVED: 5, UNKNOWN: 50 },
+        total: 100,
+        observedRatio: 0.1,
+      },
+      nodes: { observed: 10, total: 100 },
+    })!;
+    expect(s.observed).toBe(10); // só runtime
+    expect(s.proven).toBe(45); // runtime + estático + config
+    expect(s.provenPct).toBe(45);
+    expect(s.ratioPct).toBe(10);
+  });
+});
+
+// ── Confiança por aresta (encoding de opacidade ∝ confiança) ──────────
+describe("evidenceConfidenceOf / confidenceOfMethod", () => {
+  it("usa a confiança crua quando presente e finita", () => {
+    expect(evidenceConfidenceOf({ evidence: { method: "STATIC_PROVEN", confidence: 0.73 } })).toBe(0.73);
+  });
+
+  it("cai na confiança canônica do método quando a crua está ausente/inválida", () => {
+    expect(evidenceConfidenceOf({ evidence: { method: "CONFIG_PROVEN" } })).toBe(0.78);
+    expect(evidenceConfidenceOf({ evidence: { method: "RUNTIME_OBSERVED", confidence: NaN } })).toBe(0.95);
+    expect(evidenceConfidenceOf(undefined)).toBe(0.2); // sem evidência → UNKNOWN
+  });
+
+  it("clampa valores fora de 0..1", () => {
+    expect(evidenceConfidenceOf({ evidence: { method: "STATIC_PROVEN", confidence: 1.4 } })).toBe(1);
+    expect(evidenceConfidenceOf({ evidence: { method: "STATIC_PROVEN", confidence: -0.3 } })).toBe(0);
+  });
+
+  it("confidenceOfMethod é monotônica com o rank (mais forte = mais confiante)", () => {
+    expect(confidenceOfMethod("RUNTIME_OBSERVED")).toBeGreaterThan(confidenceOfMethod("STATIC_PROVEN"));
+    expect(confidenceOfMethod("STATIC_PROVEN")).toBeGreaterThan(confidenceOfMethod("CONFIG_PROVEN"));
+    expect(confidenceOfMethod("CONFIG_PROVEN")).toBeGreaterThan(confidenceOfMethod("STATIC_UNRESOLVED"));
+    expect(confidenceOfMethod("STATIC_UNRESOLVED")).toBeGreaterThan(confidenceOfMethod("UNKNOWN"));
   });
 });
 

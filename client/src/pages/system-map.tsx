@@ -63,13 +63,15 @@ import {
   type EvidenceMethod,
   type GraphCoverage,
   evidenceMethodOf,
+  evidenceConfidenceOf,
   strongestEvidence,
   hasEvidenceData,
   EvidenceLegend,
   CoverageBadge,
 } from "./system-map-evidence";
 import { NarrativeView } from "./system-map-narrative";
-import { BookOpen } from "lucide-react";
+import { ProofsView } from "./system-map-proofs";
+import { BookOpen, ShieldCheck } from "lucide-react";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 cytoscape.use(elk as any);
@@ -162,7 +164,7 @@ function labelOf(n: GraphNode): string {
   return n.className || n.qualifiedSignature || n.id;
 }
 
-type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord" | "er" | "narrative";
+type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord" | "er" | "narrative" | "proofs";
 
 export default function SystemMapPage() {
   const projectsQuery = useQuery<Project[]>({ queryKey: ["/api/projects"] });
@@ -263,6 +265,15 @@ export default function SystemMapPage() {
             >
               <BookOpen className="h-4 w-4" /> Narrativa
             </Button>
+            <Button
+              variant={viewMode === "proofs" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setViewMode("proofs")}
+              data-testid="view-proofs"
+            >
+              <ShieldCheck className="h-4 w-4" /> Provas
+            </Button>
           </div>
           <Select
             value={projectId != null ? String(projectId) : undefined}
@@ -314,6 +325,7 @@ export default function SystemMapPage() {
       {!projectsQuery.isError && graphQuery.data && viewMode === "treemap" && <TreemapView payload={graphQuery.data} />}
       {!projectsQuery.isError && graphQuery.data && viewMode === "chord" && <ChordView payload={graphQuery.data} />}
       {!projectsQuery.isError && graphQuery.data && viewMode === "er" && <ErView payload={graphQuery.data} />}
+      {!projectsQuery.isError && graphQuery.data && viewMode === "proofs" && <ProofsView payload={graphQuery.data} />}
     </div>
   );
 }
@@ -475,22 +487,29 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
   const aggEdges = useMemo(() => {
     const map = new Map<
       string,
-      { source: string; target: string; rel: EdgeRelation; weight: number; methods: EvidenceMethod[] }
+      { source: string; target: string; rel: EdgeRelation; weight: number; methods: EvidenceMethod[]; confs: number[] }
     >();
     for (const e of payload.edges) {
       if (!scopedIds.has(e.fromNode) || !scopedIds.has(e.toNode)) continue;
       const key = `${e.fromNode}|${e.toNode}|${e.relationType}`;
       const method = evidenceMethodOf(e);
+      const conf = evidenceConfidenceOf(e);
       const prev = map.get(key);
       if (prev) {
         prev.weight += 1;
         prev.methods.push(method);
+        prev.confs.push(conf);
       } else {
-        map.set(key, { source: e.fromNode, target: e.toNode, rel: e.relationType, weight: 1, methods: [method] });
+        map.set(key, { source: e.fromNode, target: e.toNode, rel: e.relationType, weight: 1, methods: [method], confs: [conf] });
       }
     }
-    // O encoding de uma aresta agregada usa a evidência MAIS FORTE que a compõe.
-    return Array.from(map.values()).map((e) => ({ ...e, method: strongestEvidence(e.methods) }));
+    // O encoding de uma aresta agregada usa a evidência MAIS FORTE que a compõe;
+    // a confiança do encoding é a do elo mais forte (max), ∝ opacidade no canvas.
+    return Array.from(map.values()).map((e) => ({
+      ...e,
+      method: strongestEvidence(e.methods),
+      conf: e.confs.length ? Math.max(...e.confs) : 0.2,
+    }));
   }, [payload, scopedIds]);
 
   // O backend (P0.1) anexou o eixo de evidência? Só então estilizamos por
@@ -534,7 +553,8 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
             width: Math.min(6, 1 + Math.log2(e.weight + 1)),
             // Só entra no dado quando há evidência — sem isso o seletor
             // `edge[method]` não casa e o encoding por `rel` segue intacto.
-            ...(showEvidence ? { method: e.method } : {}),
+            // `conf` habilita o encoding de opacidade ∝ confiança (só quando há evidência).
+            ...(showEvidence ? { method: e.method, conf: e.conf } : {}),
           },
         })),
       },
@@ -603,10 +623,21 @@ function GraphCanvas({ payload }: { payload: GraphPayload }) {
         // graciosa). O mapa passa a MOSTRAR o que não sabe: não-resolvido =
         // tracejado, conjectura de IA = pontilhado, desconhecido = cinza esmaecido.
         { selector: `edge[method = "STATIC_PROVEN"]`, style: { "line-style": "solid" } },
+        // CONFIG_PROVEN (DI/rota/env): tracejada FORTE — traço longo [8,3] (mais
+        // "cheio" que o não-resolvido [4,4]) + tint ciano do método, pra destacar
+        // que a aresta é wiring determinístico provado, não conjectura.
+        { selector: `edge[method = "CONFIG_PROVEN"]`, style: { "line-style": "dashed", "line-dash-pattern": [8, 3], "line-color": "#06b6d4", "target-arrow-color": "#06b6d4" } },
         { selector: `edge[method = "STATIC_UNRESOLVED"]`, style: { "line-style": "dashed", "line-dash-pattern": [4, 4] } },
         { selector: `edge[method = "LLM_CONJECTURED"]`, style: { "line-style": "dotted" } },
-        { selector: `edge[method = "RUNTIME_OBSERVED"]`, style: { "line-style": "solid", opacity: 0.85 } },
-        { selector: `edge[method = "UNKNOWN"]`, style: { "line-color": "#94a3b8", "target-arrow-color": "#94a3b8", opacity: 0.22 } },
+        { selector: `edge[method = "RUNTIME_OBSERVED"]`, style: { "line-style": "solid" } },
+        { selector: `edge[method = "UNKNOWN"]`, style: { "line-color": "#94a3b8", "target-arrow-color": "#94a3b8" } },
+        // Opacidade ∝ confiança (0.20→0.95 vira 0.28→0.9): o quão SEGUROS estamos
+        // da aresta vira o quão nítida ela é. Aplicado depois dos métodos, só nas
+        // arestas que trazem `conf` (há evidência) — as classes de ênfase (.faded/
+        // .hl), por virem por último, ainda vencem no hover/seleção.
+        // cytoscape aceita a sintaxe de mapper como string em runtime; os tipos só
+        // conhecem `number`, então casamos aqui (o encoding é válido no canvas).
+        { selector: `edge[conf]`, style: { opacity: "mapData(conf, 0.2, 0.95, 0.28, 0.9)" as unknown as number } },
         // estados de ênfase
         { selector: ".faded", style: { opacity: 0.08 } },
         { selector: "node.hl", style: { "border-color": "#0f172a", "border-width": 3 } },
