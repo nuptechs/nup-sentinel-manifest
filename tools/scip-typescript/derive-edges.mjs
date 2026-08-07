@@ -114,6 +114,27 @@ for (const d of idx.documents) {
   }
 }
 
+// ── DIAG temporário: dump do 1º doc com defs+refs p/ ver o formato do scip-java.
+for (const d of idx.documents) {
+  const dd = [], rr = [];
+  for (const o of d.occurrences) {
+    if (!isMethodSym(o.symbol)) continue;
+    const roles = o.symbol_roles | 0;
+    if (roles & DEFINITION) dd.push(o);
+    else if (!(roles & IMPORT)) rr.push(o);
+  }
+  if (dd.length && rr.length) {
+    const defStarts = dd.map((o) => rng(o.range)[0]);
+    const refPs = rr.map((o) => rng(o.range)[0]);
+    const s = (o) => ({ range: o.range, has_encl: !!o.enclosing_range, encl: o.enclosing_range || null, sym: String(o.symbol || '').slice(-48) });
+    console.error(`[diag-doc] path=${d.relative_path || '?'} nDefs=${dd.length} nRefs=${rr.length}` +
+      ` defStart=[${Math.min(...defStarts)}..${Math.max(...defStarts)}] refP=[${Math.min(...refPs)}..${Math.max(...refPs)}]`);
+    console.error('[diag-doc] def0=' + JSON.stringify(s(dd[0])));
+    console.error('[diag-doc] ref0=' + JSON.stringify(s(rr[0])));
+    break;
+  }
+}
+
 const toEdge = (line, resolution) => {
   const [from, to] = line.split(' => ');
   return { from, to, kind: 'CALLS', resolution };
