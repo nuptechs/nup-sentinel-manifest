@@ -31,15 +31,31 @@ if (!indexPath) {
   console.error('uso: node derive-edges.mjs <index.scip> [--scip-lib <scip.js>]');
   process.exit(2);
 }
-// O binding protobuf do SCIP vem do próprio scip-typescript (dist/src/scip.js).
-const libFlag = args.indexOf('--scip-lib');
-const scipLib =
-  libFlag >= 0
-    ? args[libFlag + 1]
-    : require.resolve('@sourcegraph/scip-typescript/dist/src/scip.js');
-const scip = require(scipLib);
+// Duas fontes de índice:
+//  (a) BINÁRIO (default): decodifica index.scip via o binding protobuf do
+//      scip-typescript (dist/src/scip.js). Campos snake_case.
+//  (b) `--json <path>`: lê a saída de `scip print --json` (CLI canônico do
+//      sourcegraph/scip). OBRIGATÓRIO p/ scip-JAVA: o binding do scip-typescript
+//      decodifica os ranges do índice scip-java como VAZIOS (packed int32
+//      incompatível) → NaN; o CLI canônico decodifica certo. Campos lowerCamelCase.
+const jsonFlag = args.indexOf('--json');
+let idx;
+if (jsonFlag >= 0) {
+  idx = JSON.parse(fs.readFileSync(args[jsonFlag + 1] || indexPath, 'utf8'));
+} else {
+  const libFlag = args.indexOf('--scip-lib');
+  const scipLib =
+    libFlag >= 0
+      ? args[libFlag + 1]
+      : require.resolve('@sourcegraph/scip-typescript/dist/src/scip.js');
+  const scip = require(scipLib);
+  idx = scip.scip.Index.deserialize(fs.readFileSync(indexPath));
+}
 
-const idx = scip.scip.Index.deserialize(fs.readFileSync(indexPath));
+// Acessores tolerantes a snake_case (binário) e lowerCamelCase (protojson/--json).
+const rolesOf = (o) => (o.symbol_roles ?? o.symbolRoles ?? 0) | 0;
+const enclOf = (o) => o.enclosing_range ?? o.enclosingRange;
+const isImpl = (r) => r.is_implementation ?? r.isImplementation;
 
 // SCIP range: [startLine, startChar, endLine, endChar] ou [line, startChar, endChar].
 const pos = (l, c) => l * 1_000_000 + c;
@@ -60,7 +76,7 @@ const implsOf = new Map();
 for (const d of idx.documents)
   for (const s of d.symbols || [])
     for (const r of s.relationships || [])
-      if (r.is_implementation && r.symbol) {
+      if (isImpl(r) && r.symbol) {
         if (!implsOf.has(r.symbol)) implsOf.set(r.symbol, new Set());
         implsOf.get(r.symbol).add(s.symbol);
       }
@@ -78,12 +94,13 @@ for (const d of idx.documents) {
   const defs = [];
   for (const o of d.occurrences) {
     if (!isMethodSym(o.symbol)) continue;
-    if (!((o.symbol_roles | 0) & DEFINITION)) continue;
+    if (!(rolesOf(o) & DEFINITION)) continue;
     const [s] = rng(o.range);
     let bodyStart = s;
     let bodyEnd = Infinity;
-    if (o.enclosing_range && o.enclosing_range.length >= 4) {
-      const er = rng(o.enclosing_range);
+    const er0 = enclOf(o);
+    if (er0 && er0.length >= 4) {
+      const er = rng(er0);
       bodyStart = er[0];
       bodyEnd = er[1];
       nWithEnclosing++;
@@ -99,7 +116,7 @@ for (const d of idx.documents) {
   // Call-sites: referência (não-def, não-import) a símbolo de método.
   for (const o of d.occurrences) {
     if (!isMethodSym(o.symbol)) continue;
-    const roles = o.symbol_roles | 0;
+    const roles = rolesOf(o);
     if (roles & DEFINITION || roles & IMPORT) continue;
     nMethodRefs++;
     const [p] = rng(o.range);
@@ -111,27 +128,6 @@ for (const d of idx.documents) {
     proven.add(caller.sym + ' => ' + o.symbol);
     if (implsOf.has(o.symbol))
       for (const impl of implsOf.get(o.symbol)) ifaceImpl.add(caller.sym + ' => ' + impl);
-  }
-}
-
-// ── DIAG temporário: dump do 1º doc com defs+refs p/ ver o formato do scip-java.
-for (const d of idx.documents) {
-  const dd = [], rr = [];
-  for (const o of d.occurrences) {
-    if (!isMethodSym(o.symbol)) continue;
-    const roles = o.symbol_roles | 0;
-    if (roles & DEFINITION) dd.push(o);
-    else if (!(roles & IMPORT)) rr.push(o);
-  }
-  if (dd.length && rr.length) {
-    const defStarts = dd.map((o) => rng(o.range)[0]);
-    const refPs = rr.map((o) => rng(o.range)[0]);
-    const s = (o) => ({ range: o.range, has_encl: !!o.enclosing_range, encl: o.enclosing_range || null, sym: String(o.symbol || '').slice(-48) });
-    console.error(`[diag-doc] path=${d.relative_path || '?'} nDefs=${dd.length} nRefs=${rr.length}` +
-      ` defStart=[${Math.min(...defStarts)}..${Math.max(...defStarts)}] refP=[${Math.min(...refPs)}..${Math.max(...refPs)}]`);
-    console.error('[diag-doc] def0=' + JSON.stringify(s(dd[0])));
-    console.error('[diag-doc] ref0=' + JSON.stringify(s(rr[0])));
-    break;
   }
 }
 
