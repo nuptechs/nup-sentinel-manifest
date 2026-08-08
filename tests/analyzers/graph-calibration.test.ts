@@ -91,21 +91,50 @@ describe("buildGraphCalibration — abstenção honesta", () => {
 });
 
 describe("buildGraphCalibration — mede quando PODE medir", () => {
-  it("oráculo comparável + massa: publica taxa e intervalo exato", () => {
-    // 100 estáticas, 30 confirmadas → p̂ = 0.30 (contra o peso fixo 0.40)
-    const c = buildGraphCalibration(comparableGraph(100, 30));
+  it("oráculo comparável + massa: publica taxa e intervalo exato SOBRE O UNIVERSO CONFIRMÁVEL", () => {
+    // §DENOMINADOR CONFIRMÁVEL: 40 origens exercitadas, cada uma com 2 arestas
+    // estáticas de alvo-ENTITY (1 confirmada + 1 não) → confirmável n=80,
+    // confirmadas=40 → p̂ = 0.50. As 60 origens NUNCA exercitadas ficam FORA do
+    // denominador ("não exercitado" ≠ "errado" — a semântica antiga punia o
+    // estático por falta de tráfego).
+    const edges: ReturnType<typeof comparableGraph> = [];
+    for (let i = 0; i < 40; i++) {
+      edges.push(edge(`SERVICE:S${i}`, `ENTITY:T${i}`, "STATIC_UNRESOLVED", 0.4));      // confirmada
+      edges.push(edge(`SERVICE:S${i}`, `ENTITY:X${i}`, "STATIC_UNRESOLVED", 0.4));      // não confirmada
+      edges.push(edge(`SERVICE:S${i}`, `ENTITY:T${i}`, "RUNTIME_OBSERVED", 0.95));
+    }
+    for (let i = 40; i < 100; i++) edges.push(edge(`SERVICE:S${i}`, `ENTITY:U${i}`, "STATIC_UNRESOLVED", 0.4)); // nunca exercitada — fora
+    const c = buildGraphCalibration(edges);
     assert.equal(c.calibrated, true);
     assert.equal(c.reason, undefined);
-    assert.equal(c.oracleComparablePairs, 30);
+    assert.equal(c.confirmableStaticByMethod.STATIC_UNRESOLVED, 80);
     const m = c.byMethod.STATIC_UNRESOLVED;
     assert.equal(m.calibrated, true);
-    assert.equal(m.reliability, 0.3);
-    assert.ok(m.lower < 0.3 && m.upper > 0.3, "intervalo contém a taxa pontual");
-    assert.ok(m.width > 0 && m.width < 0.4, `intervalo plausível (width=${m.width})`);
+    assert.equal(m.n, 80);
+    assert.equal(m.reliability, 0.5);
+    assert.ok(m.lower < 0.5 && m.upper > 0.5, "intervalo contém a taxa pontual");
     // a confiança EFETIVA passa a ser a medida, não o peso de projeto
     assert.equal(c.effectiveConfidenceByMethod.STATIC_UNRESOLVED.source, "calibrated");
-    assert.equal(c.effectiveConfidenceByMethod.STATIC_UNRESOLVED.confidence, 0.3);
+    assert.equal(c.effectiveConfidenceByMethod.STATIC_UNRESOLVED.confidence, 0.5);
     assert.equal(c.effectiveConfidenceByMethod.STATIC_UNRESOLVED.fixed, 0.4);
+  });
+
+  it("run-104: método só com arestas INTERNAS (alvo fora do tipo do oráculo) ABSTÉM nomeado — nunca 0%", () => {
+    // O caso real que motivou o 3º gate: oráculo de fronteira (SERVICE→ENTITY)
+    // + 3k arestas estáticas SERVICE→REPOSITORY (internas). Origens comparáveis
+    // existem, mas NENHUMA aresta interna é confirmável → 0% seria mentira.
+    const edges: ReturnType<typeof comparableGraph> = [];
+    for (let i = 0; i < 50; i++) edges.push(edge(`SERVICE:S${i}`, `REPOSITORY:R${i}`, "STATIC_PROVEN", 0.8));
+    for (let i = 0; i < 10; i++) edges.push(edge(`SERVICE:S${i}`, `ENTITY:T${i}`, "RUNTIME_OBSERVED", 0.95));
+    const c = buildGraphCalibration(edges);
+    assert.ok(c.oracleComparablePairs > 0, "origens SÃO comparáveis (o gate antigo passaria)");
+    assert.equal(c.confirmableStaticByMethod.STATIC_PROVEN ?? 0, 0);
+    const m = c.byMethod.STATIC_PROVEN;
+    assert.equal(m.calibrated, false);
+    assert.match(m.abstainReason!, /fora do alcance/i);
+    // a confiança efetiva volta ao peso fixo — nunca 0
+    assert.equal(c.effectiveConfidenceByMethod.STATIC_PROVEN.source, "fixed");
+    assert.equal(c.effectiveConfidenceByMethod.STATIC_PROVEN.confidence, 0.8);
   });
 
   it("declara o NÍVEL dos intervalos (90% calibração / 95% completude)", () => {

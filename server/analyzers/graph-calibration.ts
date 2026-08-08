@@ -74,6 +74,8 @@ export interface GraphCalibration {
   runtimeOracleSize: number;
   /** nº de pares observados cuja ORIGEM o modelo estático conhece (utilizáveis). */
   oracleComparablePairs: number;
+  /** nº de arestas estáticas CONFIRMÁVEIS pelo oráculo, por método (o denominador honesto). */
+  confirmableStaticByMethod: Record<string, number>;
   /** nível do intervalo de confiança da calibração, em % (1−α). */
   confidenceLevelPct: number;
   /** confiabilidade medida + intervalo exato, por método. */
@@ -146,6 +148,55 @@ export function countComparableOraclePairs(edges: CalibrationInputEdge[]): numbe
 }
 
 /**
+ * ─── §DENOMINADOR CONFIRMÁVEL (3º gate, achado no run 104 do projeto 27) ────
+ * Origens comparáveis são NECESSÁRIAS mas ainda não suficientes: um oráculo de
+ * FRONTEIRA (spans de DB → arestas serviço→entidade) jamais confirma as arestas
+ * INTERNAS do estático (serviço→repositório, serviço→serviço). Medido ao vivo:
+ * 444 pares comparáveis e mesmo assim STATIC_PROVEN saiu `reliability=0,
+ * n=3085, calibrated=true` — o "0% artificial" UM NÍVEL mais fundo, porque o
+ * denominador incluía 3k arestas que o oráculo é estruturalmente incapaz de ver.
+ *
+ * A regra (estrutural, sem hardcode): uma aresta estática é CONFIRMÁVEL quando
+ * (a) sua ORIGEM foi exercitada pelo oráculo nesta janela E (b) seu ALVO é do
+ * MESMO TIPO de nó que o oráculo observa — os tipos são DERIVADOS das próprias
+ * arestas runtime (kind = prefixo do id antes de ":"), então qualquer oráculo
+ * futuro (rota→endpoint, serviço→fila) amplia o universo sozinho. A
+ * confiabilidade passa a ser medida SÓ sobre o universo confirmável; método sem
+ * NENHUMA aresta confirmável abstém com o motivo nomeado (não é 0%: é fora do
+ * alcance do oráculo).
+ */
+export function confirmableStaticEdges(edges: CalibrationInputEdge[]): {
+  subset: CalibrationInputEdge[];
+  countsByMethod: Record<string, number>;
+} {
+  const kindOf = (id: string) => {
+    const i = id.indexOf(":");
+    return i > 0 ? id.slice(0, i) : id;
+  };
+  const oracleFrom = new Set<string>();
+  const oracleTargetKinds = new Set<string>();
+  for (const e of edges) {
+    if (e?.evidence?.method === RUNTIME_METHOD) {
+      oracleFrom.add(e.fromNode);
+      oracleTargetKinds.add(kindOf(e.toNode));
+    }
+  }
+  const subset: CalibrationInputEdge[] = [];
+  const countsByMethod: Record<string, number> = {};
+  for (const e of edges) {
+    if (e?.evidence?.method === RUNTIME_METHOD) {
+      subset.push(e); // o oráculo inteiro sempre entra
+      continue;
+    }
+    if (oracleFrom.has(e.fromNode) && oracleTargetKinds.has(kindOf(e.toNode))) {
+      subset.push(e);
+      countsByMethod[e.evidence.method] = (countsByMethod[e.evidence.method] || 0) + 1;
+    }
+  }
+  return { subset, countsByMethod };
+}
+
+/**
  * Monta a seção `coverage.calibration` do `/graph`. Puro, determinístico e
  * NUNCA lança: o consumidor pode chamar sem try/catch defensivo.
  */
@@ -160,6 +211,8 @@ export function buildGraphCalibration(
   const completenessLevelPct = Math.round((1 - completenessAlpha) * 100);
 
   const fixed = deriveFixedWeights(list);
+  // Passada COMPLETA: completude (Chao) e presença de métodos vêm do grafo
+  // inteiro — o recorte confirmável não pode enviesar o censo.
   const overlay = buildCalibrationOverlay(list, fixed, {
     alpha,
     completenessAlpha,
@@ -168,11 +221,43 @@ export function buildGraphCalibration(
 
   const comparable = countComparableOraclePairs(list);
 
-  // ── gate estrutural: oráculo incomparável REBAIXA tudo ao peso fixo ──
-  // (senão `byMethod[m].calibrated` continuaria true com `reliability=0` e o
-  // consumidor aplicaria confiança 0 — a mentira que este gate existe para matar.)
-  let byMethod = overlay.calibration.byMethod;
-  let effective = overlay.effectiveConfidenceByMethod;
+  // Passada CONFIRMÁVEL (§DENOMINADOR CONFIRMÁVEL): a CONFIABILIDADE por método
+  // é medida SÓ sobre as arestas estáticas que o oráculo tem como confirmar.
+  const conf = confirmableStaticEdges(list);
+  const overlayConf = buildCalibrationOverlay(conf.subset, fixed, {
+    alpha,
+    completenessAlpha,
+    ...(opts?.minSamples !== undefined ? { minSamples: opts.minSamples } : {}),
+  });
+
+  // byMethod/effective partem da passada CONFIRMÁVEL; métodos presentes no grafo
+  // mas com 0 arestas confirmáveis abstêm com o motivo nomeado (peso fixo).
+  const OUT_OF_REACH_REASON =
+    "fora do alcance do oráculo desta janela (as arestas deste método são internas — o oráculo de fronteira só observa alvos de outro tipo); não é 0%: é não-confirmável";
+  let byMethod: CalibrationResult["byMethod"] = {};
+  let effective: Record<string, EffectiveMethodConfidence> = {};
+  // eslint-disable-next-line prefer-const -- reatribuídos no gate de incomparabilidade abaixo
+  for (const m of Object.keys(overlay.calibration.byMethod)) {
+    if (m in overlayConf.calibration.byMethod && (conf.countsByMethod[m] || 0) > 0) {
+      byMethod[m] = overlayConf.calibration.byMethod[m];
+    } else {
+      byMethod[m] = {
+        ...overlay.calibration.byMethod[m],
+        reliability: 0, confirmed: 0,
+        calibrated: false,
+        abstainReason: OUT_OF_REACH_REASON,
+      };
+    }
+  }
+  for (const m of Object.keys(overlay.effectiveConfidenceByMethod)) {
+    const src = overlayConf.effectiveConfidenceByMethod[m];
+    if (src && (conf.countsByMethod[m] || 0) > 0) {
+      effective[m] = src;
+    } else {
+      const fx = overlay.effectiveConfidenceByMethod[m].fixed;
+      effective[m] = { confidence: fx, source: "fixed", fixed: fx };
+    }
+  }
   const incomparable = overlay.calibration.hasRuntimeGroundTruth && comparable === 0;
   const INCOMPARABLE_REASON =
     "oráculo de runtime incomparável com o mapa estático (as arestas observadas partem de origens que nenhuma aresta estática compartilha — traço fragmentado); medir confirmação daria 0% artificial";
@@ -219,6 +304,7 @@ export function buildGraphCalibration(
     hasRuntimeGroundTruth: overlay.calibration.hasRuntimeGroundTruth,
     runtimeOracleSize: overlay.calibration.runtimeOracleSize,
     oracleComparablePairs: comparable,
+    confirmableStaticByMethod: conf.countsByMethod,
     confidenceLevelPct,
     byMethod,
     effectiveConfidenceByMethod: effective,
