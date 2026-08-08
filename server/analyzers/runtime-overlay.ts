@@ -61,6 +61,7 @@ export interface RuntimeOverlayResult {
   routesMinted: number;    // observadas mas AUSENTES do grafo estático (miss)
   entityEdges: number;     // arestas RUNTIME_OBSERVED rota→entidade
   wsv1Edges: number;       // arestas RUNTIME_OBSERVED rota→endpoint Java
+  serviceEntityEdges: number; // arestas RUNTIME_OBSERVED serviço→entidade (same-trace, 1-endpoint)
   tablesResolved: number;  // tabela casou com ENTITY existente
   tablesMinted: number;    // tabela sem ENTITY → mintou table:<n>
   hotNodes: number;        // nós marcados runtimeHot
@@ -160,9 +161,30 @@ export function extractRuntimePairs(
     if (!gwSpans.length) continue;
     const root = gwSpans.find((s) => !hasParentInTrace(s)) || gwSpans[0];
     const rtg = tagsOf(root);
-    const path = stripQuery(rtg["url.path"] || rtg["http.target"] || rtg["http.route"] || "");
+    let path = stripQuery(rtg["url.path"] || rtg["http.target"] || rtg["http.route"] || "");
     if (!path || NOISE_RE.test(path)) continue;
     const method = String(rtg["http.request.method"] || rtg["http.method"] || "GET").toUpperCase();
+
+    // ROTA MAIS ESPECÍFICA do traço (fix do colapso-no-mount, 2026-08-08): o
+    // express seta http.route no PONTO DE MONTAGEM (ex. `/easynup`), então TODAS
+    // as rotas proxied colapsavam numa única chave `GET /easynup` (routePairs=1
+    // com 40 rotas distintas no hub). O span FILHO (Spring) carrega a rota real
+    // (`/easynup/findX.v1`). Preferimos o caminho MAIS LONGO do traço que
+    // ESTENDE o do root (prefixo estrito) — nunca troca por rota não relacionada.
+    if (path) {
+      let best = path;
+      for (const s of spans) {
+        const cand = stripQuery(tagsOf(s)["http.route"] || "");
+        if (
+          cand.length > best.length &&
+          cand.startsWith(path.endsWith("/") ? path : `${path}/`) &&
+          !NOISE_RE.test(cand)
+        ) {
+          best = cand;
+        }
+      }
+      path = best;
+    }
 
     // agrega tudo do traço
     const tables: Array<{ table: string; op: string }> = [];
@@ -207,7 +229,7 @@ export function applyRuntimeOverlay(
 ): RuntimeOverlayResult {
   const res: RuntimeOverlayResult = {
     tracesConsidered: 0, routesObserved: pairs.length, routesMatched: 0, routesMinted: 0,
-    entityEdges: 0, wsv1Edges: 0, tablesResolved: 0, tablesMinted: 0, hotNodes: 0,
+    entityEdges: 0, wsv1Edges: 0, serviceEntityEdges: 0, tablesResolved: 0, tablesMinted: 0, hotNodes: 0,
   };
   res.tracesConsidered = pairs.reduce((a, p) => a + p.count, 0);
 
@@ -216,10 +238,20 @@ export function applyRuntimeOverlay(
   for (const n of graph.getNodesByType("ENTITY")) entityByTable.set(toSnakeCase(n.className), n.id);
   const wsv1ByPath = new Map<string, string>();
   const routeNodes: { id: string; method: string; path: string }[] = [];
+  // Grafo PROFUNDO (scip/SCOPE): os WsV1 são nós `SERVICE:<fqn>` com id
+  // `...<pacote>.<op>.v<N>.<Op>ServiceV1` — a convenção `wsv1:<path>` não existe
+  // lá (por isso routeJavaEdges ficava 0 estrutural no projeto 27). Indexa por
+  // `<op>.v<N>` derivado do PRÓPRIO id (determinístico, sem heurística de nome).
+  const serviceByOpVersion = new Map<string, string>();
+  const OP_SEG_RE = /\.([a-z][A-Za-z0-9]*)\.(v\d+)\./;
   for (const n of graph.getAllNodes()) {
     const md = (n.metadata || {}) as Record<string, unknown>;
     if (n.id.startsWith("wsv1:") && typeof md.fullPath === "string") wsv1ByPath.set(md.fullPath, n.id);
     if (n.type === "ROUTE") routeNodes.push({ id: n.id, method: String(md.httpMethod || ""), path: String(md.fullPath || "") });
+    if (n.type === "SERVICE") {
+      const m = n.id.match(OP_SEG_RE);
+      if (m && !serviceByOpVersion.has(`${m[1]}.${m[2]}`)) serviceByOpVersion.set(`${m[1]}.${m[2]}`, n.id);
+    }
   }
 
   const hot = new Set<string>();
@@ -294,11 +326,35 @@ export function applyRuntimeOverlay(
     }
 
     // 3) rota → endpoint Java (quando o proxy aparece no traço)
+    // Resolve na convenção rasa (`wsv1:<path>`) E na profunda (`SERVICE:<fqn>`
+    // via `<op>.v<N>` do path `/easynup/<op>.v<N>`).
+    const javaTargets: string[] = [];
     for (const ep of Array.from(p.javaEndpoints)) {
-      const target = wsv1ByPath.get(ep);
+      let target = wsv1ByPath.get(ep) || null;
+      if (!target) {
+        const m = ep.match(/\/([a-z][A-Za-z0-9]*)\.(v\d+)(?:\/|$)/);
+        if (m) target = serviceByOpVersion.get(`${m[1]}.${m[2]}`) || null;
+      }
       if (!target) continue;
+      javaTargets.push(target);
       if (addObserved(routeId, target, { ...meta, endpoint: ep })) res.wsv1Edges++;
       markHot(target, p.count, p.lastSeenMs);
+    }
+
+    // 4) serviço → entidade OBSERVADO same-trace (a base dos pares COMPARÁVEIS
+    // da calibração: SERVICE tem arestas estáticas — uma aresta observada com a
+    // MESMA origem torna o oráculo comparável ao mapa). CONSERVADOR: só quando o
+    // traço tem EXATAMENTE 1 endpoint Java — com 2+, atribuir tabela a serviço
+    // seria chute (anti-falso-positivo declarado).
+    if (javaTargets.length === 1) {
+      const svcNode = javaTargets[0];
+      for (const [table, op] of Array.from(p.tables)) {
+        const target = entityByTable.get(table) || `table:${table}`;
+        if (!graph.getNode(target)) continue; // entidade já mintada no passo 2
+        if (addObserved(svcNode, target, { ...meta, operation: op || undefined, viaTrace: true })) {
+          res.serviceEntityEdges++;
+        }
+      }
     }
   }
 
@@ -591,6 +647,7 @@ export interface RuntimeOverlaySummary {
   routePairs: number;      // rotas observadas com par rota→tabela (traço completo)
   routeEntityEdges: number;
   routeJavaEdges: number;
+  serviceEntityEdges: number;  // serviço→entidade same-trace (base dos pares comparáveis)
   tablesObserved: number;
   entitiesResolved: number;
   tablesMinted: number;
@@ -662,6 +719,7 @@ export async function runRuntimeOverlay(
     routePairs: pairs.length,
     routeEntityEdges: ov.entityEdges,
     routeJavaEdges: ov.wsv1Edges,
+    serviceEntityEdges: ov.serviceEntityEdges,
     tablesObserved: tobs.tablesObserved,
     entitiesResolved: tobs.entitiesResolved,
     tablesMinted: tobs.tablesMinted,
