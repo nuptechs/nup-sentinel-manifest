@@ -1,0 +1,207 @@
+# ─────────────────────────────────────────────────────────────────────────
+# TEMPLATE DO INTEGRATION-KIT — evidência ESTÁTICA + CONFIG de um repo Java
+# (Maven/Gradle + Spring) para o mapa epistêmico do Sentinel (ADR-0028/0030/0035).
+#
+# Copie para `.github/workflows/sentinel-manifest-java.yml` no SEU repo.
+#
+# O que este workflow alimenta (2 dos 3 eixos do mapa):
+#   • STATIC_PROVEN  — call-graph compiler-accurate derivado do índice SCIP
+#                      produzido pelo BUILD REAL (scip-java é plugin do javac).
+#   • CONFIG_PROVEN  — interface→impl cuja resolução o wiring do Spring torna
+#                      determinística (lida do FONTE, sem runtime).
+# O 3º eixo (RUNTIME_OBSERVED) NÃO vem daqui: vem dos traços OTel da app rodando
+# — ver `integration-kit/templates/otel-java.md`.
+#
+# ── CONFIGURAR ANTES DE USAR ─────────────────────────────────────────────
+# Repository VARIABLES (Settings → Secrets and variables → Actions → Variables):
+#   MANIFEST_PROJECT_ID   (obrigatório) id numérico do projeto no manifest
+#   MANIFEST_URL          (opcional)    default https://manifest.nuptechs.com
+#   CONFIG_ROOT_PACKAGE   (obrigatório p/ CONFIG_PROVEN) ex.: com.acme
+#   JAVA_SRC_ROOT         (opcional)    default src/main/java
+#   MANIFEST_TOOLS_REF    (opcional)    ref do nup-sentinel-manifest de onde vem
+#                                       o deriver. Default `main` (sempre a
+#                                       última versão). Pine numa tag/SHA se
+#                                       quiser build reprodutível — o trade-off
+#                                       é ficar para trás em correções.
+# Repository SECRET:
+#   SENTINEL_MANIFEST_API_KEY  chave de API do manifest (pk_...)
+#
+# ── POSTURA ──────────────────────────────────────────────────────────────
+# TODO passo é AUXILIAR: `continue-on-error: true` + guardas que PULAM (com
+# `::warning::` visível) quando falta secret/variable. Este workflow NUNCA
+# reprova o CI do produto — telemetria não pode bloquear entrega. O que ele não
+# pode fazer é falhar em SILÊNCIO: toda saída de exceção emite warning nomeado.
+# ─────────────────────────────────────────────────────────────────────────
+name: Sentinel Manifest — evidência Java (STATIC + CONFIG)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/main/java/**'
+      - 'pom.xml'
+      - 'build.gradle'
+      - 'build.gradle.kts'
+  workflow_dispatch: {}
+
+concurrency:
+  group: sentinel-manifest-java
+  cancel-in-progress: true
+
+env:
+  MANIFEST_URL: ${{ vars.MANIFEST_URL || 'https://manifest.nuptechs.com' }}
+  MANIFEST_PROJECT_ID: ${{ vars.MANIFEST_PROJECT_ID }}
+  MANIFEST_TOOLS_REF: ${{ vars.MANIFEST_TOOLS_REF || 'main' }}
+  CONFIG_ROOT_PACKAGE: ${{ vars.CONFIG_ROOT_PACKAGE }}
+  JAVA_SRC_ROOT: ${{ vars.JAVA_SRC_ROOT || 'src/main/java' }}
+
+jobs:
+  evidence:
+    name: scip-java + config-proven → Manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Só necessário se o build usa maven-toolchains-plugin. Remova se não usa.
+      - name: Create toolchains.xml
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/toolchains.xml << 'EOF'
+          <toolchains>
+            <toolchain>
+              <type>jdk</type>
+              <provides>
+                <vendor>openjdk</vendor>
+                <version>21</version>
+              </provides>
+              <configuration>
+                <jdkHome>${JAVA_HOME}</jdkHome>
+              </configuration>
+            </toolchain>
+          </toolchains>
+          EOF
+
+      - name: Guard — configuração presente
+        id: guard
+        run: |
+          MISSING=""
+          [ -z "${MANIFEST_PROJECT_ID}" ] && MISSING="${MISSING} vars.MANIFEST_PROJECT_ID"
+          [ -z "${{ secrets.SENTINEL_MANIFEST_API_KEY }}" ] && MISSING="${MISSING} secrets.SENTINEL_MANIFEST_API_KEY"
+          if [ -n "${MISSING}" ]; then
+            echo "::warning title=sentinel-manifest::configuração ausente —${MISSING}. Nada será enviado."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download scip-java + scip CLI (versões pinadas)
+        if: steps.guard.outputs.ok == 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/scip-tools
+          gh release download v0.13.1 -R scip-code/scip-java -p 'scip-java-v0.13.1' -O /tmp/scip-tools/scip-java
+          gh release download v0.9.0 -R sourcegraph/scip -p 'scip-linux-amd64.tar.gz' -O /tmp/scip-tools/scip.tar.gz
+          tar -C /tmp/scip-tools -xzf /tmp/scip-tools/scip.tar.gz scip
+          chmod +x /tmp/scip-tools/scip-java /tmp/scip-tools/scip
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # scip-java roda o BUILD REAL (é plugin do javac) — por isso o índice é
+      # compiler-accurate. Build quebrado = sem índice (e o passo é auxiliar).
+      - name: scip-java index (build real → index.scip)
+        id: index
+        if: steps.guard.outputs.ok == 'true'
+        continue-on-error: true
+        run: |
+          /tmp/scip-tools/scip-java index
+          ls -la index.scip
+          /tmp/scip-tools/scip stats index.scip | head -20
+
+      # ARMADILHA (custou uma investigação): o binding protobuf do
+      # scip-typescript decodifica os ranges de um índice scip-JAVA como VAZIOS
+      # (packed int32 incompatível) → 0 aresta, silenciosamente. O CLI canônico
+      # `scip print --json` decodifica certo. Para Java, `--json` é OBRIGATÓRIO.
+      - name: scip print --json (obrigatório p/ Java)
+        id: print
+        if: steps.index.outcome == 'success'
+        continue-on-error: true
+        run: |
+          /tmp/scip-tools/scip print --json index.scip > /tmp/index.json
+          ls -la /tmp/index.json
+
+      - name: Deriva arestas STATIC_PROVEN
+        id: derive_static
+        if: steps.print.outcome == 'success'
+        continue-on-error: true
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/nuptechs/nup-sentinel-manifest/${MANIFEST_TOOLS_REF}/tools/scip-typescript/derive-edges.mjs" -o /tmp/derive-edges.mjs
+          test -s /tmp/derive-edges.mjs
+          node --max-old-space-size=6000 /tmp/derive-edges.mjs /tmp/index.json --json > edges.json
+          node -e "const e=require('./edges.json'); if(!e||!Array.isArray(e.edges)){console.error('edges.json invalido');process.exit(1);} console.log('counts:', JSON.stringify(e.counts), 'edges:', e.edges.length)"
+
+      - name: POST arestas STATIC_PROVEN ao Manifest
+        id: post_static
+        if: steps.derive_static.outcome == 'success'
+        continue-on-error: true
+        env:
+          MANIFEST_API_KEY: ${{ secrets.SENTINEL_MANIFEST_API_KEY }}
+        run: |
+          HTTP=$(curl -sS -o /tmp/scip-post.out -w '%{http_code}' \
+            -X POST "${MANIFEST_URL}/api/projects/${MANIFEST_PROJECT_ID}/scip-edges" \
+            -H "x-api-key: ${MANIFEST_API_KEY}" \
+            -H 'content-type: application/json' \
+            --data-binary @edges.json)
+          echo "POST /scip-edges → HTTP ${HTTP}"
+          head -c 500 /tmp/scip-post.out || true
+          echo
+          case "$HTTP" in
+            2*) echo "OK — arestas STATIC_PROVEN ingeridas (projeto ${MANIFEST_PROJECT_ID})." ;;
+            401|403) echo "::warning title=scip-edges::HTTP ${HTTP} — SENTINEL_MANIFEST_API_KEY inválida ou sem acesso." ;;
+            404) echo "::warning title=scip-edges::HTTP 404 — projeto ${MANIFEST_PROJECT_ID} não existe no manifest." ;;
+            *)  echo "::warning title=scip-edges::HTTP ${HTTP} — não ingerido (não bloqueia o CI)." ;;
+          esac
+
+      # ── CONFIG_PROVEN — independe do build e do índice SCIP ────────────────
+      # Lê só o FONTE. Roda mesmo que o scip-java tenha falhado.
+      - name: Deriva arestas CONFIG_PROVEN (wiring do Spring, source-only)
+        id: derive_config
+        if: steps.guard.outputs.ok == 'true' && vars.CONFIG_ROOT_PACKAGE != ''
+        continue-on-error: true
+        run: |
+          node scripts/config-proven/derive-config-edges.mjs \
+            --src "${JAVA_SRC_ROOT}" --root "${CONFIG_ROOT_PACKAGE}" > config-edges.json
+          node -e "const e=require('./config-edges.json'); if(!e||!Array.isArray(e.edges)){console.error('config-edges.json invalido');process.exit(1);} console.log('config counts:', JSON.stringify(e.counts), 'edges:', e.edges.length)"
+
+      - name: POST arestas CONFIG_PROVEN ao Manifest
+        id: post_config
+        if: steps.derive_config.outcome == 'success'
+        continue-on-error: true
+        env:
+          MANIFEST_API_KEY: ${{ secrets.SENTINEL_MANIFEST_API_KEY }}
+        run: |
+          HTTP=$(curl -sS -o /tmp/config-post.out -w '%{http_code}' \
+            -X POST "${MANIFEST_URL}/api/projects/${MANIFEST_PROJECT_ID}/config-edges" \
+            -H "x-api-key: ${MANIFEST_API_KEY}" \
+            -H 'content-type: application/json' \
+            --data-binary @config-edges.json)
+          echo "POST /config-edges → HTTP ${HTTP}"
+          head -c 500 /tmp/config-post.out || true
+          echo
+          case "$HTTP" in
+            2*) echo "OK — arestas CONFIG_PROVEN ingeridas (projeto ${MANIFEST_PROJECT_ID})." ;;
+            401|403) echo "::warning title=config-edges::HTTP ${HTTP} — chave inválida ou sem acesso." ;;
+            404) echo "::warning title=config-edges::HTTP 404 — projeto inexistente OU manifest sem /config-edges." ;;
+            *)  echo "::warning title=config-edges::HTTP ${HTTP} — não ingerido (não bloqueia o CI)." ;;
+          esac
