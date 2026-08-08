@@ -353,7 +353,13 @@ export class AnalysisPipeline {
       const graphSummary = appGraph.toJSON();
       diag.cacheStatus = backendReused && frontendReused ? "fully cached" : backendReused ? "backend cached" : frontendReused ? "frontend cached" : "full analysis";
       await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData, diag);
-      await this.saveSnapshot(analysisRun.id, projectId, created, appGraph, endpointImpacts, fileData);
+      const savedGraph = await this.saveSnapshot(analysisRun.id, projectId, created, appGraph, endpointImpacts, fileData);
+      // DIMENSÃO TEMPO — grava o censo epistêmico DESTE instante no próprio run.
+      // Sem isto o histórico teria de ser recomputado do snapshot na leitura, e
+      // aí os overlays de HOJE (project.scipEdges/configEdges, mesclados em
+      // `applyPersistedOverlays`) pintariam o passado inteiro: a série sairia
+      // chapada. Ver `analyzers/evidence-history.ts` §POR QUE NÃO RECOMPUTAR.
+      await this.recordEvidenceSummary(analysisRun.id, projectId, savedGraph, diag);
 
       // ADR-070 Onda 4 — os críticos de grafo (sobreposição funcional +
       // incompletude de ciclo de vida) viram findings no Sentinel (loop +
@@ -590,6 +596,11 @@ export class AnalysisPipeline {
     return storage.createCatalogEntries(entries);
   }
 
+  /**
+   * @returns o `systemGraph` gravado no snapshot (ou `null` — projeto ausente,
+   * grafo indisponível, falha). Devolvido para o resumo epistêmico do run ser
+   * computado do MESMO grafo que o snapshot guarda, sem relê-lo do banco.
+   */
   private async saveSnapshot(
     analysisRunId: number,
     projectId: number,
@@ -597,10 +608,10 @@ export class AnalysisPipeline {
     appGraph?: any,
     endpointImpacts?: any[],
     fileData?: FileData[],
-  ) {
+  ): Promise<{ nodes: any[]; edges: any[]; truncated?: boolean; inventory?: unknown } | null> {
     try {
       const project = await storage.getProject(projectId);
-      if (!project) return;
+      if (!project) return null;
       const manifest = generateManifest(project, entries);
 
       // Capture entities directly from the application graph as a fallback
@@ -751,8 +762,69 @@ export class AnalysisPipeline {
         "Snapshot",
         `Manifest snapshot saved for run #${analysisRunId} (graphEntities=${allEntitiesFromGraph.length})`,
       );
+      return systemGraph;
     } catch (err) {
       console.error(`[pipeline] Failed to save snapshot: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Grava em `analysis_runs.diagnostics.evidence` o censo epistêmico DO INSTANTE
+   * do run (cobertura por método + BIMR + calibração), que é a matéria-prima do
+   * `GET /api/projects/:id/evidence-history`.
+   *
+   * Usa exatamente o mesmo caminho de leitura do `/graph` (overlays persistidos →
+   * `shapeSystemGraph`) para que o ponto histórico seja comparável com o que a
+   * tela mostra hoje — sem 2ª verdade.
+   *
+   * BEST-EFFORT em toda linha: isto é telemetria do produto, não a análise. Uma
+   * falha aqui NUNCA pode derrubar (nem sequer marcar) um run que já terminou.
+   */
+  private async recordEvidenceSummary(
+    analysisRunId: number,
+    projectId: number,
+    systemGraph: { nodes: any[]; edges: any[] } | null,
+    diag: Record<string, unknown>,
+  ): Promise<void> {
+    if (!systemGraph || !Array.isArray(systemGraph.nodes)) return;
+    try {
+      const project = await storage.getProject(projectId).catch(() => null);
+      const { applyPersistedOverlays } = await import("../analyzers/graph-overlays");
+      const { graph } = await applyPersistedOverlays(systemGraph as any, project as any);
+
+      const { shapeSystemGraph } = await import("../analyzers/system-graph");
+      const shaped = shapeSystemGraph(graph, "class");
+
+      let bimr: unknown;
+      try {
+        const { computeBimr } = await import("../analyzers/blind-impact");
+        bimr = computeBimr(graph as any);
+      } catch (e) {
+        console.error(`[pipeline] BIMR do resumo falhou (fail-soft): ${e}`);
+      }
+
+      let calibration: unknown;
+      try {
+        const { buildGraphCalibration } = await import("../analyzers/graph-calibration");
+        calibration = buildGraphCalibration(shaped.edges as any);
+      } catch (e) {
+        console.error(`[pipeline] calibração do resumo falhou (fail-soft): ${e}`);
+      }
+
+      const { summarizeRunEvidence } = await import("../analyzers/evidence-history");
+      const evidence = summarizeRunEvidence({ coverage: shaped.coverage, bimr, calibration });
+      if (!evidence) return; // sem censo não há ponto — nunca grava zero fabricado
+
+      diag.evidence = evidence;
+      await storage.updateAnalysisRun(analysisRunId, { diagnostics: diag });
+      this.progress(
+        "Evidence",
+        `Censo do run gravado: ${evidence.coverage.edges.total} arestas, ` +
+          `${Object.entries(evidence.coverage.edges.byMethod).map(([m, n]) => `${m}=${n}`).join(" · ")}`,
+      );
+    } catch (err) {
+      console.error(`[pipeline] resumo de evidência falhou (fail-soft): ${err}`);
     }
   }
 
