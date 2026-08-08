@@ -1833,50 +1833,89 @@ export async function registerRoutes(
           code: "GRAPH_NOT_IN_SNAPSHOT",
         });
       }
-      // ADR-0031 / ADR-0035 — mescla (na leitura) as evidências EXTERNAS provadas.
-      // GATED + fail-soft: sem `scipEdges`/`configEdges`, byte-a-byte; erro de merge
-      // não derruba o `/graph` (mantém o grafo cru). Ordem: scip PRIMEIRO (STATIC_
-      // PROVEN, compiler-accurate) e config DEPOIS (CONFIG_PROVEN) — assim a config
-      // enxerga os pares já provados pelo scip e cede a eles (precedência scip > config).
-      let scipStats: unknown = undefined;
-      let configStats: unknown = undefined;
+      // ADR-0031 / ADR-0035 — mescla (na leitura) as evidências EXTERNAS provadas
+      // (scip → STATIC_PROVEN; config → CONFIG_PROVEN). Gated + fail-soft; ver
+      // `analyzers/graph-overlays.ts`. O `/bimr` chama o MESMO helper — os dois
+      // endpoints leem o mesmo mapa, sem 2ª verdade.
       let project: unknown;
       try {
         project = await storage.getProject(projectId);
-        const scip = (project as any)?.scipEdges;
-        if (scip && Array.isArray(scip.edges) && scip.edges.length) {
-          const { mergeScipEdges } = await import("./analyzers/scip-aggregate");
-          const merged = mergeScipEdges(systemGraph, scip);
-          systemGraph = merged.graph;
-          scipStats = merged.stats;
-        }
       } catch (e) {
-        console.error("scip-edges merge failed (fail-soft, serving raw graph):", e);
+        console.error("project load failed (fail-soft, serving raw graph):", e);
       }
-      try {
-        const config = (project as any)?.configEdges;
-        if (config && Array.isArray(config.edges) && config.edges.length) {
-          const { mergeConfigEdges } = await import("./analyzers/config-aggregate");
-          const merged = mergeConfigEdges(systemGraph, config);
-          systemGraph = merged.graph;
-          configStats = merged.stats;
-        }
-      } catch (e) {
-        console.error("config-edges merge failed (fail-soft, serving raw graph):", e);
-      }
+      const { applyPersistedOverlays } = await import("./analyzers/graph-overlays");
+      const overlays = await applyPersistedOverlays(systemGraph, project as any);
+      systemGraph = overlays.graph;
+      const { scipStats, configStats } = overlays;
       const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const level = req.query.level === "method" ? "method" : "class";
       const shaped = shapeSystemGraph(systemGraph, level);
+      // ADR-0035 — confiança CALIBRADA + completude Chao. ADITIVO: entra dentro do
+      // censo já existente (`coverage.calibration`), nenhum campo atual muda. Sem
+      // oráculo utilizável a seção ABSTÉM (`calibrated:false` + motivo) — nunca
+      // publica número fabricado. Fail-soft: falhar a calibração não derruba o mapa.
+      let calibration: unknown;
+      try {
+        const { buildGraphCalibration } = await import("./analyzers/graph-calibration");
+        calibration = buildGraphCalibration(shaped.edges);
+      } catch (e) {
+        console.error("calibration failed (fail-soft, serving graph without it):", e);
+      }
       res.json({
         projectId,
         analysisRunId: snapshots[0].analysisRunId,
         ...(scipStats ? { scipOverlay: scipStats } : {}),
         ...(configStats ? { configOverlay: configStats } : {}),
         ...shaped,
+        ...(calibration ? { coverage: { ...shaped.coverage, calibration } } : {}),
       });
     } catch (error) {
       console.error("Error serving system graph:", error);
       res.status(500).json({ message: "Failed to load system graph" });
+    }
+  });
+
+  // BIMR — Blind-Impact-Miss-Rate: o número que prova o que um leitor SÓ-estático
+  // (agente de IA lendo código, dev novo, qualquer análise estática) NÃO vê. Usa o
+  // eixo RUNTIME como oráculo: das tabelas tocadas em produção na janela, quantas
+  // o modelo estático não representa (nós mintados `table:*`). Ver
+  // `analyzers/blind-impact.ts` para a definição e os caveats.
+  // Projeto inexistente → 404. Sem análise/sem grafo → 200 `available:false`
+  // (vazio ≠ falhou — a tela distingue "ainda não rodou" de "quebrou").
+  app.get("/api/projects/:projectId/bimr", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found" });
+
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.json({ projectId, available: false, reason: "Nenhuma análise executada ainda para este projeto." });
+      }
+      const systemGraph = ((snapshots[0].manifestJson as any) || {}).systemGraph;
+      if (!systemGraph || !Array.isArray(systemGraph.nodes)) {
+        return res.json({
+          projectId,
+          analysisRunId: snapshots[0].analysisRunId,
+          available: false,
+          code: "GRAPH_NOT_IN_SNAPSHOT",
+          reason: "Este snapshot precede o system graph — re-rode a análise.",
+        });
+      }
+      // mesmo mapa que o `/graph` serve (overlays scip/config aplicados na leitura)
+      const { applyPersistedOverlays } = await import("./analyzers/graph-overlays");
+      const { graph } = await applyPersistedOverlays(systemGraph, project as any);
+      const { computeBimr } = await import("./analyzers/blind-impact");
+      res.json({
+        projectId,
+        analysisRunId: snapshots[0].analysisRunId,
+        available: true,
+        ...computeBimr(graph),
+      });
+    } catch (error) {
+      console.error("Error computing BIMR:", error);
+      res.status(500).json({ message: "Failed to compute BIMR" });
     }
   });
 
