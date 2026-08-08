@@ -4,6 +4,7 @@ import {
   extractRuntimePairs,
   applyRuntimeOverlay,
   fetchRecentTraces,
+  fetchRecentTracesWithReport,
   type JaegerTrace,
 } from "../../server/analyzers/runtime-overlay";
 import { ApplicationGraph, GraphNode } from "../../server/analyzers/application-graph";
@@ -170,5 +171,71 @@ describe("ADR-0026 costura — fetchRecentTraces (gated + fail-soft)", () => {
     const fake = (async () => ({ ok: false, status: 503, json: async () => ({}) }) as unknown as Response) as typeof fetch;
     const res = await fetchRecentTraces({ baseUrl: "http://jaeger", services: ["easynup-gateway"], fetchFn: fake, logger: { warn: () => {} } });
     assert.deepEqual(res, []);
+  });
+});
+
+describe("diagnóstico durável — fetchRecentTracesWithReport (retry janela-reduzida + report por serviço)", () => {
+  it("502 na 1ª tentativa → retry com lookback pela METADE e report {retried:true, httpStatus:200}", async () => {
+    // o modo de falha REAL do hub (Badger 502 sob janela de 24h; janela menor responde)
+    const t = trace("ok1", [{ svc: "easynup-backend", id: "bk", tags: { "db.sql.table": "audit_log" } }]);
+    const urls: string[] = [];
+    let calls = 0;
+    const fake = (async (url: string) => {
+      urls.push(String(url));
+      calls++;
+      if (calls === 1) return { ok: false, status: 502, json: async () => ({}) } as unknown as Response;
+      return { ok: true, status: 200, json: async () => ({ data: [t] }) } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const nowMs = 1_754_600_000_000;
+    const { traces, report } = await fetchRecentTracesWithReport({
+      baseUrl: "http://jaeger", services: ["easynup-backend"], lookbackMs: 86400000, nowMs,
+      fetchFn: fake, logger: { warn: () => {} },
+    });
+    assert.equal(traces.length, 1);
+    assert.equal(report.length, 1);
+    assert.equal(report[0].service, "easynup-backend");
+    assert.equal(report[0].retried, true);
+    assert.equal(report[0].httpStatus, 200);
+    assert.equal(report[0].traces, 1);
+    assert.equal(report[0].lookbackMsUsed, 43200000); // metade de 24h
+    // a URL do retry cobre EXATAMENTE a janela reduzida (endMicros - 12h em micros)
+    const endMicros = nowMs * 1000;
+    assert.ok(urls[1].includes(`start=${endMicros - 43200000 * 1000}`));
+  });
+
+  it("falha nas 2 tentativas → traces=[] e report com o status final (fail-soft, sem lançar)", async () => {
+    const fake = (async () => { throw new Error("fetch failed"); }) as unknown as typeof fetch;
+    const { traces, report } = await fetchRecentTracesWithReport({
+      baseUrl: "http://jaeger", services: ["easynup-backend"], fetchFn: fake, logger: { warn: () => {} },
+    });
+    assert.deepEqual(traces, []);
+    assert.equal(report[0].httpStatus, 0);
+    assert.equal(report[0].retried, true);
+    assert.equal(report[0].error, "fetch failed");
+  });
+
+  it("sucesso direto → retried:false e janela cheia", async () => {
+    const fake = (async () => ({ ok: true, status: 200, json: async () => ({ data: [] }) }) as unknown as Response) as typeof fetch;
+    const { report } = await fetchRecentTracesWithReport({
+      baseUrl: "http://jaeger", services: ["easynup-gateway"], lookbackMs: 86400000, fetchFn: fake, logger: { warn: () => {} },
+    });
+    assert.equal(report[0].retried, false);
+    assert.equal(report[0].lookbackMsUsed, 86400000);
+  });
+
+  it("runRuntimeOverlay: summary carrega o fetchReport (vai pro analysis_runs.diagnostics)", async () => {
+    const { runRuntimeOverlay } = await import("../../server/analyzers/runtime-overlay");
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("ENTITY:easynup.persistence.entities.AuditLog", "ENTITY", "AuditLog", null, null, {}));
+    const t = trace("frag", [{ svc: "easynup-backend", id: "bk", tags: { "db.sql.table": "audit_log", "db.operation": "SELECT" } }]);
+    const fake = (async () => ({ ok: true, status: 200, json: async () => ({ data: [t] }) }) as unknown as Response) as typeof fetch;
+    const summary = await runRuntimeOverlay(g, {
+      jaegerUrl: "http://jaeger", apiKey: null,
+      services: ["easynup-backend"], gatewayService: "easynup-backend", gatewayServices: ["easynup-backend"],
+      lookbackMs: 3600000, limit: 100,
+    }, { fetchFn: fake });
+    assert.equal(summary.fetchReport.length, 1);
+    assert.equal(summary.fetchReport[0].httpStatus, 200);
+    assert.equal(summary.tableEntityEdges, 1); // fragmento ancorou audit_log→AuditLog
   });
 });

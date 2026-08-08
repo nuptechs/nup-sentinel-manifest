@@ -478,43 +478,110 @@ export interface FetchTracesOpts {
 }
 
 /**
- * Busca traços recentes da Jaeger native query API por serviço, dedupa por
- * traceID. NUNCA lança (fail-soft: erro/rede → []). Time-boxed por serviço.
+ * Relatório POR SERVIÇO do fetch de traços — a matéria-prima do diagnóstico
+ * durável (`analysis_runs.diagnostics`). Sem isto, "0 traço" era indistinguível
+ * de "Jaeger 502/fora do ar" (incidente 2026-08-08: o hub Badger devolve 502
+ * transiente em janela grande e o overlay virava 0 aresta EM SILÊNCIO).
  */
-export async function fetchRecentTraces(opts: FetchTracesOpts): Promise<JaegerTrace[]> {
+export interface TraceFetchServiceReport {
+  service: string;
+  /** HTTP status da última tentativa (0 = erro de rede/abort). */
+  httpStatus: number;
+  /** mensagem de erro de rede, quando houve. */
+  error?: string;
+  /** nº de traços retornados pela tentativa que valeu. */
+  traces: number;
+  /** true quando a 1ª tentativa falhou e o retry (janela reduzida) foi usado. */
+  retried: boolean;
+  /** lookback efetivamente usado na tentativa que valeu (ms). */
+  lookbackMsUsed: number;
+}
+
+async function fetchServiceOnce(
+  fetchFn: typeof fetch,
+  url: string,
+  apiKey: string | null | undefined,
+  timeoutMs: number,
+): Promise<{ ok: boolean; status: number; error?: string; data: JaegerTrace[] }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetchFn(url, {
+      headers: apiKey ? { "x-api-key": apiKey } : {},
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return { ok: false, status: res.status, data: [] };
+    const json = (await res.json()) as { data?: JaegerTrace[] };
+    return { ok: true, status: res.status, data: Array.isArray(json?.data) ? json.data : [] };
+  } catch (err) {
+    return { ok: false, status: 0, error: (err as Error)?.message || String(err), data: [] };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Busca traços recentes da Jaeger native query API por serviço, dedupa por
+ * traceID, e devolve TAMBÉM o relatório por serviço. NUNCA lança (fail-soft).
+ * Resiliência: se a 1ª tentativa de um serviço falha (HTTP ≠2xx ou rede), faz
+ * UM retry com a janela reduzida à metade — o modo de falha real do hub
+ * (Badger 502 sob janela grande) responde bem a janela menor; mais que 1 retry
+ * viraria martelo em backend doente.
+ */
+export async function fetchRecentTracesWithReport(
+  opts: FetchTracesOpts,
+): Promise<{ traces: JaegerTrace[]; report: TraceFetchServiceReport[] }> {
   const base = opts.baseUrl ? String(opts.baseUrl).replace(/\/+$/, "") : "";
-  if (!base) return [];
+  if (!base) return { traces: [], report: [] };
   const services = opts.services && opts.services.length ? opts.services : ["easynup-gateway", "easynup-backend"];
   const now = opts.nowMs ?? Date.now();
   const lookbackMs = opts.lookbackMs ?? 86400000;
   const limit = opts.limit ?? 400;
-  const endMicros = now * 1000;
-  const startMicros = endMicros - lookbackMs * 1000;
   const fetchFn = opts.fetchFn || fetch;
   const log = opts.logger || console;
+  const timeoutMs = opts.timeoutMs ?? 20000;
+
+  const urlFor = (service: string, lb: number) => {
+    const endMicros = now * 1000;
+    const startMicros = endMicros - lb * 1000;
+    return `${base}/api/traces?service=${encodeURIComponent(service)}&start=${startMicros}&end=${endMicros}&limit=${limit}`;
+  };
 
   const byTrace = new Map<string, JaegerTrace>();
+  const report: TraceFetchServiceReport[] = [];
   for (const service of services) {
-    const url = `${base}/api/traces?service=${encodeURIComponent(service)}&start=${startMicros}&end=${endMicros}&limit=${limit}`;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 20000);
-    try {
-      const res = await fetchFn(url, {
-        headers: opts.apiKey ? { "x-api-key": opts.apiKey } : {},
-        signal: ctrl.signal,
-      });
-      if (!res.ok) { log.warn?.(`[runtime-overlay] jaeger ${service} HTTP ${res.status}`); continue; }
-      const json = (await res.json()) as { data?: JaegerTrace[] };
-      for (const t of Array.isArray(json?.data) ? json.data : []) {
-        if (t?.traceID && !byTrace.has(t.traceID)) byTrace.set(t.traceID, t);
-      }
-    } catch (err) {
-      log.warn?.(`[runtime-overlay] jaeger ${service} erro:`, (err as Error)?.message || err);
-    } finally {
-      clearTimeout(timer);
+    let attempt = await fetchServiceOnce(fetchFn, urlFor(service, lookbackMs), opts.apiKey, timeoutMs);
+    let retried = false;
+    let lookbackUsed = lookbackMs;
+    if (!attempt.ok) {
+      log.warn?.(
+        `[runtime-overlay] jaeger ${service} falhou (HTTP ${attempt.status}${attempt.error ? ` ${attempt.error}` : ""}) — retry com janela ${Math.round(lookbackMs / 2 / 60000)}min`,
+      );
+      retried = true;
+      lookbackUsed = Math.max(60000, Math.floor(lookbackMs / 2));
+      attempt = await fetchServiceOnce(fetchFn, urlFor(service, lookbackUsed), opts.apiKey, timeoutMs);
     }
+    if (!attempt.ok) {
+      log.warn?.(`[runtime-overlay] jaeger ${service} HTTP ${attempt.status}${attempt.error ? ` ${attempt.error}` : ""}`);
+    }
+    for (const t of attempt.data) {
+      if (t?.traceID && !byTrace.has(t.traceID)) byTrace.set(t.traceID, t);
+    }
+    report.push({
+      service,
+      httpStatus: attempt.status,
+      ...(attempt.error ? { error: attempt.error } : {}),
+      traces: attempt.data.length,
+      retried,
+      lookbackMsUsed: lookbackUsed,
+    });
   }
-  return Array.from(byTrace.values());
+  return { traces: Array.from(byTrace.values()), report };
+}
+
+/** Retrocompat: mesma busca, só os traços (consumidores antigos + testes). */
+export async function fetchRecentTraces(opts: FetchTracesOpts): Promise<JaegerTrace[]> {
+  return (await fetchRecentTracesWithReport(opts)).traces;
 }
 
 // ─── Orquestrador da costura (o que o pipeline invoca) ───
@@ -529,6 +596,8 @@ export interface RuntimeOverlaySummary {
   tablesMinted: number;
   entityNodesMarked: number;
   tableEntityEdges: number;
+  /** fetch por serviço (HTTP status/retry/traços) — vai pro diagnóstico durável. */
+  fetchReport: TraceFetchServiceReport[];
 }
 
 export interface RunRuntimeOverlayDeps {
@@ -554,7 +623,7 @@ export async function runRuntimeOverlay(
   const log = (m: string) => deps.onLog?.(m);
   log(`Runtime overlay ON — jaeger=${cfg.jaegerUrl} serviços=[${cfg.services.join(",")}] raízes=[${cfg.gatewayServices.join(",")}]`);
 
-  const traces = await fetchRecentTraces({
+  const { traces, report: fetchReport } = await fetchRecentTracesWithReport({
     baseUrl: cfg.jaegerUrl,
     apiKey: cfg.apiKey,
     services: cfg.services,
@@ -563,6 +632,11 @@ export async function runRuntimeOverlay(
     nowMs: deps.nowMs,
     fetchFn: deps.fetchFn,
   });
+  for (const r of fetchReport) {
+    log(
+      `Runtime overlay fetch: ${r.service} HTTP ${r.httpStatus} traços=${r.traces}${r.retried ? ` (retry, janela ${Math.round(r.lookbackMsUsed / 60000)}min)` : ""}${r.error ? ` erro=${r.error}` : ""}`,
+    );
+  }
 
   // (1) par rota→tabela — traço COMPLETO (root HTTP + spans de DB).
   const pairs = extractRuntimePairs(traces, { gatewayServices: cfg.gatewayServices, opPathPattern: cfg.opPathPattern });
@@ -593,6 +667,7 @@ export async function runRuntimeOverlay(
     tablesMinted: tobs.tablesMinted,
     entityNodesMarked: tobs.nodesMarked,
     tableEntityEdges: tobs.edges,
+    fetchReport,
   };
 }
 
