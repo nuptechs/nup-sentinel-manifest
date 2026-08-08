@@ -36,6 +36,7 @@ import {
   type RankedNode,
 } from "./system-map-insights";
 import { BlindSpotPanel, CalibrationBands, type BimrPayload } from "./system-map-blind";
+import { EvidenceTrendPanel, type EvidenceHistoryPayload } from "./system-map-trend";
 
 // ── peça 3: repartição epistêmica (pura → testável sem recharts) ──────
 export interface BreakdownDatum {
@@ -152,6 +153,23 @@ function BlindSpotSection({ projectId }: { projectId: number }) {
   });
   return (
     <BlindSpotPanel
+      data={q.data}
+      isLoading={q.isLoading}
+      isError={q.isError}
+      error={q.error as Error | null}
+      onRetry={() => void q.refetch()}
+    />
+  );
+}
+
+// ── vitrine da EVOLUÇÃO: busca a própria fonte (/evidence-history) ────
+function EvidenceTrendSection({ projectId }: { projectId: number }) {
+  const q = useQuery<EvidenceHistoryPayload>({
+    queryKey: [`/api/projects/${projectId}/evidence-history`],
+    retry: false,
+  });
+  return (
+    <EvidenceTrendPanel
       data={q.data}
       isLoading={q.isLoading}
       isError={q.isError}
@@ -319,6 +337,13 @@ export function ProofsView({
           </CardContent>
         </Card>
       </div>
+
+      {/* a dimensão TEMPO — de fotografia para filme */}
+      {projectId != null && (
+        <div className="mt-4">
+          <EvidenceTrendSection projectId={projectId} />
+        </div>
+      )}
 
       {/* o que a leitura estática não vê (BIMR) */}
       {projectId != null && (
