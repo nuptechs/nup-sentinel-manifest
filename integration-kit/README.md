@@ -250,6 +250,23 @@ robô sintético (tail-sampling por atributo) se a cobertura importa.
 
 ---
 
+**6. BIMR "100% cego" num sistema que TEM as entidades modeladas (dogfood NuPIdentify, 2026-08-08).**
+Se o analyzer da stack modela entidades com id `table:<nome>` (o caso Drizzle/TS),
+qualquer classificação por PREFIXO de id colide com o namespace dos nós mintados
+pelo overlay e declara o modelo inteiro como ponto cego — falso. Corrigido no
+servidor (classificação SÓ por `metadata.synthetic && runtimeOnly`); se você vir
+um `mintedRatio` de 100% num sistema com entidades no grafo, atualize o Manifest.
+
+**7. `oracleComparablePairs = 0` num sistema Node/Express com rotas casando.**
+Duas causas conhecidas no 2º sistema: (a) as rotas ESTÁTICAS extraídas do Express
+guardam o subpath do router (`/branding`) e não o caminho completo montado
+(`/api/tenant/branding`) → o observado não casa e a rota é mintada (origem não
+compartilhada com o estático ⇒ calibração abstém — honesto, mas subaproveitado);
+(b) a convenção `<op>.v<N>` do matching serviço-profundo é do easynup — um alvo
+com outra convenção de endpoint interno precisa do `opPathPattern` próprio em
+`conventionProfile.runtimeOverlay`. Limitação declarada; o mapa e o BIMR
+funcionam mesmo assim (a calibração é quem espera).
+
 ## Checklist final
 
 - [ ] Projeto criado, `id` anotado, **uma análise concluída**

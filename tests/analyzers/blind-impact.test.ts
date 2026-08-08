@@ -70,9 +70,21 @@ describe("computeBimr — a taxa do que a leitura estática não vê", () => {
     assert.equal(r.minted[0].likelyInfrastructure, false);
   });
 
-  it("nó mintado é reconhecido pelo metadata E pela convenção de id (2 provas)", () => {
-    const semMetadata = { id: "table:orfa", type: "ENTITY", className: "orfa", metadata: { runtimeHot: true } };
-    const r = computeBimr({ nodes: [semMetadata], edges: [] });
+  it("mintado é SÓ pelo metadata — id `table:` sem flags é entidade REAL do modelo (caso NuPIdentify)", () => {
+    // Dogfood 2º sistema (2026-08-08): o analyzer TS modela entidades Drizzle
+    // com id `table:<nome>` — MESMO namespace do mint do overlay. O antigo
+    // fallback por prefixo classificava as 53 entidades REAIS do identify como
+    // "invisíveis ao estático" → BIMR 100% FALSO. Prefixo NUNCA decide.
+    const entidadeRealDrizzle = { id: "table:identity_users", type: "ENTITY", className: "identity_users", metadata: { runtimeHot: true } };
+    const r = computeBimr({ nodes: [entidadeRealDrizzle], edges: [] });
+    assert.equal(r.tablesMintedRuntimeOnly, 0);
+    assert.equal(r.tablesResolvedStatic, 1); // observada em runtime E existe no modelo
+    assert.equal(r.mintedRatio, 0);
+  });
+
+  it("mintado de verdade (synthetic+runtimeOnly) segue mintado, mesmo shape de id", () => {
+    const mintadoReal = { id: "table:orfa", type: "ENTITY", className: "orfa", metadata: { runtimeHot: true, synthetic: true, runtimeOnly: true } };
+    const r = computeBimr({ nodes: [mintadoReal], edges: [] });
     assert.equal(r.tablesMintedRuntimeOnly, 1);
     assert.equal(r.tablesResolvedStatic, 0);
   });

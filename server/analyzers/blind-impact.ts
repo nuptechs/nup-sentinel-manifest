@@ -143,13 +143,21 @@ function meta(n: { metadata?: Record<string, unknown> | null }): Record<string, 
   return (n.metadata || {}) as Record<string, unknown>;
 }
 
-/** Nó mintado pelo overlay: entidade que só existe porque o runtime a viu. */
+/**
+ * Nó mintado pelo overlay: entidade que só existe porque o runtime a viu.
+ *
+ * SÓ metadata (`synthetic && runtimeOnly` — o overlay SEMPRE seta os dois no
+ * mint). O antigo fallback por prefixo de id (`table:`) foi REMOVIDO após o
+ * dogfood do 2º sistema (NuPIdentify, 2026-08-08): o analyzer TS modela as
+ * entidades Drizzle com id `table:<nome>` — MESMO namespace do mint — e o
+ * fallback classificava as 53 entidades REAIS do modelo como "invisíveis ao
+ * estático", cravando um BIMR de 100% FALSO. Colisão de namespace ≠ ponto
+ * cego; a verdade está nos flags, nunca no prefixo.
+ */
 function isMintedEntity(n: BimrNode): boolean {
   if (n.type !== "ENTITY") return false;
   const m = meta(n);
-  if (m.synthetic === true && m.runtimeOnly === true) return true;
-  // fallback estrutural: a convenção de id do overlay (`table:<nome>`).
-  return n.id.startsWith("table:");
+  return m.synthetic === true && m.runtimeOnly === true;
 }
 
 /** Aresta de runtime (o overlay marca as duas formas). */
