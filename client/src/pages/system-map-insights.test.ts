@@ -4,6 +4,7 @@ import {
   topBlastRadius,
   blindSpots,
   runtimeHotpaths,
+  topRuntimeEdges,
   insightsSummary,
   nodeLabel,
   type InsightGraph,
@@ -132,5 +133,71 @@ describe("nodeLabel — nome curto legível", () => {
     expect(nodeLabel({ id: "TYPE:pkg.Foo", type: "SERVICE", inDegree: 0, outDegree: 0 })).toBe("Foo");
     expect(nodeLabel({ id: "TYPE:pkg.Foo", type: "SERVICE", className: "Foo", inDegree: 0, outDegree: 0 })).toBe("Foo");
     expect(nodeLabel({ id: "just-an-id", type: "X", inDegree: 0, outDegree: 0 })).toBe("just-an-id");
+  });
+});
+
+// ── topRuntimeEdges — a LIGAÇÃO que carrega o tráfego ─────────────────
+//
+// O que estes testes protegem: listar aresta estática como se fosse tráfego
+// real seria inventar execução — a mentira mais cara que esta leitura poderia
+// contar, porque "visto rodar" é o argumento de autoridade do produto.
+describe("topRuntimeEdges", () => {
+  function runtimeGraph(): InsightGraph {
+    const g = graph();
+    g.edges = [
+      { fromNode: "TYPE:app.OrderService", toNode: "TYPE:app.OrderRepo", relationType: "READS_ENTITY", count: 42, evidence: { method: "RUNTIME_OBSERVED", confidence: 0.95 } },
+      { fromNode: "TYPE:app.OrderService", toNode: "TYPE:app.Mailer", relationType: "CALLS", count: 118, evidence: { method: "RUNTIME_OBSERVED", confidence: 0.95 } },
+      { fromNode: "TYPE:app.OrderService", toNode: "TYPE:app.Wiring", relationType: "CALLS", evidence: { method: "CONFIG_PROVEN", confidence: 0.78 } },
+      { fromNode: "TYPE:app.GhostA", toNode: "TYPE:app.GhostB", relationType: "CALLS", count: 999, evidence: { method: "STATIC_UNRESOLVED", confidence: 0.4 } },
+    ];
+    return g;
+  }
+
+  it("só arestas observadas, ordenadas por nº de traços (desc)", () => {
+    const top = topRuntimeEdges(runtimeGraph());
+    expect(top).toHaveLength(2);
+    expect(top[0].count).toBe(118);
+    expect(top[0].toLabel).toBe("Mailer");
+    expect(top[1].count).toBe(42);
+    // a STATIC_UNRESOLVED com count 999 NÃO entra — não foi vista rodar
+    expect(top.some((e) => e.toLabel === "GhostB")).toBe(false);
+  });
+
+  it("respeita o limite e resolve rótulo/tipo pelos nós", () => {
+    const top = topRuntimeEdges(runtimeGraph(), 1);
+    expect(top).toHaveLength(1);
+    expect(top[0].fromLabel).toBe("OrderService");
+    expect(top[0].fromType).toBe("SERVICE");
+    expect(top[0].id).toBe("TYPE:app.OrderService→TYPE:app.Mailer");
+  });
+
+  it("aresta observada sem contagem vira count null — nunca 0 fabricado", () => {
+    const g = graph();
+    g.edges = [{ fromNode: "TYPE:app.OrderService", toNode: "TYPE:app.Mailer", relationType: "CALLS", evidence: { method: "RUNTIME_OBSERVED", confidence: 0.95 } }];
+    expect(topRuntimeEdges(g)[0].count).toBeNull();
+  });
+
+  it("nó ausente do payload cai no id encurtado, sem crashar", () => {
+    const g = graph();
+    g.edges = [{ fromNode: "TYPE:outro.Fantasma", toNode: "TYPE:app.Mailer", relationType: "CALLS", count: 3, evidence: { method: "RUNTIME_OBSERVED", confidence: 0.95 } }];
+    const top = topRuntimeEdges(g);
+    expect(top[0].fromLabel).toBe("Fantasma");
+    expect(top[0].fromType).toBe("");
+  });
+
+  it("sem eixo de proveniência → lista vazia (não chuta aresta estática como tráfego)", () => {
+    const g = graph();
+    g.edges = [{ fromNode: "TYPE:app.OrderService", toNode: "TYPE:app.Mailer", relationType: "CALLS", count: 500 }];
+    expect(topRuntimeEdges(g)).toEqual([]);
+  });
+
+  it("é determinístico: empate de contagem desempata por id", () => {
+    const g = graph();
+    const ev = { method: "RUNTIME_OBSERVED", confidence: 0.95 };
+    g.edges = [
+      { fromNode: "TYPE:app.GhostA", toNode: "TYPE:app.GhostB", relationType: "CALLS", count: 7, evidence: ev },
+      { fromNode: "TYPE:app.OrderService", toNode: "TYPE:app.Mailer", relationType: "CALLS", count: 7, evidence: ev },
+    ];
+    expect(topRuntimeEdges(g).map((e) => e.fromId)).toEqual(["TYPE:app.GhostA", "TYPE:app.OrderService"]);
   });
 });

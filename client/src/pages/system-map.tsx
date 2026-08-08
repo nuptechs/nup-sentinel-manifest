@@ -166,11 +166,35 @@ function labelOf(n: GraphNode): string {
 
 type ViewMode = "graph" | "matrix" | "layers" | "treemap" | "chord" | "er" | "narrative" | "proofs";
 
+const VIEW_MODES: readonly ViewMode[] = ["graph", "matrix", "layers", "treemap", "chord", "er", "narrative", "proofs"];
+
+/**
+ * Deep-link (`?view=proofs&project=27`) — a Visão de Decisão aponta para cá
+ * quando manda "ver a lista completa". Lido UMA vez, no estado inicial: valor
+ * fora do union ou id não-numérico é ignorado (cai no default de sempre), então
+ * um link torto nunca quebra a página.
+ */
+function initialFromUrl(): { view: ViewMode | null; project: number | null } {
+  if (typeof window === "undefined") return { view: null, project: null };
+  try {
+    const q = new URLSearchParams(window.location.search);
+    const v = q.get("view");
+    const p = Number(q.get("project"));
+    return {
+      view: v && (VIEW_MODES as readonly string[]).includes(v) ? (v as ViewMode) : null,
+      project: Number.isFinite(p) && p > 0 ? p : null,
+    };
+  } catch {
+    return { view: null, project: null };
+  }
+}
+
 export default function SystemMapPage() {
   const projectsQuery = useQuery<Project[]>({ queryKey: ["/api/projects"] });
   const projects = projectsQuery.data;
-  const [projectId, setProjectId] = useState<number | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("graph");
+  const [initial] = useState(initialFromUrl);
+  const [projectId, setProjectId] = useState<number | null>(initial.project);
+  const [viewMode, setViewMode] = useState<ViewMode>(initial.view ?? "graph");
 
   useEffect(() => {
     if (projectId == null && projects && projects.length > 0) {
