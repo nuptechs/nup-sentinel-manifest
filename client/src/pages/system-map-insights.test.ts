@@ -163,6 +163,21 @@ describe("topRuntimeEdges", () => {
     expect(top.some((e) => e.toLabel === "GhostB")).toBe(false);
   });
 
+  it("R1 (confronto agente×máquina): rota vem ANTES de background, mesmo com contagem menor — e background NUNCA é omitido", () => {
+    // O caso real do run 104: audit-outbox de job com ×1.390 afogava as rotas.
+    const g = graph();
+    g.edges = [
+      { fromNode: "runtime:db:easynup-backend", toNode: "TYPE:app.AuditLog", relationType: "RUNTIME_OBSERVED", count: 1390, evidence: { method: "RUNTIME_OBSERVED", confidence: 0.95 } },
+      { fromNode: "TYPE:app.OrderService", toNode: "TYPE:app.OrderRepo", relationType: "READS_ENTITY", count: 42, evidence: { method: "RUNTIME_OBSERVED", confidence: 0.95 } },
+    ];
+    const top = topRuntimeEdges(g);
+    expect(top).toHaveLength(2);
+    expect(top[0].origin).toBe("route");
+    expect(top[0].count).toBe(42); // a rota lidera apesar do volume menor
+    expect(top[1].origin).toBe("background");
+    expect(top[1].count).toBe(1390); // o job segue visível — omitir seria fabricar silêncio
+  });
+
   it("respeita o limite e resolve rótulo/tipo pelos nós", () => {
     const top = topRuntimeEdges(runtimeGraph(), 1);
     expect(top).toHaveLength(1);
