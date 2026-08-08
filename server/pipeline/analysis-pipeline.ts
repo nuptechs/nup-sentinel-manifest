@@ -225,6 +225,14 @@ export class AnalysisPipeline {
       // instância multi-projeto não consegue mirar o serviço OTel de um 2º
       // projeto (ex. NuPIdentify) e o observedRatio fica 0. GATED/fail-soft/
       // time-boxed — sem config em nenhuma camada = byte-a-byte ao de hoje.
+      //
+      // BREADCRUMB de ALCANCE (log SEMPRE, ANTES de qualquer import/resolução): o
+      // sintoma ao vivo foi "o overlay não loga" → não sabíamos se o bloco era
+      // sequer alcançado. Esta linha prova o alcance; se ela aparece mas a linha
+      // ON/OFF não, o culpado é o import/getProject/resolve; se nem ela aparece, a
+      // falha é ANTES daqui (agora visível pelo catch externo, que deixou de ser
+      // silencioso).
+      this.progress("Step 3/4", `Runtime overlay: alcançado o bloco de costura (projeto ${projectId})`);
       try {
         const { runRuntimeOverlay, resolveRuntimeOverlayConfig, projectOverlayConfig } =
           await import("../analyzers/runtime-overlay");

@@ -110,10 +110,28 @@ export interface ConfigMergeStats {
   upgraded: number;
   /** pares já provados por scip (STATIC_PROVEN) → aresta config NÃO emitida. */
   supersededByScip: number;
-  /** FQN cujo tipo não casou nenhum nó → aresta descartada (§5). */
+  /** FQN cujo tipo não casou nenhum nó E está FORA do escopo do projeto → aresta descartada (§5). */
   orphanDropped: number;
   /** auto-referência (mesmo nó nas duas pontas) → descartada. */
   intraDropped: number;
+  /** nós de PORT (interface) sintéticos materializados p/ ancorar a aresta DI. */
+  interfacesMinted: number;
+}
+
+/**
+ * Nó de PORT (interface) sintético a materializar. O analisador estático NÃO emite
+ * nó para a interface referenciada só via DI (o PORT do hexagonal) — ela existe no
+ * código mas não vira nó (verificado ao vivo: `AuthorizationDecisionPort`/
+ * `PermissionPort`/`TenantScopePort` = 0 nós, os ADAPTERS = 1 nó cada). Sem o nó do
+ * port, a aresta port→adapter orfaniza e o CONFIG_PROVEN fica 0. Materializamos um
+ * `INTERFACE:<fqn>` — análogo ao scip que materializa sub-nós de função — SÓ quando o
+ * FQN é IN-SCOPE (sob um pacote-raiz do projeto), nunca para interface de lib externa
+ * (`org.springframework.*` segue órfão, §5 "nunca inventa nó de fora").
+ */
+export interface InterfaceNodeSpec {
+  id: string;
+  fqn: string;
+  className: string;
 }
 
 const RELATION = "DI_RESOLVES" as const;
@@ -273,26 +291,73 @@ function dirKey(from: string, to: string): string {
   return `${from}${EDGE_SEP}${to}`;
 }
 
+/** É um FQN Java pontuado (pacote.Classe), não um id de nó/rota/tabela. */
+const JAVA_FQN_RE = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/;
+/** Nome simples de um FQN (`a.b.Foo` → `Foo`). */
+function simpleNameOf(fqn: string): string {
+  return fqn.split(".").pop() || fqn;
+}
+/**
+ * Infere os segmentos-raiz de pacote do PROJETO a partir dos FQN dos nós existentes
+ * (ex. `{easynup}`). Um FQN de port sem nó só é materializado se seu 1º segmento ∈
+ * raízes — assim `easynup.…Port` (in-scope) materializa e `org.springframework.…`
+ * (lib externa) NÃO. Usa só FQN Java válidos (ignora ids `route:`/`node:`/`table:`).
+ */
+export function inferRootSegments(nodes: RawSystemNode[]): Set<string> {
+  const roots = new Set<string>();
+  for (const n of nodes || []) {
+    if (!n || typeof n.id !== "string") continue;
+    const fqn = fqnOfClassKey(classKeyOf(n.id));
+    if (fqn && JAVA_FQN_RE.test(fqn)) {
+      const top = fqn.split(".")[0];
+      if (top) roots.add(top);
+    }
+  }
+  return roots;
+}
+/** FQN in-scope = FQN Java válido cujo 1º segmento é um pacote-raiz do projeto. */
+function isInScopeFqn(fqn: string, roots: Set<string>): boolean {
+  if (!JAVA_FQN_RE.test(fqn)) return false;
+  return roots.has(fqn.split(".")[0]);
+}
+
 /**
  * Agregação FQN→nó→aresta-de-sistema (nível de CLASSE). Pura. Para cada aresta
- * config `A→B`: resolve o nó de A/B via FQN. Órfão (FQN sem nó) ou auto-referência
- * (mesmo nó) → descarta. Dedup por par de nós (mantém a 1ª razão vista).
+ * config `A→B`: resolve o nó de A/B via FQN. Quando o FQN NÃO tem nó mas é IN-SCOPE
+ * (um PORT do hexagonal, que o estático não emite), MATERIALIZA um `INTERFACE:<fqn>`
+ * (retornado em `interfaceNodes` para o merge criar) — senão a aresta port→adapter
+ * orfanizaria e o CONFIG_PROVEN seria 0. FQN fora de escopo (lib externa) → órfão
+ * (§5). Auto-referência → descarta. Dedup por par (mantém a 1ª razão).
  */
 export function aggregateConfigEdges(
   nodes: RawSystemNode[],
   derived: ConfigDerivedEdge[],
-): { edges: AggregatedConfigEdge[]; stats: Omit<ConfigMergeStats, "added" | "upgraded" | "supersededByScip"> } {
+): { edges: AggregatedConfigEdge[]; interfaceNodes: InterfaceNodeSpec[]; stats: Omit<ConfigMergeStats, "added" | "upgraded" | "supersededByScip"> } {
   const fqnIndex = buildFqnNodeIndex(nodes);
+  const roots = inferRootSegments(nodes);
+  const planned = new Map<string, InterfaceNodeSpec>(); // fqn → spec do port sintético
   const best = new Map<string, AggregatedConfigEdge>();
   let orphanDropped = 0;
   let intraDropped = 0;
+
+  // Resolve um FQN a um id de nó: existente > materializa PORT in-scope > null (órfão).
+  const resolveOrMaterialize = (fqn: string): string | null => {
+    const existing = fqnIndex.get(fqn);
+    if (existing) return existing;
+    if (!isInScopeFqn(fqn, roots)) return null; // lib externa / não-FQN → órfão (§5)
+    const id = `INTERFACE:${fqn}`;
+    if (!planned.has(fqn)) planned.set(fqn, { id, fqn, className: simpleNameOf(fqn) });
+    fqnIndex.set(fqn, id); // registra p/ outras arestas do mesmo port reusarem
+    return id;
+  };
+
   for (const e of derived || []) {
     if (!e || e.resolution !== "config") continue;
     const fromFqn = typeFqnOfConfigEndpoint(e.from, e.fromFqn);
     const toFqn = typeFqnOfConfigEndpoint(e.to, e.toFqn);
     if (!fromFqn || !toFqn) { orphanDropped++; continue; }
-    const na = fqnIndex.get(fromFqn);
-    const nb = fqnIndex.get(toFqn);
+    const na = resolveOrMaterialize(fromFqn);
+    const nb = resolveOrMaterialize(toFqn);
     if (!na || !nb) { orphanDropped++; continue; }
     if (na === nb) { intraDropped++; continue; }
     const key = pairKey(na, nb, RELATION);
@@ -306,7 +371,16 @@ export function aggregateConfigEdges(
     });
   }
   const edges = Array.from(best.values());
-  return { edges, stats: { derived: (derived || []).length, aggregated: edges.length, orphanDropped, intraDropped } };
+  // só materializa o port que participa de ao menos 1 aresta final (dedup pode ter
+  // descartado a única aresta que o tocava via auto-referência).
+  const usedNodes = new Set<string>();
+  for (const a of edges) { usedNodes.add(a.fromNode); usedNodes.add(a.toNode); }
+  const interfaceNodes = Array.from(planned.values()).filter((s) => usedNodes.has(s.id));
+  return {
+    edges,
+    interfaceNodes,
+    stats: { derived: (derived || []).length, aggregated: edges.length, orphanDropped, intraDropped, interfacesMinted: interfaceNodes.length },
+  };
 }
 
 /**
@@ -325,7 +399,7 @@ export function mergeConfigEdges(
   rawGraph: RawSystemGraph,
   payload: ConfigEdgesPayload | null | undefined,
 ): { graph: RawSystemGraph; stats: ConfigMergeStats } {
-  const zero: ConfigMergeStats = { derived: 0, aggregated: 0, added: 0, upgraded: 0, supersededByScip: 0, orphanDropped: 0, intraDropped: 0 };
+  const zero: ConfigMergeStats = { derived: 0, aggregated: 0, added: 0, upgraded: 0, supersededByScip: 0, orphanDropped: 0, intraDropped: 0, interfacesMinted: 0 };
   if (!rawGraph || !Array.isArray(rawGraph.nodes) || !Array.isArray(rawGraph.edges)) {
     return { graph: rawGraph, stats: zero };
   }
@@ -333,7 +407,7 @@ export function mergeConfigEdges(
   if (!Array.isArray(derived) || derived.length === 0) {
     return { graph: rawGraph, stats: zero };
   }
-  const { edges: aggregated, stats: aggStats } = aggregateConfigEdges(rawGraph.nodes, derived);
+  const { edges: aggregated, interfaceNodes, stats: aggStats } = aggregateConfigEdges(rawGraph.nodes, derived);
   if (aggregated.length === 0) {
     return { graph: rawGraph, stats: { ...aggStats, added: 0, upgraded: 0, supersededByScip: 0 } };
   }
@@ -343,6 +417,21 @@ export function mergeConfigEdges(
     nodes: rawGraph.nodes.slice(),
     edges: rawGraph.edges.map((e) => ({ ...e, metadata: e.metadata ? { ...e.metadata } : e.metadata })),
   };
+
+  // MATERIALIZA os nós de PORT (interface) ausentes que ancoram as arestas DI.
+  // Sem o nó, o `shapeSystemGraph` descartaria a aresta (as duas pontas têm de
+  // existir entre os nós). Marca proveniência de config; nunca duplica id.
+  const existingIds = new Set(graph.nodes.map((n) => n.id));
+  for (const spec of interfaceNodes) {
+    if (existingIds.has(spec.id)) continue;
+    existingIds.add(spec.id);
+    graph.nodes.push({
+      id: spec.id,
+      type: "INTERFACE",
+      className: spec.className,
+      metadata: { synthetic: true, configProven: true, materializedByConfig: true, fqn: spec.fqn },
+    });
+  }
 
   // Índices sobre o grafo (pós-scip): pares já provados pelo scip + arestas DI cruas.
   const scipProvenPairs = new Set<string>();
