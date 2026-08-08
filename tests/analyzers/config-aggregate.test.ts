@@ -4,6 +4,7 @@ import {
   typeFqnOfConfigEndpoint,
   buildFqnNodeIndex,
   fqnSuffixesFromSourceFile,
+  inferRootSegments,
   aggregateConfigEdges,
   mergeConfigEdges,
   type ConfigDerivedEdge,
@@ -394,5 +395,100 @@ describe("buildFqnNodeIndex — desambiguação por pacote (nome simples coliden
     assert.equal(idx.get("easynup.b.Helper"), "SERVICE:Helper.exec");
     // o nome curto colidiu entre 2 classes → removido (não mis-atribui)
     assert.equal(idx.get("Helper"), undefined);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// REGRESSÃO do config-proven no PROJETO REAL (dados vivos do coordenador). As
+// config-edges são PORT→ADAPTER (interface hexagonal → impl). O analisador NÃO
+// emite nó para o PORT (interface referenciada só via DI) — só para o ADAPTER.
+// Node id real = `<TYPE>:<FQN COMPLETO>` (o FQN JÁ está no id). Sem o nó do port,
+// a aresta orfaniza e CONFIG_PROVEN=0. O fix MATERIALIZA um INTERFACE:<fqn> p/ o
+// port in-scope, ancorando a aresta.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Grafo como o REAL: id = <TYPE>:<FQN>; só o ADAPTER é nó (o PORT não existe).
+function portAdapterGraph(): RawSystemGraph {
+  return {
+    nodes: [
+      { id: "SERVICE:easynup.services.adapters.authz.RoutingDecisionAdapter", type: "SERVICE", className: "RoutingDecisionAdapter" },
+      { id: "SERVICE:easynup.services.adapters.identity.NuPIdentityPermissionAdapter", type: "SERVICE", className: "NuPIdentityPermissionAdapter" },
+      // um nó qualquer p/ firmar o pacote-raiz do projeto (easynup)
+      { id: "ENTITY:easynup.persistence.entities.Contract", type: "ENTITY", className: "Contract" },
+    ],
+    edges: [],
+  };
+}
+const PORT = {
+  authz: "easynup.services.common.ports.AuthorizationDecisionPort",
+  perm: "easynup.services.common.ports.PermissionPort",
+};
+const ADAPTER = {
+  routing: "easynup.services.adapters.authz.RoutingDecisionAdapter",
+  identity: "easynup.services.adapters.identity.NuPIdentityPermissionAdapter",
+};
+
+describe("config PORT→ADAPTER com PORT SEM NÓ → materializa INTERFACE + CONFIG_PROVEN", () => {
+  it("materializa o nó do port in-scope e a aresta vira CONFIG_PROVEN (era 0)", () => {
+    const derived: ConfigDerivedEdge[] = [
+      { from: PORT.authz, to: ADAPTER.routing, kind: "DI_RESOLVES", resolution: "config", reason: "spring-single-bean" },
+      { from: PORT.perm, to: ADAPTER.identity, kind: "DI_RESOLVES", resolution: "config", reason: "spring-single-bean" },
+    ];
+    const { edges, interfaceNodes, stats } = aggregateConfigEdges(portAdapterGraph().nodes, derived);
+    assert.equal(edges.length, 2, "2 arestas port→adapter (era 0 antes: port órfão)");
+    assert.equal(stats.orphanDropped, 0);
+    assert.equal(stats.interfacesMinted, 2, "2 ports materializados");
+    assert.ok(interfaceNodes.some((n) => n.id === `INTERFACE:${PORT.authz}`));
+    // a aresta liga o INTERFACE sintético ao SERVICE do adapter
+    assert.ok(edges.some((e) => e.fromNode === `INTERFACE:${PORT.authz}` && e.toNode === `SERVICE:${ADAPTER.routing}`));
+
+    const { graph, stats: mstats } = mergeConfigEdges(portAdapterGraph(), configPayload(derived));
+    assert.equal(mstats.interfacesMinted, 2);
+    assert.equal(mstats.added, 2);
+    // o nó do port foi materializado no grafo
+    assert.ok(graph.nodes.some((n) => n.id === `INTERFACE:${PORT.authz}` && (n.metadata as any)?.materializedByConfig === true));
+
+    const shaped = shapeSystemGraph(graph, "class");
+    assert.ok(shaped.coverage.edges.byMethod.CONFIG_PROVEN >= 2, "CONFIG_PROVEN > 0 no /graph");
+    const edge = findEdge(shaped.edges, `INTERFACE:${PORT.authz}`, `SERVICE:${ADAPTER.routing}`, "DI_RESOLVES");
+    assert.ok(edge, "aresta port→adapter presente no shaped");
+    assert.equal(edge!.evidence.method, "CONFIG_PROVEN");
+  });
+
+  it("port de LIB EXTERNA (fora do pacote-raiz) → NÃO materializa, órfão honesto (§5)", () => {
+    const derived: ConfigDerivedEdge[] = [
+      { from: "org.springframework.SomeLibPort", to: ADAPTER.routing, resolution: "config" },
+    ];
+    const { edges, interfaceNodes, stats } = aggregateConfigEdges(portAdapterGraph().nodes, derived);
+    assert.equal(edges.length, 0);
+    assert.equal(interfaceNodes.length, 0, "NUNCA inventa nó de tipo de fora do projeto");
+    assert.equal(stats.orphanDropped, 1);
+    assert.equal(stats.interfacesMinted, 0);
+  });
+
+  it("dedup: o MESMO port em 2 arestas materializa 1 nó só", () => {
+    const derived: ConfigDerivedEdge[] = [
+      { from: PORT.authz, to: ADAPTER.routing, resolution: "config" },
+      { from: PORT.authz, to: ADAPTER.identity, resolution: "config" },
+    ];
+    const { edges, interfaceNodes } = aggregateConfigEdges(portAdapterGraph().nodes, derived);
+    assert.equal(edges.length, 2);
+    assert.equal(interfaceNodes.filter((n) => n.id === `INTERFACE:${PORT.authz}`).length, 1, "1 nó de port, reusado nas 2 arestas");
+  });
+});
+
+describe("inferRootSegments — raízes de pacote do projeto (dos FQN dos nós)", () => {
+  it("extrai o 1º segmento dos FQN Java, ignora ids route:/table:/node:", () => {
+    const roots = inferRootSegments([
+      { id: "SERVICE:easynup.services.X", type: "SERVICE" },
+      { id: "ENTITY:easynup.persistence.Y", type: "ENTITY" },
+      { id: "route:GET:/api/x", type: "ROUTE" },
+      { id: "table:audit_log", type: "ENTITY" },
+      { id: "node:src/foo.ts", type: "SERVICE" },
+    ] as never);
+    assert.ok(roots.has("easynup"));
+    assert.ok(!roots.has("route"));
+    assert.ok(!roots.has("table"));
+    assert.ok(!roots.has("node"));
   });
 });
