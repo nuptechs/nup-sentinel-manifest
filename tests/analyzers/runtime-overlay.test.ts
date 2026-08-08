@@ -174,6 +174,84 @@ describe("ADR-0026 costura — fetchRecentTraces (gated + fail-soft)", () => {
   });
 });
 
+describe("rota específica + matching SERVICE profundo + serviço→entidade (fix do colapso-no-mount, 2026-08-08)", () => {
+  const deepGraph = () => {
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("ENTITY:easynup.persistence.entities.Contract", "ENTITY", "Contract", null, null, {}));
+    g.addNode(new GraphNode("ENTITY:easynup.persistence.entities.SlaIndicator", "ENTITY", "SlaIndicator", null, null, {}));
+    g.addNode(new GraphNode(
+      "SERVICE:easynup.services.web.contracts.findContract.v1.FindContractServiceV1",
+      "SERVICE", "FindContractServiceV1", null, null, {},
+    ));
+    g.addNode(new GraphNode(
+      "SERVICE:easynup.services.web.slaIndicators.findSlaIndicators.v1.FindSlaIndicatorsServiceV1",
+      "SERVICE", "FindSlaIndicatorsServiceV1", null, null, {},
+    ));
+    return g;
+  };
+  const proxiedTrace = (id: string, op: string, table: string) => trace(id, [
+    // express seta http.route no MOUNT — o bug real: 40 rotas colapsavam em "GET /easynup"
+    { svc: "easynup-gateway", id: "gw", tags: { "http.route": "/easynup", "http.request.method": "GET" } },
+    { svc: "easynup-backend", id: "bk", parent: "gw", tags: { "http.route": `/easynup/${op}` } },
+    { svc: "easynup-backend", id: "db", parent: "bk", tags: { "db.sql.table": table, "db.operation": "SELECT" } },
+  ]);
+
+  it("2 rotas proxied sob o MESMO mount → 2 pares com o path ESPECÍFICO do filho (não 1 par /easynup)", () => {
+    const pairs = extractRuntimePairs(
+      [proxiedTrace("t1", "findContract.v1", "contract"), proxiedTrace("t2", "findSlaIndicators.v1", "sla_indicator")],
+      { gatewayServices: ["easynup-gateway", "easynup-backend"] },
+    );
+    assert.equal(pairs.length, 2);
+    const paths = pairs.map((p) => p.path).sort();
+    assert.deepEqual(paths, ["/easynup/findContract.v1", "/easynup/findSlaIndicators.v1"]);
+  });
+
+  it("rota mais específica NUNCA troca por rota não-relacionada (só prefixo estrito do root)", () => {
+    const t = trace("t3", [
+      { svc: "easynup-gateway", id: "gw", tags: { "http.route": "/api/x", "http.request.method": "GET" } },
+      { svc: "easynup-backend", id: "bk", parent: "gw", tags: { "http.route": "/easynup/outraCoisa.v1" } },
+    ]);
+    const pairs = extractRuntimePairs([t], { gatewayServices: ["easynup-gateway", "easynup-backend"] });
+    assert.equal(pairs.length, 1);
+    assert.equal(pairs[0].path, "/api/x"); // /easynup/... NÃO estende /api/x — mantém o root
+  });
+
+  it("javaEndpoint casa nó SERVICE profundo (sem wsv1:) → aresta rota→SERVICE + SERVICE→ENTIDADE same-trace", () => {
+    const g = deepGraph();
+    const pairs = extractRuntimePairs([proxiedTrace("t4", "findContract.v1", "contract")], {
+      gatewayServices: ["easynup-gateway", "easynup-backend"],
+    });
+    const res = applyRuntimeOverlay(g, pairs);
+    assert.equal(res.wsv1Edges, 1); // rota→SERVICE profundo
+    assert.equal(res.serviceEntityEdges, 1); // SERVICE→Contract (base dos pares comparáveis)
+    const svcOut = g.getOutgoingEdges("SERVICE:easynup.services.web.contracts.findContract.v1.FindContractServiceV1");
+    assert.ok(svcOut.some((e) => e.toNode === "ENTITY:easynup.persistence.entities.Contract" && e.relationType === "RUNTIME_OBSERVED"));
+  });
+
+  it("2+ endpoints Java no MESMO traço → NÃO atribui serviço→entidade (conservador anti-chute)", () => {
+    const g = deepGraph();
+    const t = trace("t5", [
+      { svc: "easynup-gateway", id: "gw", tags: { "http.route": "/easynup", "http.request.method": "GET" } },
+      { svc: "easynup-backend", id: "b1", parent: "gw", tags: { "http.route": "/easynup/findContract.v1" } },
+      { svc: "easynup-backend", id: "b2", parent: "gw", tags: { "http.route": "/easynup/findSlaIndicators.v1" } },
+      { svc: "easynup-backend", id: "db", parent: "b1", tags: { "db.sql.table": "contract" } },
+    ]);
+    const res = applyRuntimeOverlay(g, extractRuntimePairs([t], { gatewayServices: ["easynup-gateway", "easynup-backend"] }));
+    assert.equal(res.wsv1Edges, 2); // as duas rota→SERVICE valem
+    assert.equal(res.serviceEntityEdges, 0); // atribuição de tabela seria chute — não emite
+  });
+
+  it("convenção rasa wsv1:<path> segue funcionando (retrocompat)", () => {
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("wsv1:/easynup/findContract.v1", "SERVICE", "FindContractWsV1", null, null, { fullPath: "/easynup/findContract.v1" }));
+    const pairs = extractRuntimePairs([proxiedTrace("t6", "findContract.v1", "contract")], {
+      gatewayServices: ["easynup-gateway", "easynup-backend"],
+    });
+    const res = applyRuntimeOverlay(g, pairs);
+    assert.equal(res.wsv1Edges, 1);
+  });
+});
+
 describe("diagnóstico durável — fetchRecentTracesWithReport (retry janela-reduzida + report por serviço)", () => {
   it("502 na 1ª tentativa → retry com lookback pela METADE e report {retried:true, httpStatus:200}", async () => {
     // o modo de falha REAL do hub (Badger 502 sob janela de 24h; janela menor responde)
