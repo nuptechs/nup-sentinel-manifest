@@ -1817,6 +1817,38 @@ export async function registerRoutes(
     }
   });
 
+  // Evidence-History — a dimensão TEMPO: de fotografia para filme. Responde a
+  // pergunta que nenhum snapshot responde ("o mapa está mais confirmado que há
+  // 30 dias?") servindo a série do censo epistêmico por run.
+  // FONTE = o resumo gravado NO INSTANTE de cada run
+  // (`analysis_runs.diagnostics.evidence`), nunca recomputado do snapshot na
+  // leitura — recomputar aplicaria os overlays de HOJE ao passado e chataria a
+  // série. Ver `analyzers/evidence-history.ts` §POR QUE NÃO RECOMPUTAR.
+  // Contrato: id inválido → 400 · projeto inexistente → 404 · sem histórico →
+  // 200 com `points: []` (vazio ≠ falhou) · run anterior ao registro entra com
+  // `coverage: null` (jamais um zero fabricado).
+  app.get("/api/projects/:projectId/evidence-history", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+
+      const { buildEvidenceHistory, resolveLimit } = await import("./analyzers/evidence-history");
+      const history = await buildEvidenceHistory(
+        projectId,
+        {
+          getProject: (id) => storage.getProject(id),
+          getAnalysisRuns: (id) => storage.getAnalysisRuns(id),
+        },
+        { limit: resolveLimit(req.query.limit) },
+      );
+      if (!history) return res.status(404).json({ message: "Project not found" });
+      res.json(history);
+    } catch (error) {
+      console.error("Error building evidence history:", error);
+      res.status(500).json({ message: "Failed to build evidence history" });
+    }
+  });
+
   app.get("/api/projects/:projectId/graph", async (req, res) => {
     try {
       const projectId = parseInt(req.params.projectId);
