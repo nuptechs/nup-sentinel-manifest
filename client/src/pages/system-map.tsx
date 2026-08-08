@@ -325,7 +325,9 @@ export default function SystemMapPage() {
       {!projectsQuery.isError && graphQuery.data && viewMode === "treemap" && <TreemapView payload={graphQuery.data} />}
       {!projectsQuery.isError && graphQuery.data && viewMode === "chord" && <ChordView payload={graphQuery.data} />}
       {!projectsQuery.isError && graphQuery.data && viewMode === "er" && <ErView payload={graphQuery.data} />}
-      {!projectsQuery.isError && graphQuery.data && viewMode === "proofs" && <ProofsView payload={graphQuery.data} />}
+      {!projectsQuery.isError && graphQuery.data && viewMode === "proofs" && (
+        <ProofsView payload={graphQuery.data} projectId={projectId ?? undefined} />
+      )}
     </div>
   );
 }
