@@ -30,6 +30,13 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: Test
         run: npm test
+      # Os 82 testes de componente do client (vitest + jsdom, telas do Mapa do
+      # Sistema) não eram gate — regressão de tela mergeava com CI verde.
+      # Verificado 82/82 verde antes de virar gate (2026-08-08). Nota: o
+      # recharts emite stderr "width(0) and height(0)" em jsdom (container sem
+      # dimensão) — é ruído esperado, não falha teste.
+      - name: Test client (vitest)
+        run: npm run test:client
 
   # ADR-0023 O5 — o engine Java consolidado (dual-entrypoint HTTP+CLI) ganha
   # gate próprio: antes o código Java só era validado dentro do docker build
