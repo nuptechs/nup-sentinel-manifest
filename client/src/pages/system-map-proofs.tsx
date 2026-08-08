@@ -13,6 +13,7 @@
 // proveniência em vez de fingir.
 // ─────────────────────────────────────────────
 import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RTooltip } from "recharts";
 import { ShieldCheck, Radar, EyeOff, Activity, Flame, Layers as LayersIcon, FileCode2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,6 +35,7 @@ import {
   type InsightGraph,
   type RankedNode,
 } from "./system-map-insights";
+import { BlindSpotPanel, CalibrationBands, type BimrPayload } from "./system-map-blind";
 
 // ── peça 3: repartição epistêmica (pura → testável sem recharts) ──────
 export interface BreakdownDatum {
@@ -134,8 +136,28 @@ export function EpistemicBreakdown({ coverage }: { coverage?: GraphCoverage | nu
             <Progress value={nodeObsPct} className="h-1.5" />
           </div>
         )}
+        {/* ADR-0035 — a confiança deixa de ser peso de projeto e vira medida (ou
+            ABSTÉM, dizendo por quê). Ausente no /graph antigo: não renderiza. */}
+        <CalibrationBands calibration={coverage?.calibration} />
       </CardContent>
     </Card>
+  );
+}
+
+// ── vitrine do BIMR: busca a própria fonte (/bimr) e delega o render ──
+function BlindSpotSection({ projectId }: { projectId: number }) {
+  const q = useQuery<BimrPayload>({
+    queryKey: [`/api/projects/${projectId}/bimr`],
+    retry: false,
+  });
+  return (
+    <BlindSpotPanel
+      data={q.data}
+      isLoading={q.isLoading}
+      isError={q.isError}
+      error={q.error as Error | null}
+      onRetry={() => void q.refetch()}
+    />
   );
 }
 
@@ -256,7 +278,14 @@ function InsightSection({
 }
 
 // ── vista principal ───────────────────────────────────────────────────
-export function ProofsView({ payload }: { payload: InsightGraph & { coverage?: GraphCoverage | null } }) {
+export function ProofsView({
+  payload,
+  projectId,
+}: {
+  payload: InsightGraph & { coverage?: GraphCoverage | null };
+  /** ausente = a vitrine do BIMR não é montada (o resto da vista segue igual). */
+  projectId?: number;
+}) {
   const summary = useMemo(() => insightsSummary(payload), [payload]);
   const blast = useMemo(() => topBlastRadius(payload, 8), [payload]);
   const blind = useMemo(() => blindSpots(payload, 6), [payload]);
@@ -290,6 +319,13 @@ export function ProofsView({ payload }: { payload: InsightGraph & { coverage?: G
           </CardContent>
         </Card>
       </div>
+
+      {/* o que a leitura estática não vê (BIMR) */}
+      {projectId != null && (
+        <div className="mt-4">
+          <BlindSpotSection projectId={projectId} />
+        </div>
+      )}
 
       {/* insights (peça 2) */}
       <div className="mt-4 grid gap-4 lg:grid-cols-3">

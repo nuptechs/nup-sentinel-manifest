@@ -27,6 +27,43 @@ export interface EdgeEvidence {
   confidence: number;
 }
 
+/**
+ * ADR-0035 — confiança CALIBRADA por método (`coverage.calibration` do /graph).
+ * Opcional por contrato: snapshot/servidor antigo simplesmente não traz, e a UI
+ * degrada. `calibrated:false` NÃO é erro — é abstenção honesta com motivo.
+ */
+export interface MethodReliabilityDTO {
+  reliability: number;
+  lower: number;
+  upper: number;
+  width: number;
+  n: number;
+  confirmed: number;
+  calibrated: boolean;
+  abstainReason?: string;
+}
+export interface GraphCalibration {
+  calibrated: boolean;
+  reason?: string;
+  hasRuntimeGroundTruth?: boolean;
+  runtimeOracleSize?: number;
+  oracleComparablePairs?: number;
+  confidenceLevelPct?: number;
+  byMethod?: Record<string, MethodReliabilityDTO>;
+  effectiveConfidenceByMethod?: Record<string, { confidence: number; source: "calibrated" | "fixed"; fixed: number }>;
+  completeness?: {
+    observed: number;
+    estimatedTotal: number;
+    missShare: number;
+    ci?: { lower: number; upper: number };
+    detail?: { reliable: boolean; note?: string };
+  };
+  completenessLevelPct?: number;
+  completenessApplicable?: boolean;
+  completenessReason?: string;
+  methodOverlapShare?: number;
+}
+
 /** Contrato P0.1 — por grafo (o censo honesto de cobertura). */
 export interface GraphCoverage {
   edges: {
@@ -35,6 +72,8 @@ export interface GraphCoverage {
     observedRatio: number;
   };
   nodes: { observed: number; total: number };
+  /** ADR-0035 — presente só quando o servidor já emite a seção. */
+  calibration?: GraphCalibration | null;
 }
 
 // Ordem canônica: do mais forte (visto rodar) ao mais fraco (nunca soubemos).
