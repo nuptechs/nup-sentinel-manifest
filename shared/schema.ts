@@ -128,6 +128,13 @@ export const analysisRuns = pgTable("analysis_runs", {
   startedAt: timestamp("started_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
   completedAt: timestamp("completed_at"),
   errorMessage: text("error_message"),
+  // Diagnóstico durável da execução (aditivo, nullable): o que cada etapa do
+  // pipeline fez de fato — em especial o runtime overlay (config resolvida,
+  // fetch por serviço com HTTP status, hits de tabela, arestas emitidas) e a
+  // causa estruturada em caso de falha. Motivação: os `progress()` vão pro SSE
+  // e morrem com o request — um run com RUNTIME_OBSERVED=0 era indiagnosticável
+  // sem logs (incidente 2026-08-08, projeto 27). A verdade agora fica no run.
+  diagnostics: jsonb("diagnostics"),
 });
 
 export const insertAnalysisRunSchema = createInsertSchema(analysisRuns).omit({

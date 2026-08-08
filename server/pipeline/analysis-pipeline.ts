@@ -106,6 +106,11 @@ export class AnalysisPipeline {
 
   async runFullAnalysis(projectId: number, fileData: FileData[]): Promise<AnalysisResult> {
     const analysisRun = await storage.createAnalysisRun({ projectId });
+    // Diagnóstico DURÁVEL do run (analysis_runs.diagnostics): os progress() vão
+    // pro SSE e morrem com o request — sem isto, um run com RUNTIME_OBSERVED=0
+    // era indiagnosticável (incidente 2026-08-08, projeto 27). Best-effort:
+    // persistir o diagnóstico nunca pode derrubar a análise.
+    const diag: Record<string, unknown> = { files: fileData.length };
 
     try {
       await storage.updateProjectStatus(projectId, "analyzing");
@@ -245,17 +250,30 @@ export class AnalysisPipeline {
             "Step 3/4",
             `Runtime overlay OFF — sem JAEGER_QUERY_URL/RUNTIME_OVERLAY_JAEGER_URL no env do processo nem conventionProfile.runtimeOverlay no projeto (byte-a-byte, sem costura).`,
           );
+          diag.overlay = { status: "off", reason: "sem jaegerUrl (env/projeto)" };
         } else {
           // Orquestrador único: par rota→tabela (traço completo) + mapeamento
           // DIRETO tabela→ENTITY (traço fragmento). Loga SEMPRE (config, traços,
           // spans-DB, arestas por caminho). Mesmo caminho que o teste exercita.
-          await runRuntimeOverlay(appGraph, cfg, {
+          const summary = await runRuntimeOverlay(appGraph, cfg, {
             onLog: (m) => this.progress("Step 3/4", m),
           });
+          diag.overlay = {
+            status: "ran",
+            jaegerUrl: cfg.jaegerUrl,
+            services: cfg.services,
+            lookbackMs: cfg.lookbackMs,
+            ...summary,
+          };
         }
       } catch (err) {
         console.error(`[pipeline] runtime overlay falhou (fail-soft): ${err}`);
         this.progress("Step 3/4", `Runtime overlay falhou (fail-soft): ${(err as Error)?.message || err}`);
+        diag.overlay = {
+          status: "error",
+          error: (err as Error)?.message || String(err),
+          stackTop: ((err as Error)?.stack || "").split("\n").slice(0, 3).join("\n"),
+        };
       }
 
       let catalogEntryData = this.connectGraph(
@@ -333,7 +351,8 @@ export class AnalysisPipeline {
       }
 
       const graphSummary = appGraph.toJSON();
-      await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData);
+      diag.cacheStatus = backendReused && frontendReused ? "fully cached" : backendReused ? "backend cached" : frontendReused ? "frontend cached" : "full analysis";
+      await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData, diag);
       await this.saveSnapshot(analysisRun.id, projectId, created, appGraph, endpointImpacts, fileData);
 
       // ADR-070 Onda 4 — os críticos de grafo (sobreposição funcional +
@@ -384,10 +403,21 @@ export class AnalysisPipeline {
       // NENHUM rastro nos logs — indiagnosticável. Agora a falha é visível.
       console.error(`[pipeline] runFullAnalysis FALHOU (projeto ${projectId}, run ${analysisRun.id}): ${errorMsg}`, error instanceof Error ? error.stack : "");
       this.progress("Analysis", `FALHOU: ${errorMsg}`);
+      // Causa ESTRUTURADA no diagnóstico durável: "fetch failed" sem stack nem
+      // causa é indiagnosticável remotamente (run 99 do projeto 27). Guarda o
+      // topo do stack + a `cause` do undici (onde mora o endereço que falhou).
+      diag.failure = {
+        message: errorMsg,
+        stackTop: (error instanceof Error ? error.stack || "" : "").split("\n").slice(0, 6).join("\n"),
+        cause: error instanceof Error && (error as { cause?: unknown }).cause
+          ? String((error as { cause?: unknown }).cause).slice(0, 500)
+          : undefined,
+      };
       await storage.updateAnalysisRun(analysisRun.id, {
         status: "failed",
         completedAt: new Date(),
         errorMessage: errorMsg,
+        diagnostics: diag,
       });
       await storage.updateProjectStatus(projectId, "failed");
       throw error;
@@ -741,7 +771,8 @@ export class AnalysisPipeline {
   private async finalize(
     analysisRunId: number, projectId: number,
     totalInteractions: number, totalEndpoints: number, appGraph: any,
-    catalogEntries: InsertCatalogEntry[]
+    catalogEntries: InsertCatalogEntry[],
+    diagnostics?: Record<string, unknown>,
   ) {
     await storage.updateAnalysisRun(analysisRunId, {
       status: "completed",
@@ -749,6 +780,7 @@ export class AnalysisPipeline {
       totalInteractions,
       totalEndpoints,
       totalEntities: this.countTotalEntities(appGraph, catalogEntries),
+      ...(diagnostics ? { diagnostics } : {}),
     });
     await storage.updateProjectStatus(projectId, "completed");
   }
