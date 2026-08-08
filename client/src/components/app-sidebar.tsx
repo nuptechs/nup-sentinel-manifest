@@ -1,4 +1,4 @@
-import { LayoutDashboard, FolderUp, FileSearch, Map, Network, GitCompare, GitBranch, ShieldAlert, Settings, Ruler } from "lucide-react";
+import { LayoutDashboard, FolderUp, FileSearch, Map, Network, GitCompare, GitBranch, ShieldAlert, Settings, Ruler, Target } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import {
   Sidebar,
@@ -15,6 +15,9 @@ import {
 
 const navItems = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
+  // A superfície única de decisão: responde saúde/prova/ponto-cego/tendência
+  // numa página só. Fica no topo porque é por onde se começa a olhar.
+  { title: "Decisão", url: "/decisao", icon: Target },
   { title: "Upload Project", url: "/upload", icon: FolderUp },
   { title: "Catalog", url: "/catalog", icon: FileSearch },
   { title: "System Explorer", url: "/insights", icon: Map },

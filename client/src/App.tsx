@@ -14,6 +14,7 @@ import UploadPage from "@/pages/upload";
 import CatalogPage from "@/pages/catalog";
 import InsightsPage from "@/pages/insights";
 import SystemMapPage from "@/pages/system-map";
+import DecisionPage from "@/pages/decision";
 import DiffViewerPage from "@/pages/diff-viewer";
 import GitIntegrationPage from "@/pages/git-integration";
 import SettingsPage from "@/pages/settings";
@@ -32,6 +33,7 @@ function Router() {
       <Route path="/catalog" component={CatalogPage} />
       <Route path="/insights" component={InsightsPage} />
       <Route path="/system-map" component={SystemMapPage} />
+      <Route path="/decisao" component={DecisionPage} />
       <Route path="/diff" component={DiffViewerPage} />
       <Route path="/git" component={GitIntegrationPage} />
       <Route path="/security" component={SecurityAuditPage} />

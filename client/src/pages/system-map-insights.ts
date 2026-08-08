@@ -38,6 +38,8 @@ export interface InsightEdge {
   fromNode: string;
   toNode: string;
   relationType?: string;
+  /** nº de traços que exercitaram a aresta (só em aresta observada). */
+  count?: number;
   evidence?: { method?: unknown; confidence?: unknown } | null;
 }
 export interface InsightGraph {
@@ -226,4 +228,78 @@ export function insightsSummary(graph: InsightGraph): InsightsSummary {
     hot: ranked.filter((r) => r.runtimeHot).length,
     hasEvidence,
   };
+}
+
+// ── Arestas quentes: o que MAIS EXECUTA de verdade ────────────────────
+//
+// O ranking de nós (`runtimeHotpaths`) responde "quem foi exercitado". Este
+// responde a pergunta que a Visão de Decisão faz: "qual LIGAÇÃO carrega o
+// tráfego?" — a aresta, não o nó. É a leitura mais forte que existe (visto
+// rodar), e a única que um agente lendo código não produz.
+//
+// Fonte única: o eixo de proveniência (`evidence.method === RUNTIME_OBSERVED`).
+// Sem esse eixo no payload devolve `[]` — a tela então DIZ que o snapshot não
+// traz proveniência, em vez de listar arestas estáticas fingindo tráfego.
+
+export interface RuntimeEdgeRank {
+  /** chave estável para render (`from→to`). */
+  id: string;
+  fromId: string;
+  toId: string;
+  fromLabel: string;
+  toLabel: string;
+  fromType: string;
+  toType: string;
+  relationType?: string;
+  /** nº de traços observados; `null` quando o payload não trouxe contagem. */
+  count: number | null;
+}
+
+/** Nome curto a partir do id cru (`TYPE:pkg.Classe` → `Classe`). */
+function shortenId(id: string): string {
+  const afterColon = id.includes(":") ? id.slice(id.indexOf(":") + 1) : id;
+  return afterColon.split(".").filter(Boolean).pop() || afterColon;
+}
+
+/**
+ * Top-N arestas observadas em runtime, por nº de traços (desc). Desempate
+ * determinístico por id de origem e destino — mesma entrada, mesma saída,
+ * sempre (reproduzível → não-forjável).
+ */
+export function topRuntimeEdges(graph: InsightGraph, limit = 5): RuntimeEdgeRank[] {
+  const nodes = new Map<string, InsightNode>();
+  for (const n of graph.nodes || []) if (n && typeof n.id === "string") nodes.set(n.id, n);
+
+  const labelOf = (id: string): string => {
+    const n = nodes.get(id);
+    return n ? nodeLabel(n) : shortenId(id);
+  };
+  const typeOf = (id: string): string => nodes.get(id)?.type ?? "";
+
+  const out: RuntimeEdgeRank[] = [];
+  for (const e of graph.edges || []) {
+    if (!e || typeof e.fromNode !== "string" || typeof e.toNode !== "string") continue;
+    if (evidenceMethodOf(e) !== "RUNTIME_OBSERVED") continue;
+    out.push({
+      id: `${e.fromNode}→${e.toNode}`,
+      fromId: e.fromNode,
+      toId: e.toNode,
+      fromLabel: labelOf(e.fromNode),
+      toLabel: labelOf(e.toNode),
+      fromType: typeOf(e.fromNode),
+      toType: typeOf(e.toNode),
+      relationType: e.relationType,
+      count: typeof e.count === "number" && Number.isFinite(e.count) ? e.count : null,
+    });
+  }
+
+  return out
+    .sort((a, b) => {
+      const ca = a.count ?? 0;
+      const cb = b.count ?? 0;
+      if (cb !== ca) return cb - ca;
+      if (a.fromId !== b.fromId) return a.fromId < b.fromId ? -1 : 1;
+      return a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0;
+    })
+    .slice(0, limit);
 }
