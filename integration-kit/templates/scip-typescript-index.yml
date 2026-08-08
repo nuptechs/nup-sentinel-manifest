@@ -1,0 +1,129 @@
+# ─────────────────────────────────────────────────────────────────────────
+# TEMPLATE DO INTEGRATION-KIT — evidência ESTÁTICA de um repo TypeScript/Node
+# para o mapa epistêmico do Sentinel (ADR-0028/0030).
+#
+# Copie para `.github/workflows/sentinel-manifest-ts.yml` no SEU repo.
+#
+# O que alimenta:
+#   • STATIC_PROVEN — call-graph derivado do índice SCIP do `scip-typescript`,
+#                     que usa o TYPE CHECKER do TS (não regex): chamada direta
+#                     resolvida por tipo + interface→K implementações.
+#
+# O que NÃO alimenta (honesto):
+#   • CONFIG_PROVEN — o resolvedor de wiring existente é de Spring (Java). Não
+#                     há equivalente para DI de Node (InversifyJS, tsyringe,
+#                     container à mão). Este eixo fica vazio até alguém escrever
+#                     o resolvedor do container em uso.
+#   • RUNTIME_OBSERVED — vem dos traços OTel da app rodando; ver `otel-node.md`.
+#
+# ── CONFIGURAR ANTES DE USAR ─────────────────────────────────────────────
+# Repository VARIABLES:
+#   MANIFEST_PROJECT_ID  (obrigatório) id numérico do projeto no manifest
+#   MANIFEST_URL         (opcional)    default https://manifest.nuptechs.com
+#   MANIFEST_TOOLS_REF   (opcional)    ref do nup-sentinel-manifest (default main)
+# Repository SECRET:
+#   SENTINEL_MANIFEST_API_KEY
+#
+# Todo passo é AUXILIAR (`continue-on-error`): nunca reprova o CI do produto,
+# mas nunca falha em silêncio — cada saída de exceção emite `::warning::`.
+# ─────────────────────────────────────────────────────────────────────────
+name: Sentinel Manifest — evidência TypeScript (STATIC)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'server/**'
+      - 'package.json'
+      - 'tsconfig.json'
+  workflow_dispatch: {}
+
+concurrency:
+  group: sentinel-manifest-ts
+  cancel-in-progress: true
+
+env:
+  MANIFEST_URL: ${{ vars.MANIFEST_URL || 'https://manifest.nuptechs.com' }}
+  MANIFEST_PROJECT_ID: ${{ vars.MANIFEST_PROJECT_ID }}
+  MANIFEST_TOOLS_REF: ${{ vars.MANIFEST_TOOLS_REF || 'main' }}
+
+jobs:
+  evidence:
+    name: scip-typescript → Manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Guard — configuração presente
+        id: guard
+        run: |
+          MISSING=""
+          [ -z "${MANIFEST_PROJECT_ID}" ] && MISSING="${MISSING} vars.MANIFEST_PROJECT_ID"
+          [ -z "${{ secrets.SENTINEL_MANIFEST_API_KEY }}" ] && MISSING="${MISSING} secrets.SENTINEL_MANIFEST_API_KEY"
+          if [ -n "${MISSING}" ]; then
+            echo "::warning title=sentinel-manifest::configuração ausente —${MISSING}. Nada será enviado."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # scip-typescript precisa das dependências instaladas (usa o type checker
+      # com os .d.ts reais). Sem node_modules o índice sai pobre/vazio.
+      - name: Install
+        if: steps.guard.outputs.ok == 'true'
+        continue-on-error: true
+        run: npm install --no-audit --no-fund
+
+      - name: scip-typescript index
+        id: index
+        if: steps.guard.outputs.ok == 'true'
+        continue-on-error: true
+        run: |
+          npx --yes @sourcegraph/scip-typescript index --no-global-caches --output index.scip
+          ls -la index.scip
+
+      # ARMADILHA: o deriver baixado para /tmp resolve `@sourcegraph/scip-typescript`
+      # a partir de /tmp — onde NÃO existe node_modules → `Cannot find module`.
+      # Para TS passamos `--scip-lib` com o caminho resolvido no repo (modo
+      # binário). Para Java usa-se `--json` e o problema não existe.
+      - name: Deriva arestas STATIC_PROVEN
+        id: derive_static
+        if: steps.index.outcome == 'success'
+        continue-on-error: true
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/nuptechs/nup-sentinel-manifest/${MANIFEST_TOOLS_REF}/tools/scip-typescript/derive-edges.mjs" -o /tmp/derive-edges.mjs
+          test -s /tmp/derive-edges.mjs
+          SCIP_LIB=$(node -p "require.resolve('@sourcegraph/scip-typescript/dist/src/scip.js')")
+          echo "scip-lib: ${SCIP_LIB}"
+          node --max-old-space-size=6000 /tmp/derive-edges.mjs index.scip --scip-lib "${SCIP_LIB}" > edges.json
+          node -e "const e=require('./edges.json'); if(!e||!Array.isArray(e.edges)){console.error('edges.json invalido');process.exit(1);} console.log('counts:', JSON.stringify(e.counts), 'edges:', e.edges.length)"
+
+      - name: POST arestas STATIC_PROVEN ao Manifest
+        id: post_static
+        if: steps.derive_static.outcome == 'success'
+        continue-on-error: true
+        env:
+          MANIFEST_API_KEY: ${{ secrets.SENTINEL_MANIFEST_API_KEY }}
+        run: |
+          HTTP=$(curl -sS -o /tmp/scip-post.out -w '%{http_code}' \
+            -X POST "${MANIFEST_URL}/api/projects/${MANIFEST_PROJECT_ID}/scip-edges" \
+            -H "x-api-key: ${MANIFEST_API_KEY}" \
+            -H 'content-type: application/json' \
+            --data-binary @edges.json)
+          echo "POST /scip-edges → HTTP ${HTTP}"
+          head -c 500 /tmp/scip-post.out || true
+          echo
+          case "$HTTP" in
+            2*) echo "OK — arestas STATIC_PROVEN ingeridas (projeto ${MANIFEST_PROJECT_ID})." ;;
+            401|403) echo "::warning title=scip-edges::HTTP ${HTTP} — SENTINEL_MANIFEST_API_KEY inválida ou sem acesso." ;;
+            404) echo "::warning title=scip-edges::HTTP 404 — projeto ${MANIFEST_PROJECT_ID} não existe no manifest." ;;
+            *)  echo "::warning title=scip-edges::HTTP ${HTTP} — não ingerido (não bloqueia o CI)." ;;
+          esac
