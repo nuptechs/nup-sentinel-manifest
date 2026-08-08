@@ -253,6 +253,15 @@ export interface RuntimeEdgeRank {
   relationType?: string;
   /** nº de traços observados; `null` quando o payload não trouxe contagem. */
   count: number | null;
+  /**
+   * Origem da observação (R1 do confronto agente×máquina, 2026-08-08):
+   * `route` = requisição com rota conhecida (o que um USUÁRIO exercita) ·
+   * `background` = fonte de fragmento `runtime:db:*` (job/scheduler tocando o
+   * dado sem rota no traço). Sem a distinção, o ranking bruto era dominado
+   * pelos jobs (audit-outbox ×1.390) e "o que mais executa?" respondia com
+   * background — verdadeiro, porém ilegível para o decisor.
+   */
+  origin: "route" | "background";
 }
 
 /** Nome curto a partir do id cru (`TYPE:pkg.Classe` → `Classe`). */
@@ -290,16 +299,22 @@ export function topRuntimeEdges(graph: InsightGraph, limit = 5): RuntimeEdgeRank
       toType: typeOf(e.toNode),
       relationType: e.relationType,
       count: typeof e.count === "number" && Number.isFinite(e.count) ? e.count : null,
+      origin: e.fromNode.startsWith("runtime:db:") ? "background" : "route",
     });
   }
 
-  return out
-    .sort((a, b) => {
-      const ca = a.count ?? 0;
-      const cb = b.count ?? 0;
-      if (cb !== ca) return cb - ca;
-      if (a.fromId !== b.fromId) return a.fromId < b.fromId ? -1 : 1;
-      return a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0;
-    })
-    .slice(0, limit);
+  const byCount = (a: RuntimeEdgeRank, b: RuntimeEdgeRank) => {
+    const ca = a.count ?? 0;
+    const cb = b.count ?? 0;
+    if (cb !== ca) return cb - ca;
+    if (a.fromId !== b.fromId) return a.fromId < b.fromId ? -1 : 1;
+    return a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0;
+  };
+
+  // Rotas primeiro (o que o usuário exercita), background depois — cada grupo
+  // ordenado por volume. O background NUNCA é omitido (seria fabricar silêncio:
+  // audit-outbox rodando ×1.390 é fato relevante) — só deixa de AFOGAR as rotas.
+  const routes = out.filter((e) => e.origin === "route").sort(byCount);
+  const background = out.filter((e) => e.origin === "background").sort(byCount);
+  return [...routes, ...background].slice(0, limit);
 }

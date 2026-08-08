@@ -397,10 +397,18 @@ export function HotPathsCard({ query, limit = 5 }: { query: QueryLike<DecisionGr
             <li key={e.id} className="flex items-center gap-2 text-sm" data-testid={`decision-hotpath-${i}`}>
               <span className="w-4 shrink-0 text-right tabular-nums text-xs text-muted-foreground">{i + 1}</span>
               <span className="min-w-0 flex-1 truncate" title={`${e.fromId} → ${e.toId}`}>
-                <span className="font-mono text-[13px]">{e.fromLabel}</span>
+                <span className="font-mono text-[13px]">{e.origin === "background" ? "job/background" : e.fromLabel}</span>
                 <ArrowRight className="mx-1 inline h-3 w-3 text-muted-foreground" />
                 <span className="font-mono text-[13px]">{e.toLabel}</span>
               </span>
+              {e.origin === "background" ? (
+                <span
+                  className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+                  data-testid={`decision-hotpath-bg-${i}`}
+                >
+                  background
+                </span>
+              ) : null}
               {e.count != null ? (
                 <span className="shrink-0 tabular-nums text-xs font-medium text-rose-600 dark:text-rose-400">
                   ×{e.count.toLocaleString("pt-BR")}
