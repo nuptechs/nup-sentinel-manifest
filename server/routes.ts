@@ -1792,6 +1792,31 @@ export async function registerRoutes(
     } catch (e) { console.error("dsm error:", e); res.status(500).json({ message: "Failed to build DSM" }); }
   });
 
+  // Evidence-Health — a evidência ainda está CHEGANDO? Ortogonal ao `coverage`
+  // do `/graph` (que diz quanto do mapa é provado, não se a fonte secou). Fecha
+  // o buraco operacional real: um serviço cai, o eixo RUNTIME vai a 0 e o
+  // `/graph` segue respondendo 200 — sem alarme nenhum.
+  // FAIL-SOFT: fonte quebrada vira `unknown` NAQUELE eixo; o endpoint nunca
+  // lança. Um medidor de saúde que derruba o servidor é pior que nenhum.
+  app.get("/api/projects/:projectId/evidence-health", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+
+      const { buildEvidenceHealth } = await import("./analyzers/evidence-health");
+      const health = await buildEvidenceHealth(projectId, {
+        getProject: (id) => storage.getProject(id),
+        getAnalysisRuns: (id) => storage.getAnalysisRuns(id),
+        env: process.env,
+      });
+      if (!health) return res.status(404).json({ message: "Project not found" });
+      res.json(health);
+    } catch (error) {
+      console.error("Error building evidence health:", error);
+      res.status(500).json({ message: "Failed to build evidence health" });
+    }
+  });
+
   app.get("/api/projects/:projectId/graph", async (req, res) => {
     try {
       const projectId = parseInt(req.params.projectId);

@@ -26,6 +26,40 @@ Pontos que dependem de configuração (não de código) para produzir valor de v
 - **Token de git persistente (ADR-0019 Onda 4):** com `MANIFEST_TOKEN_ENCRYPTION_KEY` (64 hex), o `git/connect` persiste o token CIFRADO (AES-256-GCM) — sobrevive a restart; webhooks GitHub/GitLab viram bots de PR/MR reais (laudo + comentário upsert). Sem a chave ⇒ memória-only como antes.
 - A **assinatura do relatório de impacto** (ADR-0018 Onda 5, `POST /impact-diff`) só é emitida com `MANIFEST_REPORT_HMAC_KEY` setada (HMAC-SHA256 do JSON canônico; sem a chave o response é o mesmo de antes — OFF byte-a-byte, nunca assinatura fake). Ops (verificado ao vivo 2026-07-21): `manifest.nuptechs.com` é servido pelo serviço **@probe/server** (que também deploya este repo) — variável setada só no serviço `nup-sentinel-manifest` não afeta o domínio público; setar NOS DOIS. `serviceInstanceRedeploy` pega env nova normalmente.
 
+### Saúde da evidência (`GET /api/projects/:id/evidence-health`)
+
+O `coverage` do `/graph` diz **quanto** do mapa é provado. Este endpoint responde
+a pergunta ortogonal — **a evidência ainda está chegando?** — porque o modo de
+falha real é o pipeline morrer de fome em silêncio: um serviço cai, o eixo
+`RUNTIME_OBSERVED` vai a 0, e o `/graph` segue respondendo 200 sem alarme algum.
+
+```sh
+curl -s -H "x-api-key: $KEY" "$URL/api/projects/27/evidence-health" | jq .
+```
+
+Um bloco por eixo (`static`, `config`, `runtime`, `analysis`) com
+`status` ∈ `fresh` | `stale` | `absent` | `unknown`, a última evidência, a idade
+em horas e o limiar aplicado; mais um veredito `overall`:
+
+| `overall` | Significado |
+|---|---|
+| `healthy` | tudo que foi declarado está fluindo |
+| `degraded` | um eixo que fluía parou, ou o runtime foi declarado e não entrega |
+| `starving` | nenhum eixo está fresco — o mapa não é alimentado por nada |
+
+`absent` só é alarme onde alguém **declarou** que o eixo deve fluir: um projeto
+Node nunca terá wiring de Spring, e degradar por `config: absent` treinaria todo
+mundo a ignorar o alarme. `unknown` (Jaeger fora do ar, overlay desligado)
+nunca vira acusação — não se aponta falha sem saber.
+
+Limiares por env (horas; valor inválido cai no default):
+`EVIDENCE_HEALTH_STATIC_STALE_HOURS` (168), `..._CONFIG_...` (168),
+`..._RUNTIME_...` (24), `..._ANALYSIS_...` (48).
+
+Fail-soft absoluto: uma fonte quebrada vira `unknown` **naquele eixo** e o
+relatório sai inteiro. Para integrar um repo novo, ver
+[`integration-kit/`](integration-kit/README.md).
+
 ### Login do navegador
 
 O dashboard usa Authorization Code + PKCE e mantém o access token somente na sessão HTTP-only do servidor. Para habilitar o acesso autenticado ao Mapa do Sistema, configure no processo que atende o domínio público:
