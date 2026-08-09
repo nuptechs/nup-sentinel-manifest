@@ -530,7 +530,10 @@ export default function DecisionPage() {
   const bimrQuery = useQuery<BimrPayload>({ queryKey: key("bimr"), enabled, retry: false });
   const historyQuery = useQuery<EvidenceHistoryPayload>({ queryKey: key("evidence-history"), enabled, retry: false });
 
-  const suspect = healthHeadline(healthQuery.isError ? null : healthQuery.data).suspect;
+  // O lembrete do rodapé vem do MESMO helper do banner: qual é a suspeita muda
+  // o texto (drift ≠ "a evidência parou"), e duplicar a frase aqui garantiria
+  // que uma das duas ficasse errada.
+  const health = healthHeadline(healthQuery.isError ? null : healthQuery.data);
 
   return (
     <div className="flex h-full flex-col gap-4 p-4 md:p-6">
@@ -594,9 +597,9 @@ export default function DecisionPage() {
       )}
 
       {/* âncora de leitura: repete o veredito no rodapé para quem rolou a página */}
-      {enabled && suspect && (
+      {enabled && health.suspect && (
         <p className="text-center text-xs text-muted-foreground" data-testid="decision-footer-suspect">
-          Lembrete: a evidência não está chegando normalmente — os números acima descrevem o último retrato conhecido.
+          {health.suspectNote}
         </p>
       )}
     </div>

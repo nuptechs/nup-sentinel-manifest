@@ -41,6 +41,13 @@ export function getOpenAPISpec() {
                       properties: {
                         format: { type: "string", enum: ["manifest", "agents-md", "openapi", "policy-matrix", "keycloak-realm", "opa-rego", "compliance-report", "all"], default: "manifest" },
                         projectName: { type: "string", default: "headless-<timestamp>" },
+                        gitSha: {
+                          type: "string",
+                          pattern: "^[0-9a-fA-F]{40}$",
+                          description:
+                            "SHA completo (40 hex) do commit destes arquivos. Fica no diagnóstico durável do run e alimenta o eixo `drift` do /evidence-health (o mapa cobre o binário que roda?). SHA curto ou inválido é ignorado — nunca aproximado.",
+                          example: "9f2c1ab34d5e6f708192a3b4c5d6e7f809a1b2c3",
+                        },
                       },
                     },
                   },

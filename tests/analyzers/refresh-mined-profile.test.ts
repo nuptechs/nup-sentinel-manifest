@@ -68,4 +68,31 @@ describe("refreshMinedProfile", () => {
     assert.ok(out && out.admitted >= 1);
     assert.equal(st.writes.length, 1);
   });
+
+  // Os bags de CONFIG moram no mesmo JSONB das regras. O merge reconstruía o
+  // perfil só com {version, rules, source, updatedAt} — e APAGAVA, em silêncio,
+  // o endereço do Jaeger e a URL de health a cada mineração. Ninguém tinha
+  // mexido em config e o overlay ia a zero.
+  it("PRESERVA runtimeOverlay e appInfo — mineração não come a configuração", async () => {
+    const st = storageWith({
+      version: 1,
+      rules: [],
+      runtimeOverlay: { services: ["acme-gateway"] },
+      appInfo: { healthUrl: "https://app.exemplo/healthz" },
+    });
+    const out = await refreshMinedProfile(st as any, 7, FLEET as any, () => {});
+    assert.ok(out && out.admitted >= 1);
+    const saved = st.writes[0] as { runtimeOverlay?: any; appInfo?: any; rules: unknown[] };
+    assert.deepEqual(saved.runtimeOverlay?.services, ["acme-gateway"]);
+    assert.equal(saved.appInfo?.healthUrl, "https://app.exemplo/healthz");
+    assert.ok(saved.rules.length >= 1, "e as regras mineradas entram normalmente");
+  });
+
+  it("sem os bags, o perfil salvo NÃO ganha chaves vazias (byte-a-byte)", async () => {
+    const st = storageWith(null);
+    await refreshMinedProfile(st as any, 7, FLEET as any, () => {});
+    const saved = st.writes[0] as Record<string, unknown>;
+    assert.ok(!("runtimeOverlay" in saved));
+    assert.ok(!("appInfo" in saved));
+  });
 });

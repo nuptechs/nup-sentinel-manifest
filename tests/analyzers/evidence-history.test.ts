@@ -225,6 +225,20 @@ describe("evidence-history — historyPoint", () => {
     assert.equal(p.coverage, null);
     assert.equal(p.runId, 7);
   });
+
+  // O ponto carrega QUAL commit ele mediu — é o que transforma "a cobertura
+  // caiu" em "a cobertura caiu neste commit".
+  it("ponto carrega o gitSha carimbado no run", () => {
+    const sha = "9f2c1ab34d5e6f708192a3b4c5d6e7f809a1b2c3";
+    const p = historyPoint(run(8, { diagnostics: { files: 900, gitSha: sha.toUpperCase() } }));
+    assert.equal(p.gitSha, sha, "normalizado, para comparar sem depender de caixa");
+  });
+
+  it("run sem carimbo (ou com lixo) → gitSha null, nunca aproximado", () => {
+    assert.equal(historyPoint(run(9)).gitSha, null);
+    assert.equal(historyPoint(run(10, { diagnostics: { gitSha: "9f2c1ab" } })).gitSha, null);
+    assert.equal(historyPoint(run(11, { diagnostics: "lixo" })).gitSha, null);
+  });
 });
 
 // ── limite ────────────────────────────────────────────────────────────

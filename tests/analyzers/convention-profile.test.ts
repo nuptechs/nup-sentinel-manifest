@@ -87,6 +87,31 @@ describe("parseConventionProfile — fail-closed", () => {
     assert.throws(() => parseConventionProfile({ version: 1, rules: [], runtimeOverlay: [] as any }), /runtimeOverlay deve ser um objeto/);
     assert.throws(() => parseConventionProfile({ version: 1, rules: [], runtimeOverlay: { services: 123 } as any }), /runtimeOverlay.services/);
   });
+
+  // Eixo de drift: sem passthrough, a URL de health seria descartada em
+  // silêncio no PUT e o eixo nasceria morto — exatamente o bug que o bag
+  // acima já teve uma vez.
+  it("PRESERVA appInfo.healthUrl e valida fail-closed", () => {
+    const p = parseConventionProfile({
+      version: 1,
+      rules: [],
+      appInfo: { healthUrl: "https://app.exemplo/healthz" },
+    });
+    assert.equal(p.appInfo?.healthUrl, "https://app.exemplo/healthz");
+    // ausente ⇒ campo não existe (byte-a-byte com o comportamento anterior)
+    assert.equal(parseConventionProfile({ version: 1, rules: [] }).appInfo, undefined);
+    // fail-closed: config errada é recusada NA HORA, não vira "não deu para
+    // perguntar" para sempre.
+    assert.throws(() => parseConventionProfile({ version: 1, rules: [], appInfo: [] as any }), /appInfo deve ser um objeto/);
+    assert.throws(
+      () => parseConventionProfile({ version: 1, rules: [], appInfo: { healthUrl: "app.exemplo/healthz" } as any }),
+      /appInfo.healthUrl/,
+    );
+    assert.throws(
+      () => parseConventionProfile({ version: 1, rules: [], appInfo: { healthUrl: 42 } as any }),
+      /appInfo.healthUrl/,
+    );
+  });
 });
 
 describe("RegexAnchoredMatcher — anti-superalarme herdado + contagem exata", () => {

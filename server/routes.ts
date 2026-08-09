@@ -289,7 +289,11 @@ export async function registerRoutes(
       await storage.updateProjectStatus(project.id, "uploaded", fileData.length);
 
       const pipeline = new AnalysisPipeline();
-      const result = await pipeline.runFullAnalysis(project.id, fileData);
+      // `options.gitSha` — QUAL commit estes arquivos são. O Manifest recebe
+      // conteúdos, não um checkout: só o chamador (job do Sentinel / CI) sabe.
+      // Sem ele o run fica sem carimbo e o eixo de drift diz "não sei" — que é
+      // a resposta honesta, e não some com o resto da análise.
+      const result = await pipeline.runFullAnalysis(project.id, fileData, { gitSha: options?.gitSha });
 
       const entries = await storage.getCatalogEntries(project.id);
       const manifest = generateManifest(project, entries);

@@ -16,6 +16,7 @@ import {
   analysisAxisHealth,
   runtimeAxisHealthFrom,
   computeOverall,
+  computeCulprits,
   resolveThresholds,
   lastSpanMs,
   probeJaeger,
@@ -300,6 +301,79 @@ describe("evidence-health — veredito", () => {
     const desligado = { status: "unknown", stale: false, reason: "overlay-disabled" } as never;
     assert.equal(computeOverall({ static: fresh, config: fresh, runtime: desligado, analysis: fresh }), "healthy");
   });
+
+  // ── eixo de drift no veredito ──
+  const todosFrescos = { static: fresh, config: fresh, runtime: fresh, analysis: fresh };
+
+  it("drift MEDIDO (as duas pontas discordam) → degraded", () => {
+    const drift = { status: "drift", reason: "sha-mismatch", analyzedSha: null, analyzedAt: null, deployedSha: null } as never;
+    assert.equal(computeOverall({ ...todosFrescos, drift }), "degraded");
+  });
+
+  it("drift em dia → healthy", () => {
+    const drift = { status: "in-sync", analyzedSha: "a", analyzedAt: null, deployedSha: "a" } as never;
+    assert.equal(computeOverall({ ...todosFrescos, drift }), "healthy");
+  });
+
+  it("drift UNKNOWN nunca piora o veredito (não saber ≠ saber que não cobre)", () => {
+    for (const reason of ["health-url-not-configured", "health-unreachable", "no-analyzed-sha", "health-no-commit"]) {
+      const drift = { status: "unknown", reason, analyzedSha: null, analyzedAt: null, deployedSha: null } as never;
+      assert.equal(computeOverall({ ...todosFrescos, drift }), "healthy", reason);
+    }
+  });
+
+  it("relatório SEM o eixo (contrato anterior) computa igual — retrocompatível", () => {
+    assert.equal(computeOverall(todosFrescos), "healthy");
+  });
+});
+
+describe("evidence-health — culpados resolvidos no servidor", () => {
+  const fresh = { status: "fresh", stale: false } as never;
+  const stale = { status: "stale", stale: true, reason: "last-run-failed" } as never;
+  const absent = { status: "absent", stale: false, reason: "never-pushed" } as never;
+  const base = { static: fresh, config: fresh, runtime: fresh, analysis: fresh };
+
+  it("saudável → lista VAZIA (nunca ausente: leitor não adivinha)", () => {
+    assert.deepEqual(computeCulprits(base), []);
+  });
+
+  it("eixo que parou entra com status e motivo", () => {
+    assert.deepEqual(computeCulprits({ ...base, analysis: stale }), [
+      { axis: "analysis", status: "stale", reason: "last-run-failed" },
+    ]);
+  });
+
+  it("ausência informativa (config sem Spring) NÃO entra", () => {
+    assert.deepEqual(computeCulprits({ ...base, config: absent }), []);
+  });
+
+  it("runtime DECLARADO e vazio entra (a assimetria deliberada do absent)", () => {
+    const semAncora = { status: "absent", stale: false, reason: "no-anchorable-traces" } as never;
+    assert.deepEqual(computeCulprits({ ...base, runtime: semAncora }), [
+      { axis: "runtime", status: "absent", reason: "no-anchorable-traces" },
+    ]);
+  });
+
+  it("drift medido entra; drift unknown NÃO", () => {
+    const drift = { status: "drift", reason: "sha-mismatch" } as never;
+    assert.deepEqual(computeCulprits({ ...base, drift }), [{ axis: "drift", status: "drift", reason: "sha-mismatch" }]);
+    const naoSei = { status: "unknown", reason: "health-unreachable" } as never;
+    assert.deepEqual(computeCulprits({ ...base, drift: naoSei }), []);
+  });
+
+  it("lista e veredito NUNCA divergem — degraded ⟺ há culpado", () => {
+    const casos = [
+      { ...base, analysis: stale },
+      { ...base, runtime: { status: "absent", stale: false, reason: "no-traces" } as never },
+      { ...base, drift: { status: "drift", reason: "sha-mismatch" } as never },
+      base,
+      { ...base, config: absent },
+    ];
+    for (const c of casos) {
+      const degraded = computeOverall(c) === "degraded";
+      assert.equal(degraded, computeCulprits(c).length > 0, JSON.stringify(c.drift ?? c.analysis ?? c.runtime));
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -409,5 +483,124 @@ describe("evidence-health — buildEvidenceHealth (fim a fim)", () => {
     );
     assert.ok(urls.every((u) => u.startsWith("http://env-jaeger:16686/")), urls.join(","));
     assert.ok(urls.some((u) => u.includes("service=svc-a")));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// O eixo de drift dentro do relatório: aqui o que se protege é o relatório não
+// mentir nem calar. Sem healthUrl ele diz "não configurado" (e NÃO acusa); com
+// healthUrl ele mede de verdade e nomeia; e nenhuma falha da sonda pode
+// derrubar os outros quatro eixos.
+describe("evidence-health — drift (o mapa cobre o binário que roda?)", () => {
+  const SHA_A = "9f2c1ab34d5e6f708192a3b4c5d6e7f809a1b2c3";
+  const SHA_B = "0123456789abcdef0123456789abcdef01234567";
+  const HEALTH = "https://app.exemplo/healthz";
+
+  const projectWith = (appInfo: unknown) => ({
+    id: 42,
+    scipEdges: { edges: [1, 2, 3], ingestedAt: hoursAgo(4) },
+    configEdges: { edges: [1], ingestedAt: hoursAgo(4) },
+    conventionProfile: {
+      runtimeOverlay: { jaegerUrl: "http://jaeger:16686", services: ["acme-gateway"] },
+      ...(appInfo ? { appInfo } : {}),
+    },
+  });
+
+  const runsWithSha = (sha: string | null): AnalysisRunLike[] => [
+    { id: 9, status: "completed", completedAt: hoursAgo(5), diagnostics: sha ? { gitSha: sha } : { files: 3 } },
+  ];
+
+  /** Roteia por URL: Jaeger devolve traço ancorável; health devolve o commit. */
+  const routed = (deployed: { commit?: unknown } | null, opts: { healthOk?: boolean } = {}) =>
+    (async (u: string) => {
+      if (String(u).includes("jaeger")) {
+        return { ok: true, status: 200, json: async () => ({ data: [anchorableTrace(1)] }) };
+      }
+      if (opts.healthOk === false) return { ok: false, status: 502, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => deployed ?? {} };
+    }) as unknown as typeof fetch;
+
+  const build = (project: ProjectLike, runs: AnalysisRunLike[], fetchFn: typeof fetch) =>
+    buildEvidenceHealth(42, {
+      getProject: async () => project,
+      getAnalysisRuns: async () => runs,
+      env: {},
+      nowMs: NOW,
+      fetchFn,
+    });
+
+  it("mesmo commit dos dois lados → in-sync e overall segue healthy", async () => {
+    const h = (await build(projectWith({ healthUrl: HEALTH }), runsWithSha(SHA_A), routed({ commit: SHA_A })))!;
+    assert.equal(h.drift.status, "in-sync");
+    assert.equal(h.drift.analyzedSha, SHA_A);
+    assert.equal(h.drift.deployedSha, SHA_A);
+    assert.equal(h.overall, "healthy");
+    assert.deepEqual(h.culprits, []);
+  });
+
+  it("commits diferentes → drift, degraded, e o culpado nomeado", async () => {
+    const h = (await build(projectWith({ healthUrl: HEALTH }), runsWithSha(SHA_A), routed({ commit: SHA_B })))!;
+    assert.equal(h.drift.status, "drift");
+    assert.equal(h.overall, "degraded", "mapa fresco descrevendo outro commit É degradação");
+    assert.deepEqual(h.culprits, [{ axis: "drift", status: "drift", reason: "sha-mismatch" }]);
+    assert.equal(h.static.status, "fresh", "os eixos de freshness seguem intactos");
+  });
+
+  it("sem healthUrl → unknown nomeado, SEM acusar (e sem tocar a rede de health)", async () => {
+    const urls: string[] = [];
+    const spy = (async (u: string) => {
+      urls.push(String(u));
+      return { ok: true, status: 200, json: async () => ({ data: [anchorableTrace(1)] }) };
+    }) as unknown as typeof fetch;
+    const h = (await build(projectWith(null), runsWithSha(SHA_A), spy))!;
+    assert.equal(h.drift.status, "unknown");
+    assert.equal(h.drift.reason, "health-url-not-configured");
+    assert.equal(h.drift.analyzedSha, SHA_A, "o que sabemos continua exposto");
+    assert.equal(h.overall, "healthy");
+    assert.ok(urls.every((u) => u.includes("jaeger")), `sondou health sem config: ${urls.join(",")}`);
+  });
+
+  it("health fora do ar → unknown, relatório inteiro (fail-soft, nunca drift)", async () => {
+    const h = (await build(projectWith({ healthUrl: HEALTH }), runsWithSha(SHA_A), routed(null, { healthOk: false })))!;
+    assert.equal(h.drift.status, "unknown");
+    assert.equal(h.drift.reason, "health-unreachable");
+    assert.equal(h.overall, "healthy", "indisponibilidade da SONDA não é falha do projeto");
+    assert.equal(h.runtime.status, "fresh");
+  });
+
+  it("nenhum run carimbou o commit → unknown, mesmo com o ambiente respondendo", async () => {
+    const h = (await build(projectWith({ healthUrl: HEALTH }), runsWithSha(null), routed({ commit: SHA_B })))!;
+    assert.equal(h.drift.status, "unknown");
+    assert.equal(h.drift.reason, "no-analyzed-sha");
+    assert.equal(h.drift.deployedSha, SHA_B, "o lado medido aparece: a lacuna é a nossa");
+  });
+
+  it("ambiente responde sem commit → health-no-commit (≠ 'não perguntei')", async () => {
+    const h = (await build(projectWith({ healthUrl: HEALTH }), runsWithSha(SHA_A), routed({ commit: null })))!;
+    assert.equal(h.drift.reason, "health-no-commit");
+  });
+
+  it("storage de runs quebrado → runs-unavailable, e nada de zero fabricado", async () => {
+    const h = (await buildEvidenceHealth(42, {
+      getProject: async () => projectWith({ healthUrl: HEALTH }),
+      getAnalysisRuns: async () => { throw new Error("db down"); },
+      env: {},
+      nowMs: NOW,
+      fetchFn: routed({ commit: SHA_B }),
+    }))!;
+    assert.equal(h.drift.status, "unknown");
+    assert.equal(h.drift.reason, "runs-unavailable");
+    assert.equal(h.drift.analyzedSha, null);
+  });
+
+  it("culprits acompanha o veredito também quando há eixo parado + drift", async () => {
+    const p = projectWith({ healthUrl: HEALTH }) as ProjectLike;
+    const h = (await build(
+      { ...p, scipEdges: { edges: [1], ingestedAt: hoursAgo(400) } },
+      runsWithSha(SHA_A),
+      routed({ commit: SHA_B }),
+    ))!;
+    assert.equal(h.overall, "degraded");
+    assert.deepEqual(h.culprits.map((c) => c.axis), ["static", "drift"]);
   });
 });

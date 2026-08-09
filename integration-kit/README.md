@@ -172,6 +172,44 @@ Diz, por eixo, **quando** foi a última vez que chegou evidência e se está
 parou. É o alarme que faltava — sem ele, um serviço fora do ar simplesmente zera
 o eixo runtime e ninguém percebe.
 
+A resposta traz também `culprits[]` — quem causou a degradação, já resolvido
+pelo servidor (vazio quando `healthy`).
+
+### O mapa cobre o binário que está no ar? (eixo `drift`)
+
+Os quatro eixos acima dizem se a evidência **chega**. O `drift` diz outra coisa:
+se o que foi analisado é o que está **rodando**. Um mapa impecável e fresco pode
+descrever um commit que o ambiente já deixou para trás.
+
+Exige as duas pontas — sem elas o eixo responde `unknown` com motivo, **nunca**
+acusa drift (alarme falso gasta o crédito do alarme verdadeiro):
+
+1. **quem analisa informa o commit** — `POST /api/analyze` com
+   `options.gitSha` = SHA **completo** (40 hex). SHA curto é ignorado de
+   propósito: dois prefixos iguais de commits diferentes produziriam falso
+   drift.
+2. **o ambiente informa a versão** — um endpoint que devolva
+   `{ "commit": "<40-hex>" }` (ou `null`), registrado no projeto:
+
+```jsonc
+// PUT /api/projects/42/convention-profile
+{ "version": 1, "rules": [],
+  "appInfo": { "healthUrl": "https://app.exemplo/healthz" } }
+```
+
+```sh
+curl -s -H "x-api-key: $KEY" "$MANIFEST_URL/api/projects/42/evidence-health" | jq .drift
+```
+
+| `status` | significa |
+|---|---|
+| `in-sync` | o mapa descreve o commit que está no ar |
+| `drift` | os dois lados foram medidos e **discordam** → re-analise (degrada o `overall`) |
+| `unknown` | não deu para comparar — `reason` diz por quê (`health-url-not-configured`, `health-unreachable`, `health-no-commit`, `no-analyzed-sha`). **Nunca** degrada o veredito |
+
+O `gitSha` também entra em cada ponto de `/evidence-history`: a série deixa de
+ser "melhorou" e passa a ser "melhorou entre tais commits".
+
 ### Censo do grafo
 
 ```sh
@@ -277,3 +315,5 @@ funcionam mesmo assim (a calibração é quem espera).
 - [ ] `JAEGER_QUERY_URL` no Manifest + `runtimeOverlay.services` no projeto
 - [ ] `/evidence-health` → `overall: "healthy"`
 - [ ] `/graph` → `coverage.byMethod` com os três eixos acima de zero
+- [ ] (opcional) `options.gitSha` no `POST /api/analyze` + `appInfo.healthUrl`
+      no projeto → `/evidence-health` → `drift.status: "in-sync"`

@@ -15,8 +15,10 @@ import {
   EvidenceHealthBanner,
   ageText,
   axisView,
+  driftLine,
   healthHeadline,
   reasonText,
+  shortSha,
   type EvidenceHealthPayload,
 } from "./decision-health";
 
@@ -187,5 +189,185 @@ describe("EvidenceHealthBanner", () => {
     expect(screen.getByTestId("health-banner-unavailable")).toBeInTheDocument();
     expect(screen.getByTestId("health-sub")).toHaveTextContent("500: boom");
     expect(screen.getByTestId("health-suspect-warning")).toBeInTheDocument();
+  });
+});
+
+// ── eixo de drift: o mapa cobre o binário que roda? ───────────────────
+//
+// A mentira nova possível aqui é a mais cara de todas: acusar drift sem ter as
+// duas pontas medidas. Alarme falso gasta o crédito do alarme verdadeiro — na
+// terceira vez ninguém olha. Daí os testes exigirem SILÊNCIO quando não se
+// perguntou, e voz clara só quando os dois SHAs existem e discordam.
+const SHA_A = "9f2c1ab34d5e6f708192a3b4c5d6e7f809a1b2c3";
+const SHA_B = "0123456789abcdef0123456789abcdef01234567";
+
+describe("driftLine — fala quando sabe, cala quando não foi pedido", () => {
+  it("em dia: confirma com o commit curto", () => {
+    const l = driftLine({ status: "in-sync", analyzedSha: SHA_A, deployedSha: SHA_A });
+    expect(l?.state).toBe("in-sync");
+    expect(l?.text).toContain("9f2c1ab3");
+    expect(l?.text).toMatch(/cobre o que está no ar/);
+  });
+
+  it("drift: mostra os DOIS commits e o que fazer", () => {
+    const l = driftLine({ status: "drift", analyzedSha: SHA_A, deployedSha: SHA_B, reason: "sha-mismatch" });
+    expect(l?.state).toBe("drift");
+    expect(l?.text).toContain("9f2c1ab3");
+    expect(l?.text).toContain("01234567");
+    expect(l?.text).toMatch(/re-análise recomendada/);
+  });
+
+  it("SILÊNCIO quando o health não foi configurado (não se cobra quem não pediu)", () => {
+    expect(driftLine({ status: "unknown", reason: "health-url-not-configured" })).toBeNull();
+  });
+
+  it("SILÊNCIO com servidor antigo (campo ausente) — nada de linha fantasma", () => {
+    expect(driftLine(undefined)).toBeNull();
+    expect(driftLine(null)).toBeNull();
+    expect(driftLine({} as never)).toBeNull();
+  });
+
+  it("unknown pedido (health fora do ar) FALA que não deu para conferir", () => {
+    const l = driftLine({ status: "unknown", reason: "health-unreachable", analyzedSha: SHA_A });
+    expect(l?.state).toBe("unknown");
+    expect(l?.text).toMatch(/Não deu para conferir/);
+    expect(l?.text).toMatch(/qual versão está no ar/);
+  });
+
+  it("sem SHA legível não escreve meio-SHA nem 'undefined'", () => {
+    const l = driftLine({ status: "drift", analyzedSha: "9f2c1ab", deployedSha: null });
+    expect(l?.state).toBe("drift");
+    expect(l?.text).not.toMatch(/undefined|null|9f2c1ab/);
+    expect(shortSha("9f2c1ab")).toBeNull();
+  });
+});
+
+describe("culprits — a lista do SERVIDOR é a autoridade", () => {
+  it("usa os culpados do servidor, e o chip concorda com a lista", () => {
+    const h = healthHeadline({
+      ...healthy,
+      analysis: { status: "stale", stale: true, reason: "last-run-failed", lastRunId: 99 },
+      overall: "degraded",
+      culprits: [{ axis: "analysis", status: "stale", reason: "last-run-failed" }],
+    });
+    expect(h.culprits.map((c) => c.key)).toEqual(["analysis"]);
+    expect(h.axes.find((a) => a.key === "analysis")?.culprit).toBe(true);
+    expect(h.axes.find((a) => a.key === "runtime")?.culprit).toBe(false);
+  });
+
+  it("servidor manda drift como culpado → entra na lista com as duas pontas", () => {
+    const h = healthHeadline({
+      ...healthy,
+      overall: "degraded",
+      drift: { status: "drift", analyzedSha: SHA_A, deployedSha: SHA_B, reason: "sha-mismatch" },
+      culprits: [{ axis: "drift", status: "drift", reason: "sha-mismatch" }],
+    });
+    expect(h.culprits.map((c) => c.key)).toEqual(["drift"]);
+    expect(h.culprits[0].detail).toContain("9f2c1ab3");
+    // e a frase muda: drift NÃO é "a evidência parou de chegar"
+    expect(h.headline).toMatch(/não descreve o que está no ar/);
+    expect(h.sub).toMatch(/chegando normalmente/);
+  });
+
+  it("servidor manda lista VAZIA em payload degradado → admite não saber apontar", () => {
+    const h = healthHeadline({ ...healthy, overall: "degraded", culprits: [] });
+    expect(h.culprits).toHaveLength(0);
+    expect(h.sub).toMatch(/nenhum eixo se declarou culpado/);
+  });
+
+  it("a lista do servidor VENCE o espelho local (senão o banner acusa o eixo errado)", () => {
+    // payload em que o espelho local acusaria `runtime`, mas o servidor diz `config`
+    const h = healthHeadline({
+      ...healthy,
+      runtime: { status: "absent", stale: false, reason: "no-traces" },
+      overall: "degraded",
+      culprits: [{ axis: "config", status: "stale", reason: "never-pushed" }],
+    });
+    expect(h.culprits.map((c) => c.key)).toEqual(["config"]);
+    expect(h.axes.find((a) => a.key === "runtime")?.culprit).toBe(false);
+  });
+
+  it("culpado que não reconhecemos não é descartado em silêncio", () => {
+    const h = healthHeadline({
+      ...healthy,
+      overall: "degraded",
+      culprits: [{ axis: "eixo-do-futuro", status: "stale", reason: "motivo-novo" }],
+    });
+    expect(h.culprits).toHaveLength(1);
+    expect(h.headline).toContain("eixo-do-futuro");
+  });
+
+  it("o lembrete do rodapé segue QUAL é a suspeita (drift ≠ 'a evidência parou')", () => {
+    const soDrift = healthHeadline({
+      ...healthy,
+      overall: "degraded",
+      drift: { status: "drift", analyzedSha: SHA_A, deployedSha: SHA_B, reason: "sha-mismatch" },
+      culprits: [{ axis: "drift", status: "drift", reason: "sha-mismatch" }],
+    });
+    expect(soDrift.suspectNote).toMatch(/está chegando, mas sobre um commit diferente/);
+
+    const eixoParado = healthHeadline({
+      ...healthy,
+      runtime: { status: "stale", stale: true, ageHours: 40 },
+      overall: "degraded",
+      culprits: [{ axis: "runtime", status: "stale" }],
+    });
+    expect(eixoParado.suspectNote).toMatch(/não está chegando normalmente/);
+
+    expect(healthHeadline(undefined).suspectNote).toMatch(/não sabemos/i);
+    expect(healthHeadline(healthy).suspectNote).toBe("");
+  });
+
+  it("servidor ANTIGO (sem culprits) mantém o espelho local funcionando", () => {
+    const h = healthHeadline({
+      ...healthy,
+      runtime: { status: "stale", stale: true, ageHours: 40 },
+      overall: "degraded",
+    });
+    expect(h.culprits.map((c) => c.key)).toEqual(["runtime"]);
+  });
+});
+
+describe("EvidenceHealthBanner — linha de drift", () => {
+  it("drift real aparece no banner com os dois commits", () => {
+    render(
+      <EvidenceHealthBanner
+        data={{
+          ...healthy,
+          overall: "degraded",
+          drift: { status: "drift", analyzedSha: SHA_A, deployedSha: SHA_B, reason: "sha-mismatch" },
+          culprits: [{ axis: "drift", status: "drift", reason: "sha-mismatch" }],
+        }}
+      />,
+    );
+    expect(screen.getByTestId("health-drift-drift")).toHaveTextContent("01234567");
+    expect(screen.getByTestId("health-culprit-drift")).toBeInTheDocument();
+  });
+
+  it("em dia: linha discreta de confirmação, sem suspeita", () => {
+    render(
+      <EvidenceHealthBanner
+        data={{ ...healthy, drift: { status: "in-sync", analyzedSha: SHA_A, deployedSha: SHA_A } }}
+      />,
+    );
+    expect(screen.getByTestId("health-drift-in-sync")).toBeInTheDocument();
+    expect(screen.queryByTestId("health-suspect-warning")).toBeNull();
+  });
+
+  it("sem health configurado: NENHUMA linha de drift (silêncio, não 'não sabemos')", () => {
+    render(
+      <EvidenceHealthBanner
+        data={{ ...healthy, drift: { status: "unknown", reason: "health-url-not-configured", analyzedSha: SHA_A } }}
+      />,
+    );
+    expect(screen.queryByTestId("health-drift-unknown")).toBeNull();
+    expect(screen.getByTestId("health-banner-healthy")).toBeInTheDocument();
+  });
+
+  it("payload sem o campo (servidor antigo) não desenha nada nem quebra", () => {
+    render(<EvidenceHealthBanner data={healthy} />);
+    expect(screen.queryByTestId("health-drift-in-sync")).toBeNull();
+    expect(screen.queryByTestId("health-drift-drift")).toBeNull();
+    expect(screen.getByTestId("health-banner-healthy")).toBeInTheDocument();
   });
 });
