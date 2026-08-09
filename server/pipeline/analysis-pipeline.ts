@@ -11,6 +11,7 @@ import { generateManifest } from "../generators/manifest-generator";
 import { buildAdrIndex } from "../analyzers/adr-retrieval";
 import { buildAdrLinks, knownSymbolsFromSystemGraph } from "../analyzers/adr-tacit-links";
 import { computeFileHashes, detectChanges } from "./change-detector";
+import { normalizeGitSha } from "../git/sha";
 import type { FileHash } from "./change-detector";
 import type { InsertCatalogEntry } from "@shared/schema";
 import { analyzeSecurityOmissions, type SecurityFinding, type SecurityCoverageMetrics } from "../security/omission-engine";
@@ -93,6 +94,17 @@ function isCacheValid(timestamp: number): boolean {
   return Date.now() - timestamp < CACHE_TTL_MS;
 }
 
+/** Metadados do run que não vêm dos arquivos. Opcional em todo call-site. */
+export interface RunAnalysisOptions {
+  /**
+   * SHA (40-hex) do commit de onde vieram os arquivos. Quem sabe isso é o
+   * CHAMADOR (o job do Sentinel, o CI) — o Manifest recebe um punhado de
+   * conteúdos, não um checkout. Ausente/inválido ⇒ o run fica sem carimbo e o
+   * eixo de drift responde honestamente "não sei", nunca um SHA aproximado.
+   */
+  gitSha?: string | null;
+}
+
 export class AnalysisPipeline {
   private onProgress: ProgressCallback;
 
@@ -104,13 +116,25 @@ export class AnalysisPipeline {
     this.onProgress({ step, detail });
   }
 
-  async runFullAnalysis(projectId: number, fileData: FileData[]): Promise<AnalysisResult> {
+  async runFullAnalysis(
+    projectId: number,
+    fileData: FileData[],
+    opts: RunAnalysisOptions = {},
+  ): Promise<AnalysisResult> {
     const analysisRun = await storage.createAnalysisRun({ projectId });
     // Diagnóstico DURÁVEL do run (analysis_runs.diagnostics): os progress() vão
     // pro SSE e morrem com o request — sem isto, um run com RUNTIME_OBSERVED=0
     // era indiagnosticável (incidente 2026-08-08, projeto 27). Best-effort:
     // persistir o diagnóstico nunca pode derrubar a análise.
     const diag: Record<string, unknown> = { files: fileData.length };
+
+    // QUAL commit este run analisou. Carimbado aqui, ANTES de qualquer trabalho,
+    // para valer também no caminho de falha (`diag` é gravado nos dois). Sem
+    // isto, "o mapa cobre o binário que roda?" só tinha resposta por palpite.
+    // SHA inválido é IGNORADO (fica ausente, nunca aproximado) — a comparação
+    // com o ambiente prefere não saber a errar.
+    const gitSha = normalizeGitSha(opts.gitSha);
+    if (gitSha) diag.gitSha = gitSha;
 
     try {
       await storage.updateProjectStatus(projectId, "analyzing");
@@ -430,13 +454,13 @@ export class AnalysisPipeline {
     }
   }
 
-  async runFromProject(projectId: number): Promise<AnalysisResult> {
+  async runFromProject(projectId: number, opts: RunAnalysisOptions = {}): Promise<AnalysisResult> {
     const sourceFiles = await storage.getSourceFiles(projectId);
     const fileData = sourceFiles.map((f) => ({
       filePath: f.filePath,
       content: f.content,
     }));
-    return this.runFullAnalysis(projectId, fileData);
+    return this.runFullAnalysis(projectId, fileData, opts);
   }
 
   /**

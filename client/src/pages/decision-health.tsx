@@ -18,13 +18,27 @@
 //   wiring de Spring) — informativo, não alarme. Parou é o alarme.
 // • `unknown` ≠ "está tudo bem". É "não deu para perguntar" — dito com essas
 //   palavras, nunca escondido atrás de um check verde.
-// • A saúde vem do SERVIDOR (`overall`), que é a autoridade. O cliente só
-//   TRADUZ e NOMEIA o culpado. Se divergirmos (contrato mudou), o banner
-//   admite não saber apontar em vez de inventar um culpado.
+// • A saúde vem do SERVIDOR (`overall`) E os culpados também (`culprits[]`) —
+//   o cliente TRADUZ, não julga. O espelho local das regras de degradação
+//   sobrevive apenas como retrocompatibilidade com servidor anterior ao campo;
+//   quando a lista vem, ela vence (espelho que diverge aponta o culpado errado,
+//   que é pior do que não apontar).
+// • Drift (o mapa cobre o binário no ar?) fala quando SABE e cala quando não
+//   foi pedido: sem `healthUrl` configurado, nenhuma linha — cobrar de quem
+//   não pediu a medição treina o time a ignorar aviso.
 // • Consulta que falhou não é "saudável": vira `unavailable` com suspeita
 //   ligada. Carregando ≠ vazio ≠ falhou.
 // ─────────────────────────────────────────────
-import { Activity, AlertTriangle, CheckCircle2, HelpCircle, RefreshCw, ShieldAlert, HeartPulse } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  GitCommitHorizontal,
+  HelpCircle,
+  RefreshCw,
+  ShieldAlert,
+  HeartPulse,
+} from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -52,6 +66,27 @@ export interface AxisPayload {
   thresholdHours?: number;
 }
 
+/** O eixo ortogonal: o mapa cobre o binário que RODA? (servidor: evidence-drift) */
+export interface DriftPayload {
+  analyzedSha?: string | null;
+  analyzedAt?: string | null;
+  deployedSha?: string | null;
+  status?: "in-sync" | "drift" | "unknown" | string;
+  reason?: string;
+}
+
+/**
+ * Culpado RESOLVIDO PELO SERVIDOR. Enquanto não existia, esta tela espelhava à
+ * mão as regras de degradação do servidor — espelho que só quebra no dia em que
+ * as regras mudarem, apontando o culpado errado. O fallback espelhado continua
+ * vivo para servidor antigo, mas a lista, quando vem, VENCE.
+ */
+export interface CulpritPayload {
+  axis?: string;
+  status?: string;
+  reason?: string;
+}
+
 export interface EvidenceHealthPayload {
   projectId?: number;
   generatedAt?: string;
@@ -59,7 +94,9 @@ export interface EvidenceHealthPayload {
   config?: AxisPayload;
   runtime?: AxisPayload;
   analysis?: AxisPayload;
+  drift?: DriftPayload;
   overall?: OverallHealth | string;
+  culprits?: CulpritPayload[];
 }
 
 // ── Vocabulário pt-BR ─────────────────────────────────────────────────
@@ -72,11 +109,24 @@ export const AXIS_LABEL: Record<AxisKey, string> = {
 
 export const AXIS_ORDER: readonly AxisKey[] = ["runtime", "static", "config", "analysis"] as const;
 
-const STATUS_LABEL: Record<AxisStatus, string> = {
+/** O drift não é um dos 4 chips de freshness, mas PODE ser culpado. */
+export type CulpritKey = AxisKey | "drift";
+
+export const CULPRIT_LABEL: Record<CulpritKey, string> = {
+  ...AXIS_LABEL,
+  drift: "cobertura do binário no ar",
+};
+
+/** Estado exibível: os 4 de freshness + os 2 do eixo de drift. */
+export type ViewStatus = AxisStatus | "drift" | "in-sync";
+
+const STATUS_LABEL: Record<ViewStatus, string> = {
   fresh: "chegando",
   stale: "parou",
   absent: "nunca houve",
   unknown: "não sabemos",
+  drift: "divergiu",
+  "in-sync": "em dia",
 };
 
 /**
@@ -95,6 +145,13 @@ const REASON_TEXT: Record<string, string> = {
   "jaeger-unreachable": "não deu para perguntar ao coletor de traços",
   "no-traces": "nenhum traço na janela",
   "no-anchorable-traces": "traços chegam, mas nenhum ancora numa rota",
+  // eixo de drift (o mapa cobre o binário no ar?)
+  "sha-mismatch": "o mapa descreve um commit diferente do que está no ar",
+  "no-analyzed-sha": "nenhuma análise carimbou o commit que analisou",
+  "runs-unavailable": "não deu para ler o histórico de análises",
+  "health-url-not-configured": "o endereço de health do ambiente não está configurado neste projeto",
+  "health-unreachable": "não deu para perguntar ao ambiente qual versão está no ar",
+  "health-no-commit": "o ambiente respondeu, mas não informa qual commit está rodando",
 };
 
 export function reasonText(reason?: string): string | null {
@@ -122,9 +179,9 @@ function normalizeStatus(s: unknown): AxisStatus {
 const RUNTIME_DECLARED_BUT_EMPTY = new Set(["no-traces", "no-anchorable-traces"]);
 
 export interface AxisView {
-  key: AxisKey;
+  key: CulpritKey;
   label: string;
-  status: AxisStatus;
+  status: ViewStatus;
   statusLabel: string;
   /** linha de apoio: idade + motivo, o que houver. Pode ser `null`. */
   detail: string | null;
@@ -160,6 +217,101 @@ export function axisViews(data?: EvidenceHealthPayload | null): AxisView[] {
   return AXIS_ORDER.map((k) => axisView(k, data?.[k]));
 }
 
+// ── Eixo de drift: o mapa cobre o binário que roda? ───────────────────
+
+/** Prefixo legível de SHA. Entrada que não é SHA cheio → `null` (nunca meio-SHA). */
+export function shortSha(raw: unknown): string | null {
+  return typeof raw === "string" && /^[0-9a-f]{40}$/i.test(raw.trim()) ? raw.trim().toLowerCase().slice(0, 8) : null;
+}
+
+export interface DriftLine {
+  state: "in-sync" | "drift" | "unknown";
+  text: string;
+}
+
+/**
+ * A linha de drift do banner — ou `null` para ficar CALADO.
+ *
+ * Silêncio é deliberado em dois casos: servidor antigo (sem o campo) e projeto
+ * que nunca configurou o health do ambiente. Cobrar de quem não pediu o eixo é
+ * o mesmo erro de degradar por `config: absent` — treina o time a ignorar
+ * aviso. Os demais `unknown` (health fora do ar, run sem carimbo) FALAM, porque
+ * ali alguém pediu a medição e ela não veio.
+ */
+export function driftLine(d?: DriftPayload | null): DriftLine | null {
+  if (!d || !d.status) return null;
+
+  if (d.status === "in-sync") {
+    const sha = shortSha(d.analyzedSha);
+    return { state: "in-sync", text: `O mapa cobre o que está no ar${sha ? ` (commit ${sha})` : ""}.` };
+  }
+
+  if (d.status === "drift") {
+    const a = shortSha(d.analyzedSha);
+    const b = shortSha(d.deployedSha);
+    return {
+      state: "drift",
+      text:
+        a && b
+          ? `O mapa analisou ${a}, mas o ar roda ${b} — re-análise recomendada.`
+          : "O mapa descreve um commit diferente do que está no ar — re-análise recomendada.",
+    };
+  }
+
+  if (d.reason === "health-url-not-configured") return null;
+  const why = reasonText(d.reason);
+  return {
+    state: "unknown",
+    text: `Não deu para conferir se o mapa cobre o binário no ar${why ? ` — ${why}` : ""}.`,
+  };
+}
+
+/** O drift como linha de culpado (só faz sentido quando `status === "drift"`). */
+export function driftCulpritView(d?: DriftPayload | null): AxisView {
+  const a = shortSha(d?.analyzedSha);
+  const b = shortSha(d?.deployedSha);
+  const why = reasonText(d?.reason);
+  const bits = [why, a && b ? `analisado ${a} · no ar ${b}` : null].filter(Boolean) as string[];
+  return {
+    key: "drift",
+    label: CULPRIT_LABEL.drift,
+    status: "drift",
+    statusLabel: STATUS_LABEL.drift,
+    detail: bits.length ? bits.join(" · ") : null,
+    culprit: true,
+  };
+}
+
+/**
+ * Quem causou. A lista do SERVIDOR vence quando existe (autoridade única); o
+ * espelho local fica como retrocompatibilidade com servidor anterior ao campo.
+ * Culpado que o servidor nomeia e não reconhecemos vira linha mínima honesta —
+ * jamais é descartado em silêncio (senão o banner diria "degradado" sem dono).
+ */
+export function culpritViews(data: EvidenceHealthPayload | null | undefined, axes: AxisView[]): AxisView[] {
+  const server = data?.culprits;
+  if (Array.isArray(server)) {
+    return server.map((c) => {
+      if (c?.axis === "drift") return driftCulpritView(data?.drift);
+      const known = axes.find((a) => a.key === c?.axis);
+      if (known) return { ...known, culprit: true };
+      const status = normalizeStatus(c?.status);
+      return {
+        key: (c?.axis || "unknown") as CulpritKey,
+        label: typeof c?.axis === "string" ? c.axis : "eixo desconhecido",
+        status,
+        statusLabel: STATUS_LABEL[status],
+        detail: reasonText(c?.reason),
+        culprit: true,
+      };
+    });
+  }
+
+  // servidor antigo: espelho local (as MESMAS regras, aqui só como rede)
+  const mirrored = axes.filter((a) => a.culprit);
+  return data?.drift?.status === "drift" ? [...mirrored, driftCulpritView(data.drift)] : mirrored;
+}
+
 export type HealthState = "unavailable" | OverallHealth;
 
 export interface HealthHeadline {
@@ -170,8 +322,24 @@ export interface HealthHeadline {
   suspect: boolean;
   axes: AxisView[];
   culprits: AxisView[];
+  /** a linha "o mapa cobre o binário no ar?" — `null` = ficar calado. */
+  drift: DriftLine | null;
+  /**
+   * O lembrete do rodapé da página, quando `suspect`. Mora aqui porque depende
+   * de QUAL é a suspeita: com drift a evidência está chegando (só descreve
+   * outro commit), e repetir "a evidência não está chegando" mandaria o dono
+   * caçar um pipeline saudável.
+   */
+  suspectNote: string;
   generatedAt: string | null;
 }
+
+const NOTE_EVIDENCE_STOPPED =
+  "Lembrete: a evidência não está chegando normalmente — os números acima descrevem o último retrato conhecido.";
+const NOTE_UNKNOWN =
+  "Lembrete: não sabemos se a evidência está chegando — trate os números acima como um retrato de data desconhecida.";
+const NOTE_DRIFT =
+  "Lembrete: a evidência está chegando, mas sobre um commit diferente do que está no ar — re-analise o projeto.";
 
 /**
  * A manchete honesta da saúde. `overall` vem do servidor (autoridade); aqui só
@@ -180,8 +348,13 @@ export interface HealthHeadline {
  * nunca para assumir que está tudo bem.
  */
 export function healthHeadline(data?: EvidenceHealthPayload | null): HealthHeadline {
-  const axes = axisViews(data);
-  const culprits = axes.filter((a) => a.culprit);
+  const rawAxes = axisViews(data);
+  const culprits = culpritViews(data, rawAxes);
+  // os chips seguem a MESMA lista: chip destacado e linha de culpado não podem
+  // discordar (era o risco do espelho local vs. veredito do servidor).
+  const culpritKeys = new Set(culprits.map((c) => c.key));
+  const axes = rawAxes.map((a) => ({ ...a, culprit: culpritKeys.has(a.key) }));
+  const drift = driftLine(data?.drift);
   const generatedAt = typeof data?.generatedAt === "string" ? data.generatedAt : null;
 
   if (!data || (data.overall !== "healthy" && data.overall !== "degraded" && data.overall !== "starving")) {
@@ -193,6 +366,8 @@ export function healthHeadline(data?: EvidenceHealthPayload | null): HealthHeadl
       suspect: true,
       axes,
       culprits,
+      drift,
+      suspectNote: NOTE_UNKNOWN,
       generatedAt,
     };
   }
@@ -205,22 +380,30 @@ export function healthHeadline(data?: EvidenceHealthPayload | null): HealthHeadl
       suspect: true,
       axes,
       culprits,
+      drift,
+      suspectNote: NOTE_EVIDENCE_STOPPED,
       generatedAt,
     };
   }
 
   if (data.overall === "degraded") {
     const nomes = culprits.map((c) => c.label).join(", ");
+    // Drift SOZINHO não é "a evidência parou de chegar" — é o oposto: ela chega
+    // fresquinha, sobre o commit errado. Dizer a frase genérica mandaria o dono
+    // caçar um pipeline morto que está vivo.
+    const onlyDrift = culprits.length === 1 && culprits[0].key === "drift";
     return {
       state: "degraded",
-      headline:
-        culprits.length === 1
+      headline: onlyDrift
+        ? "O mapa não descreve o que está no ar"
+        : culprits.length === 1
           ? `A evidência parou de chegar em 1 eixo: ${nomes}`
           : culprits.length > 1
             ? `A evidência parou de chegar em ${culprits.length} eixos: ${nomes}`
             : "A evidência está degradada",
-      sub:
-        culprits.length === 1
+      sub: onlyDrift
+        ? "A evidência está chegando normalmente, mas sobre um commit que o ambiente já deixou para trás. Re-analise o projeto no commit que está no ar."
+        : culprits.length === 1
           ? "Enquanto esse eixo não voltar, os números abaixo descrevem o último retrato bom — não o agora."
           : culprits.length > 1
             ? "Enquanto esses eixos não voltarem, os números abaixo descrevem o último retrato bom — não o agora."
@@ -228,6 +411,8 @@ export function healthHeadline(data?: EvidenceHealthPayload | null): HealthHeadl
       suspect: true,
       axes,
       culprits,
+      drift,
+      suspectNote: onlyDrift ? NOTE_DRIFT : NOTE_EVIDENCE_STOPPED,
       generatedAt,
     };
   }
@@ -243,6 +428,8 @@ export function healthHeadline(data?: EvidenceHealthPayload | null): HealthHeadl
     suspect: false,
     axes,
     culprits,
+    drift,
+    suspectNote: "",
     generatedAt,
   };
 }
@@ -271,12 +458,34 @@ const TONE: Record<HealthState, { card: string; text: string; icon: typeof Check
   },
 };
 
-const AXIS_DOT: Record<AxisStatus, string> = {
+const AXIS_DOT: Record<ViewStatus, string> = {
   fresh: "bg-emerald-500",
   stale: "bg-amber-500",
   absent: "bg-slate-400",
   unknown: "bg-slate-400",
+  drift: "bg-amber-500",
+  "in-sync": "bg-emerald-500",
 };
+
+/** Ícone + palavra + cor: 3 canais também na linha de drift (WCAG 1.4.1). */
+const DRIFT_TONE: Record<DriftLine["state"], { icon: typeof CheckCircle2; className: string }> = {
+  "in-sync": { icon: GitCommitHorizontal, className: "text-emerald-700 dark:text-emerald-400" },
+  drift: { icon: AlertTriangle, className: "text-amber-800 dark:text-amber-300 font-medium" },
+  unknown: { icon: HelpCircle, className: "text-muted-foreground" },
+};
+
+/** A linha do eixo de drift. `null` do helper = renderiza NADA (silêncio honesto). */
+export function DriftLineRow({ line }: { line: DriftLine | null }) {
+  if (!line) return null;
+  const tone = DRIFT_TONE[line.state];
+  const Icon = tone.icon;
+  return (
+    <p className={`mt-2 flex items-start gap-1.5 text-xs ${tone.className}`} data-testid={`health-drift-${line.state}`}>
+      <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <span>{line.text}</span>
+    </p>
+  );
+}
 
 function AxisChip({ a }: { a: AxisView }) {
   return (
@@ -357,6 +566,9 @@ export function EvidenceHealthBanner({
                 agora.
               </p>
             )}
+
+            {/* o mapa cobre o binário que roda? (cala quando não dá para saber) */}
+            <DriftLineRow line={h.drift} />
 
             {/* faixa por eixo (sempre visível: quem está fresco também informa) */}
             <div className="mt-2.5 flex flex-wrap gap-1.5" data-testid="health-axes">

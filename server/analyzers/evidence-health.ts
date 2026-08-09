@@ -18,6 +18,11 @@
 //   analysis → analysisRuns (a análise que produz o systemGraph em que tudo
 //              o mais é mesclado)
 //
+// A esses quatro soma-se um eixo ORTOGONAL aos demais — `drift` (ver
+// evidence-drift.ts): os quatro dizem se a evidência ainda CHEGA; o drift diz
+// se o que foi analisado é o BINÁRIO QUE RODA. Um mapa pode estar impecável e
+// fresco descrevendo um commit que o ambiente já deixou para trás.
+//
 // ── Semântica dos estados (o que evita gritar lobo) ──────────────────────
 //   fresh   — houve evidência dentro da janela
 //   stale   — houve evidência, mas envelheceu além do limiar  ← O ALARME
@@ -40,6 +45,14 @@ import {
   projectOverlayConfig,
   type JaegerTrace,
 } from "./runtime-overlay";
+import {
+  analyzedRefFrom,
+  driftHealthFrom,
+  driftNotConfigured,
+  healthUrlOf,
+  probeDeployedSha,
+  type DriftHealth,
+} from "./evidence-drift";
 
 export type AxisStatus = "fresh" | "stale" | "absent" | "unknown";
 export type OverallHealth = "healthy" | "degraded" | "starving";
@@ -79,6 +92,24 @@ export interface AnalysisAxisHealth {
   reason?: string;
 }
 
+/** Quem pode ser acusado — os 4 eixos de freshness + a cobertura do binário. */
+export type CulpritAxis = "static" | "config" | "runtime" | "analysis" | "drift";
+
+/**
+ * Uma causa RESOLVIDA PELO SERVIDOR para o veredito não ser `healthy`.
+ *
+ * Existia antes só no cliente, espelhando à mão as regras daqui
+ * (`RUNTIME_DECLARED_BUT_EMPTY` duplicado em decision-health.tsx). Espelho é
+ * dívida: no dia em que a regra do servidor mudar, a tela nomeia o culpado
+ * errado — e alarme com endereço errado é pior que alarme sem endereço. Agora
+ * a autoridade é uma só; o cliente traduz.
+ */
+export interface Culprit {
+  axis: CulpritAxis;
+  status: string;
+  reason?: string;
+}
+
 export interface EvidenceHealth {
   projectId: number;
   generatedAt: string;
@@ -86,7 +117,11 @@ export interface EvidenceHealth {
   config: EdgeAxisHealth;
   runtime: RuntimeAxisHealth;
   analysis: AnalysisAxisHealth;
+  /** o mapa cobre o binário que RODA? (ver evidence-drift.ts) */
+  drift: DriftHealth;
   overall: OverallHealth;
+  /** vazio quando `healthy`; nunca ausente (leitor não precisa adivinhar). */
+  culprits: Culprit[];
 }
 
 // ─── Limiares (env-configuráveis, defaults sensatos) ───
@@ -174,6 +209,8 @@ export interface AnalysisRunLike {
   status?: string | null;
   startedAt?: Date | string | null;
   completedAt?: Date | string | null;
+  /** diagnóstico durável do run — de onde sai o `gitSha` do eixo de drift. */
+  diagnostics?: unknown;
 }
 
 function toIso(v: Date | string | null | undefined): string | null {
@@ -365,17 +402,59 @@ export function runtimeAxisHealthFrom(
  */
 const RUNTIME_DECLARED_BUT_EMPTY = new Set(["no-traces", "no-anchorable-traces"]);
 
-export function computeOverall(h: {
+export interface HealthAxes {
   static: EdgeAxisHealth;
   config: EdgeAxisHealth;
   runtime: RuntimeAxisHealth;
   analysis: AnalysisAxisHealth;
-}): OverallHealth {
+  /** opcional: relatórios anteriores ao eixo de drift seguem computando igual. */
+  drift?: DriftHealth | null;
+}
+
+/**
+ * Quem causou a degradação. É a ÚNICA definição de "culpado" do sistema —
+ * `computeOverall` deriva daqui, então veredito e lista nunca divergem.
+ *
+ * O drift só acusa quando as DUAS pontas foram medidas e discordam
+ * (`status === "drift"`). `unknown` — health não configurado, fora do ar, run
+ * sem carimbo — nunca entra: não saber se o mapa cobre o binário não é o mesmo
+ * que saber que não cobre.
+ */
+export function computeCulprits(h: HealthAxes): Culprit[] {
+  const out: Culprit[] = [];
+  const axes = [
+    ["static", h.static],
+    ["config", h.config],
+    ["runtime", h.runtime],
+    ["analysis", h.analysis],
+  ] as const;
+
+  for (const [axis, a] of axes) {
+    const declaredButEmpty = axis === "runtime" && !!a.reason && RUNTIME_DECLARED_BUT_EMPTY.has(a.reason);
+    if (a.stale || declaredButEmpty) {
+      out.push({ axis, status: a.status, ...(a.reason ? { reason: a.reason } : {}) });
+    }
+  }
+
+  if (h.drift?.status === "drift") {
+    out.push({ axis: "drift", status: "drift", reason: h.drift.reason ?? "sha-mismatch" });
+  }
+  return out;
+}
+
+/**
+ * `starving` — NENHUM eixo de freshness está fresco: o mapa não é alimentado.
+ * `degraded` — há culpado (eixo que parou, runtime declarado e vazio, ou o mapa
+ *              descrevendo um commit que não é o do ar).
+ * `healthy`  — o resto.
+ *
+ * Drift `unknown` NÃO piora o veredito, pela mesma razão que `jaeger-unreachable`
+ * não piora: indisponibilidade da SONDA não é falha do projeto.
+ */
+export function computeOverall(h: HealthAxes): OverallHealth {
   const axes = [h.static, h.config, h.runtime, h.analysis];
   if (!axes.some((a) => a.status === "fresh")) return "starving";
-  if (axes.some((a) => a.stale)) return "degraded";
-  if (h.runtime.reason && RUNTIME_DECLARED_BUT_EMPTY.has(h.runtime.reason)) return "degraded";
-  return "healthy";
+  return computeCulprits(h).length > 0 ? "degraded" : "healthy";
 }
 
 // ─── Orquestrador ───
@@ -415,11 +494,13 @@ export async function buildEvidenceHealth(
   const configAxis = edgeAxisHealth(project.configEdges ?? null, th.configHours, nowMs);
 
   let runs: AnalysisRunLike[] = [];
+  let runsFailed = false;
   let analysisAxis: AnalysisAxisHealth;
   try {
     runs = (await deps.getAnalysisRuns(projectId)) || [];
     analysisAxis = analysisAxisHealth(runs, th.analysisHours, nowMs);
   } catch {
+    runsFailed = true;
     analysisAxis = {
       thresholdHours: th.analysisHours, lastRunId: null, lastRunAt: null, lastRunStatus: null,
       ageHours: null, status: "unknown", stale: false, reason: "storage-error",
@@ -436,11 +517,34 @@ export async function buildEvidenceHealth(
     runtimeAxis = runtimeAxisHealthFrom(probe, cfg, th.runtimeHours, nowMs);
   }
 
-  const axes = { static: staticAxis, config: configAxis, runtime: runtimeAxis, analysis: analysisAxis };
+  // Eixo de drift: reusa os MESMOS runs já lidos acima (nenhuma consulta extra).
+  // `runs-unavailable` ≠ `no-analyzed-sha`: storage quebrado é "não perguntei",
+  // ausência de carimbo é "perguntei e não há" — motivos diferentes apontam
+  // consertos diferentes.
+  const analyzedRef = runsFailed
+    ? { sha: null, at: null, reason: "runs-unavailable" }
+    : analyzedRefFrom(runs);
+  const healthUrl = healthUrlOf(project);
+  let driftAxis: DriftHealth;
+  if (!healthUrl) {
+    driftAxis = driftNotConfigured(analyzedRef);
+  } else {
+    const deployed = await probeDeployedSha(healthUrl, { fetchFn: deps.fetchFn });
+    driftAxis = driftHealthFrom(analyzedRef, deployed);
+  }
+
+  const axes = {
+    static: staticAxis,
+    config: configAxis,
+    runtime: runtimeAxis,
+    analysis: analysisAxis,
+    drift: driftAxis,
+  };
   return {
     projectId,
     generatedAt: new Date(nowMs).toISOString(),
     ...axes,
     overall: computeOverall(axes),
+    culprits: computeCulprits(axes),
   };
 }

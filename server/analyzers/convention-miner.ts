@@ -278,7 +278,10 @@ export async function refreshMinedProfile(
       return { admitted: 0, total: 0 };
     }
     const project = (await storageLike.getProject(projectId)) as { conventionProfile?: unknown } | undefined;
-    let existing: { version: 1; rules: ConventionRule[]; source?: string } | null = null;
+    // os bags de config entram no tipo para o merge PODER preservá-los
+    let existing:
+      | { version: 1; rules: ConventionRule[]; source?: string; runtimeOverlay?: unknown; appInfo?: unknown }
+      | null = null;
     if (project?.conventionProfile) {
       try {
         // parse fail-closed do armazenado; inválido não bloqueia o refresh
@@ -305,9 +308,11 @@ export async function refreshMinedProfile(
  * MESMO id vence (manual/curada > minerada — nunca sobrescreve em silêncio).
  */
 export function mergeMinedIntoProfile(
-  existing: { version: 1; rules: ConventionRule[]; source?: string } | null,
+  existing:
+    | { version: 1; rules: ConventionRule[]; source?: string; runtimeOverlay?: unknown; appInfo?: unknown }
+    | null,
   admitted: ConventionRule[],
-): { version: 1; rules: ConventionRule[]; source: string; updatedAt: string } {
+): { version: 1; rules: ConventionRule[]; source: string; updatedAt: string; runtimeOverlay?: unknown; appInfo?: unknown } {
   const base = existing?.rules ?? [];
   const existingIds = new Set(base.map((r) => r.id));
   const merged = [...base, ...admitted.filter((r) => !existingIds.has(r.id))];
@@ -316,5 +321,11 @@ export function mergeMinedIntoProfile(
     rules: merged,
     source: existing?.source ? `${existing.source}+statistical` : "statistical",
     updatedAt: new Date().toISOString(),
+    // Os bags de CONFIG do projeto (endereço do Jaeger, URL de health) não são
+    // regras mineráveis — mas moram no mesmo JSONB. Reconstruir o perfil sem
+    // eles APAGAVA a configuração a cada mineração, em silêncio: o overlay ia
+    // a zero e o drift ficava cego sem ninguém ter mexido em config.
+    ...(existing?.runtimeOverlay ? { runtimeOverlay: existing.runtimeOverlay } : {}),
+    ...(existing?.appInfo ? { appInfo: existing.appInfo } : {}),
   };
 }

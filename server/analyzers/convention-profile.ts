@@ -90,6 +90,19 @@ export interface ConventionProfile {
     gatewayService?: string;
     [k: string]: unknown;
   };
+  /**
+   * Onde o sistema RODA (por projeto — uma instância do Manifest serve vários).
+   * Hoje só `healthUrl`: o endpoint que devolve `{ commit }` e permite medir se
+   * o mapa cobre o binário no ar (eixo `drift` do /evidence-health).
+   *
+   * Mesmo motivo do bag acima para estar aqui: sem passthrough explícito, o
+   * parser descartaria a chave em silêncio e a config seria IMPOSSÍVEL de
+   * salvar pela API — o eixo nasceria morto sem ninguém entender por quê.
+   */
+  appInfo?: {
+    healthUrl?: string;
+    [k: string]: unknown;
+  };
 }
 
 const KINDS: ReadonlySet<string> = new Set([
@@ -218,12 +231,30 @@ export function parseConventionProfile(raw: unknown): ConventionProfile {
     runtimeOverlay = ro as ConventionProfile["runtimeOverlay"];
   }
 
+  // Mesmo contrato do bag acima: preserva `appInfo` (write-side do eixo de
+  // drift). Fail-closed leve — `healthUrl`, se vier, tem de ser http(s): uma
+  // URL inválida aqui viraria "não deu para perguntar" para sempre, e o dono
+  // nunca saberia que o erro é a própria config.
+  let appInfo: ConventionProfile["appInfo"] | undefined;
+  if (o.appInfo != null) {
+    const ai = o.appInfo;
+    if (typeof ai !== "object" || Array.isArray(ai)) {
+      throw new Error("appInfo deve ser um objeto");
+    }
+    const url = (ai as Record<string, unknown>).healthUrl;
+    if (url !== undefined && (typeof url !== "string" || !/^https?:\/\/\S+$/i.test(url.trim()))) {
+      throw new Error("appInfo.healthUrl deve ser uma URL http(s)");
+    }
+    appInfo = ai as ConventionProfile["appInfo"];
+  }
+
   return {
     version: 1,
     rules,
     ...(typeof o.source === "string" ? { source: o.source } : {}),
     ...(typeof o.updatedAt === "string" ? { updatedAt: o.updatedAt } : {}),
     ...(runtimeOverlay ? { runtimeOverlay } : {}),
+    ...(appInfo ? { appInfo } : {}),
   };
 }
 

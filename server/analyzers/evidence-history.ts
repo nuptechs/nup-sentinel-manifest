@@ -37,6 +37,7 @@
 //
 // Puro + injeção de dependência: sem express, sem storage, sem rede.
 // ─────────────────────────────────────────────────────────────────────────
+import { gitShaFromDiagnostics } from "./evidence-drift";
 
 /** Teto de pontos por request (o `?limit=` é aparado a isto). */
 export const MAX_HISTORY_POINTS = 365;
@@ -98,6 +99,13 @@ export interface EvidenceHistoryPoint {
   completedAt: string | null;
   /** presente só quando o run falhou (a falha é parte da história). */
   failed?: true;
+  /**
+   * QUAL commit este ponto mediu. `null` em run que não recebeu carimbo (todo
+   * run anterior a este campo, e qualquer chamador que não informe `gitSha`).
+   * Transforma a série de "melhorou" em "melhorou ENTRE tais commits" — e é o
+   * que deixa correlacionar uma queda de cobertura com o que foi mergeado.
+   */
+  gitSha: string | null;
   /** `null` = run anterior ao registro do resumo (nunca fabricar zero). */
   coverage: EvidenceCoverageSummary | null;
   overlay: EvidenceOverlayPoint | null;
@@ -242,6 +250,7 @@ export function historyPoint(run: AnalysisRunLike): EvidenceHistoryPoint {
     startedAt: iso(run.startedAt),
     completedAt: iso(run.completedAt),
     ...(failed ? { failed: true as const } : {}),
+    gitSha: gitShaFromDiagnostics(run.diagnostics),
     coverage: ev?.coverage ?? null,
     overlay: overlayFromDiagnostics(run.diagnostics),
     bimr: ev?.bimr ?? null,
