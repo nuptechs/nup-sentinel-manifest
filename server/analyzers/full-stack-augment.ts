@@ -13,6 +13,7 @@
 import { ApplicationGraph, GraphNode, GraphEdge } from "./application-graph";
 import type { FrontendInteraction } from "./frontend-analyzer";
 import type { ExpressRoute } from "./node-backend/express-routes";
+import { extractDrizzleEntities } from "./node-backend/drizzle-schema";
 import { toSnakeCase } from "./nuptechs-conventions";
 import { nodeBackendType } from "./canonical-model";
 
@@ -21,6 +22,8 @@ export interface FullStackAugmentResult {
   routes: number;
   edges: number;
   nodeModules?: number;
+  /** nós ENTITY criados de `pgTable(...)` declarados no schema Drizzle (Furo 2). */
+  drizzleDeclared?: number;
 }
 
 /** Normaliza um path Express (`/api/x/:id`) em segmentos comparáveis. */
@@ -72,6 +75,31 @@ export function augmentGraphWithFullStack(
   const entityByTable = new Map<string, string>();
   for (const n of graph.getNodesByType("ENTITY")) {
     entityByTable.set(toSnakeCase(n.className), n.id);
+  }
+
+  // ENTIDADES DRIZZLE DECLARADAS (Furo 2 da auditoria 2026-08-10): materializa
+  // um nó ENTITY `table:<nome>` para CADA `pgTable("nome", …)` do schema — o
+  // modelo declarado, análogo a TODA classe @Entity do Java virar nó. Antes, um
+  // nó `table:*` só nascia quando um HANDLER DE ROTA tocava a tabela; uma tabela
+  // do schema tocada só em job/worker/serviço-fora-de-rota (ex.: `access_requests`
+  // no `retention-cleanup.ts` do NuPIdentify) ficava SEM nó → o overlay de
+  // runtime a mintava como "invisível ao código", inflando o BIMR (9/9 falsos
+  // pontos cegos no identify, todos COM `pgTable`). Estes nós são DECLARADOS
+  // (`drizzleDeclared`, NÃO synthetic/runtimeOnly) — o BIMR os conta como
+  // resolvidos e o overlay casa em vez de mintar. Idempotente: se a entidade já
+  // existe (Java @Entity de mesmo nome, ou já criada), preserva o nó existente.
+  let drizzleDeclared = 0;
+  for (const ent of extractDrizzleEntities(fileData)) {
+    const table = toSnakeCase(ent.entity);
+    if (!table || entityByTable.has(table)) continue;
+    const id = `table:${table}`;
+    if (!graph.getNode(id)) {
+      graph.addNode(new GraphNode(id, "ENTITY", table, null, null, {
+        drizzleDeclared: true, sourceFile: ent.sourceFile,
+      }));
+      drizzleDeclared++;
+    }
+    entityByTable.set(table, id);
   }
   let nodeModules = 0;
   const mintNodeModule = (fileFn: string): string | null => {
@@ -207,7 +235,7 @@ export function augmentGraphWithFullStack(
     }
   }
 
-  return { views, routes: routesAdded, edges, nodeModules };
+  return { views, routes: routesAdded, edges, nodeModules, drizzleDeclared };
 }
 
 // ─── Onda 6b (ADR-0025): resolvedor da CAMADA DE API do frontend ───
