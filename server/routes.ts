@@ -630,6 +630,19 @@ export async function registerRoutes(
     }
   });
 
+  // Resposta de projeto pro CLIENTE: sem os overlays jsonb (scip_edges/
+  // config_edges chegam a centenas de MB — servir isso derrubava a rota com
+  // 502) e sem segredos (git_token_encrypted, webhook_secret). O pipeline
+  // interno continua lendo o registro completo via storage.getProject.
+  function toClientProject<T extends Record<string, unknown>>(project: T) {
+    const { scipEdges, configEdges, gitTokenEncrypted, webhookSecret, ...safe } =
+      project as T & {
+        scipEdges?: unknown; configEdges?: unknown;
+        gitTokenEncrypted?: unknown; webhookSecret?: unknown;
+      };
+    return safe;
+  }
+
   app.get("/api/projects", async (_req, res) => {
     try {
       const projects = await storage.getProjects();
@@ -648,7 +661,7 @@ export async function registerRoutes(
       if (!project) {
         return res.status(404).json({ message: "Project not found" });
       }
-      res.json(project);
+      res.json(toClientProject(project));
     } catch (error) {
       console.error("Error fetching project:", error);
       res.status(500).json({ message: "Failed to fetch project" });
@@ -684,7 +697,7 @@ export async function registerRoutes(
 
       await storage.updateProjectStatus(project.id, "uploaded", files.length);
 
-      res.status(201).json(project);
+      res.status(201).json(toClientProject(project));
     } catch (error) {
       console.error("Error creating project:", error);
       res.status(500).json({ message: "Failed to create project" });

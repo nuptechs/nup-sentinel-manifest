@@ -27,12 +27,38 @@ import {
   type InsertUser,
 } from "@shared/schema";
 
+// A lista de projetos NÃO carrega os overlays jsonb (`scip_edges`/`config_edges`
+// chegam a centenas de MB por projeto — o select completo matava GET
+// /api/projects com 502 no edge) nem os segredos (`git_token_encrypted`,
+// `webhook_secret`). Quem precisa dos overlays lê o projeto individual via
+// storage.getProject (uso interno do pipeline).
+export type ProjectSummary = Omit<
+  Project,
+  "scipEdges" | "configEdges" | "gitTokenEncrypted" | "webhookSecret"
+>;
+
+const projectSummaryColumns = {
+  id: projects.id,
+  name: projects.name,
+  description: projects.description,
+  status: projects.status,
+  fileCount: projects.fileCount,
+  gitProvider: projects.gitProvider,
+  gitRepoUrl: projects.gitRepoUrl,
+  gitDefaultBranch: projects.gitDefaultBranch,
+  gitTokenRef: projects.gitTokenRef,
+  webhookEnabled: projects.webhookEnabled,
+  businessOntology: projects.businessOntology,
+  conventionProfile: projects.conventionProfile,
+  createdAt: projects.createdAt,
+};
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
 
-  getProjects(): Promise<Project[]>;
+  getProjects(): Promise<ProjectSummary[]>;
   getProject(id: number): Promise<Project | undefined>;
   getProjectByName(name: string): Promise<Project | undefined>;
   createProject(project: InsertProject): Promise<Project>;
@@ -103,8 +129,12 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
-  async getProjects(): Promise<Project[]> {
-    return db.select().from(projects).orderBy(desc(projects.createdAt));
+  async getProjects(): Promise<ProjectSummary[]> {
+    const rows = await db
+      .select(projectSummaryColumns)
+      .from(projects)
+      .orderBy(desc(projects.createdAt));
+    return rows as ProjectSummary[];
   }
 
   async getProject(id: number): Promise<Project | undefined> {
