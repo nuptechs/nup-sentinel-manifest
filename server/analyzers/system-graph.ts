@@ -80,6 +80,16 @@ export interface ShapedNode {
   runtimeHot?: boolean;
   runtimeCount?: number;
   /**
+   * Furo 4 (2026-08-10) — last-known-good: `runtimeStale` = observado numa janela
+   * ANTERIOR (herdado por LKG dentro do TTL), NÃO nesta análise. Segue contando como
+   * RUNTIME_OBSERVED (foi observado de fato), mas a tela/health mostram "há Xh" em vez
+   * de "agora" — reconcilia graph(snapshot) × health(hub) sem apagar o runtime bom.
+   * `runtimeLastSeenMs` = epoch (ms) da última observação real. class-level: stale só
+   * se TODOS os membros hot forem stale (qualquer membro fresh → classe fresh).
+   */
+  runtimeStale?: boolean;
+  runtimeLastSeenMs?: number;
+  /**
    * ADR-0028 P0.1 — nó EXERCITADO por tráfego (espelha `runtimeHot`; presente só
    * quando true). Alimenta o censo `coverage.nodes.observed`.
    */
@@ -268,11 +278,16 @@ function readRefutation(m: Record<string, unknown>): EdgeRefutation | undefined 
 }
 
 /** Lê os campos de runtime (costura ADR-0026) do metadata cru de um nó. */
-function runtimeOf(n: RawSystemNode): { runtimeHot?: boolean; runtimeCount?: number } {
+function runtimeOf(n: RawSystemNode): { runtimeHot?: boolean; runtimeCount?: number; runtimeStale?: boolean; runtimeLastSeenMs?: number } {
   const m = (n.metadata || {}) as Record<string, unknown>;
   if (m.runtimeHot !== true) return {};
   const count = typeof m.runtimeCount === 'number' ? (m.runtimeCount as number) : undefined;
-  return { runtimeHot: true, ...(count ? { runtimeCount: count } : {}) };
+  // Furo 4 — transparência do last-known-good: `runtimeStale` = observado numa janela
+  // ANTERIOR (herdado por LKG), não nesta. `runtimeLastSeenMs` = quando foi visto.
+  // Segue RUNTIME_OBSERVED (FOI observado), mas a tela/health mostram "há Xh".
+  const stale = m.runtimeStale === true ? true : undefined;
+  const lastSeen = typeof m.runtimeLastSeenMs === 'number' ? (m.runtimeLastSeenMs as number) : undefined;
+  return { runtimeHot: true, ...(count ? { runtimeCount: count } : {}), ...(stale ? { runtimeStale: true } : {}), ...(lastSeen ? { runtimeLastSeenMs: lastSeen } : {}) };
 }
 function entryPointOf(node: RawSystemNode): string | undefined {
   const ep = node.metadata?.entryPoint;
@@ -472,7 +487,7 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
 }
 
 function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
-  interface Agg { id: string; type: string; className: string; sensitive: boolean; sourceFile?: string; members: number; entryPoints: Set<string>; runtimeHot: boolean; runtimeCount: number; }
+  interface Agg { id: string; type: string; className: string; sensitive: boolean; sourceFile?: string; members: number; entryPoints: Set<string>; runtimeHot: boolean; runtimeCount: number; runtimeFresh: boolean; runtimeLastSeenMs: number; }
   const classes = new Map<string, Agg>();
   const keyOf = new Map<string, string>();
   for (const n of raw.nodes) {
@@ -480,14 +495,21 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
     keyOf.set(n.id, key);
     let c = classes.get(key);
     if (!c) {
-      c = { id: key, type: n.type, className: n.className || classNameFromKey(key), sensitive: false, members: 0, entryPoints: new Set(), runtimeHot: false, runtimeCount: 0 };
+      c = { id: key, type: n.type, className: n.className || classNameFromKey(key), sensitive: false, members: 0, entryPoints: new Set(), runtimeHot: false, runtimeCount: 0, runtimeFresh: false, runtimeLastSeenMs: 0 };
       classes.set(key, c);
     }
     c.members += 1;
     if (isSensitive(n)) c.sensitive = true;
-    // costura ADR-0026: qualquer membro exercitado por tráfego marca a classe hot
+    // costura ADR-0026: qualquer membro exercitado por tráfego marca a classe hot.
+    // Furo 4: a classe é STALE só se NENHUM membro hot for fresh (membro visto nesta
+    // janela → runtimeStale ausente → fresh). Guarda o lastSeen mais recente.
     const rt = runtimeOf(n);
-    if (rt.runtimeHot) { c.runtimeHot = true; c.runtimeCount += rt.runtimeCount || 0; }
+    if (rt.runtimeHot) {
+      c.runtimeHot = true;
+      c.runtimeCount += rt.runtimeCount || 0;
+      if (rt.runtimeStale !== true) c.runtimeFresh = true;
+      if (rt.runtimeLastSeenMs) c.runtimeLastSeenMs = Math.max(c.runtimeLastSeenMs, rt.runtimeLastSeenMs);
+    }
     const ep = entryPointOf(n);
     if (ep) c.entryPoints.add(ep); // Onda 4: qualquer método-gatilho marca a classe
     // prefere nome/arquivo do nó de CLASSE (sem parêntese); senão o 1º arquivo visto
@@ -534,7 +556,7 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
       inDegree: inDegree[c.id] || 0, outDegree: outDegree[c.id] || 0,
       sensitive: c.sensitive, sourceFile: c.sourceFile, memberCount: c.members,
       ...(c.entryPoints.size ? { entryPoint: Array.from(c.entryPoints) } : {}),
-      ...(c.runtimeHot ? { runtimeHot: true, ...(c.runtimeCount ? { runtimeCount: c.runtimeCount } : {}) } : {}),
+      ...(c.runtimeHot ? { runtimeHot: true, ...(c.runtimeCount ? { runtimeCount: c.runtimeCount } : {}), ...(!c.runtimeFresh ? { runtimeStale: true } : {}), ...(c.runtimeLastSeenMs ? { runtimeLastSeenMs: c.runtimeLastSeenMs } : {}) } : {}),
       ...(observed ? { observed: true } : {}),
       ...canonicalFacet({ id: c.id, type: c.type, className: c.className, sourceFile: c.sourceFile }, byLayer, byStack),
       evidence: classifyNodeEvidence(observed),

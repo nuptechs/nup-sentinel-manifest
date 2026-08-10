@@ -276,11 +276,24 @@ export class AnalysisPipeline {
           );
           diag.overlay = { status: "off", reason: "sem jaegerUrl (env/projeto)" };
         } else {
+          // Furo 4 (last-known-good): carrega os nós do snapshot ANTERIOR p/ herdar a
+          // observação recente de runtime — impede que uma análise em janela QUIETA
+          // (cron 3h, pouco tráfego) apague o `RUNTIME_OBSERVED` bom. Fail-soft: sem
+          // snapshot anterior → previousNodes=[] → sem carry-forward (byte-a-byte).
+          let previousNodes: any[] = [];
+          try {
+            const prevSnaps = await storage.getAnalysisSnapshots(projectId);
+            const prevG = ((prevSnaps?.[0]?.manifestJson as any) || {}).systemGraph;
+            if (prevG && Array.isArray(prevG.nodes)) previousNodes = prevG.nodes;
+          } catch (e) {
+            this.progress("Step 3/4", `Runtime overlay LKG: snapshot anterior indisponível (fail-soft): ${(e as Error)?.message || e}`);
+          }
           // Orquestrador único: par rota→tabela (traço completo) + mapeamento
           // DIRETO tabela→ENTITY (traço fragmento). Loga SEMPRE (config, traços,
           // spans-DB, arestas por caminho). Mesmo caminho que o teste exercita.
           const summary = await runRuntimeOverlay(appGraph, cfg, {
             onLog: (m) => this.progress("Step 3/4", m),
+            previousNodes,
           });
           diag.overlay = {
             status: "ran",

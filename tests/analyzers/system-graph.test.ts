@@ -2,6 +2,28 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { shapeSystemGraph, classKeyOf } from "../../server/analyzers/system-graph";
 
+describe("Furo 4 — runtimeStale propaga no nível class (stale só se nenhum membro fresh)", () => {
+  const hot = (id: string, stale: boolean, lastSeen: number) => ({
+    id, type: "ENTITY", className: "Acc",
+    metadata: { runtimeHot: true, runtimeCount: 1, runtimeLastSeenMs: lastSeen, ...(stale ? { runtimeStale: true } : {}) },
+  });
+  it("classe com só membros STALE → runtimeStale=true (herdado, não visto nesta janela)", () => {
+    const raw = { nodes: [hot("ENTITY:d.Acc", true, 100), hot("ENTITY:d.Acc::Acc#getX", true, 200)], edges: [] };
+    const shaped = shapeSystemGraph(raw as never, "class");
+    const acc = shaped.nodes.find((n) => n.id === "ENTITY:d.Acc")!;
+    assert.equal(acc.runtimeHot, true);
+    assert.equal(acc.runtimeStale, true);           // nenhum membro fresh → classe stale
+    assert.equal(acc.runtimeLastSeenMs, 200);        // o lastSeen mais recente dos membros
+  });
+  it("QUALQUER membro fresh → classe NÃO é stale (fresh vence)", () => {
+    const raw = { nodes: [hot("ENTITY:d.Acc", true, 100), hot("ENTITY:d.Acc::Acc#getX", false, 500)], edges: [] };
+    const shaped = shapeSystemGraph(raw as never, "class");
+    const acc = shaped.nodes.find((n) => n.id === "ENTITY:d.Acc")!;
+    assert.equal(acc.runtimeHot, true);
+    assert.equal(acc.runtimeStale, undefined);       // 1 membro fresh → classe fresh
+  });
+});
+
 describe("classKeyOf", () => {
   it("classe permanece; método vira a classe dona", () => {
     assert.equal(classKeyOf("REPOSITORY:a.b.ContractRepository"), "REPOSITORY:a.b.ContractRepository");
