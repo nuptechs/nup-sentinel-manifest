@@ -319,6 +319,34 @@ function emptyEdgeByMethod(): Record<EvidenceMethod, number> {
   return { RUNTIME_OBSERVED: 0, STATIC_PROVEN: 0, CONFIG_PROVEN: 0, STATIC_UNRESOLVED: 0, LLM_CONJECTURED: 0, UNKNOWN: 0 };
 }
 
+/**
+ * Furo 3 (2026-08-10) — CENSO EPISTÊMICO INVARIANTE DE VIEW.
+ *
+ * O `coverage.edges.byMethod` (quantas arestas são RUNTIME_OBSERVED/STATIC_PROVEN/…)
+ * é um FATO DO CÓDIGO — "quanto do sistema o compilador/tráfego prova" — e NÃO pode
+ * depender de como o mapa é desenhado. Antes, o nível `class` computava o censo sobre
+ * as arestas JÁ DEDUPADAS (uma `Service→Entity` no lugar de N `Service→Entity#getX`),
+ * então trocar de zoom method→class encolhia o STATIC_PROVEN de ~3085 p/ ~1040 — o
+ * mesmo número-vitrine mudava só por mudar a lente. Isso era um bug latente do censo.
+ *
+ * Agora o censo é medido SEMPRE sobre a aresta CRUA do scip (o par função→função /
+ * função→membro que o compilador provou), idêntico nos dois níveis. O `counts.edges`
+ * segue sendo o MAPA (relações de arquitetura dedupadas no nível class) — são
+ * perguntas diferentes: `counts.edges` = "o que aparece na tela"; `coverage.edges.total`
+ * = "quantas chamadas o compilador provou". No nível class, `total` ≥ `counts.edges`.
+ */
+function computeRawCensus(raw: RawSystemGraph): { byMethod: Record<EvidenceMethod, number>; total: number } {
+  const nodeIds = new Set(raw.nodes.map((n) => n.id));
+  const byMethod = emptyEdgeByMethod();
+  let total = 0;
+  for (const e of raw.edges || []) {
+    if (!nodeIds.has(e.fromNode) || !nodeIds.has(e.toNode)) continue;
+    byMethod[classifyEdgeEvidence(edgeProvenance(e)).method] += 1;
+    total += 1;
+  }
+  return { byMethod, total };
+}
+
 /** Monta o censo `coverage` (aritmética de divisão-por-zero segura). */
 function buildCoverage(
   byMethod: Record<EvidenceMethod, number>,
@@ -406,14 +434,12 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
   const inDegree: Record<string, number> = {};
   const outDegree: Record<string, number> = {};
   const edges: ShapedEdge[] = [];
-  const byMethod = emptyEdgeByMethod(); // ADR-0028 P0.1 — censo de arestas
   for (const e of raw.edges || []) {
     if (!nodeIds.has(e.fromNode) || !nodeIds.has(e.toNode)) continue;
     inDegree[e.toNode] = (inDegree[e.toNode] || 0) + 1;
     outDegree[e.fromNode] = (outDegree[e.fromNode] || 0) + 1;
     const prov = edgeProvenance(e);
     const evidence = classifyEdgeEvidence(prov);
-    byMethod[evidence.method] += 1;
     edges.push({ fromNode: e.fromNode, toNode: e.toNode, relationType: e.relationType, ...prov, evidence });
   }
   const byType: Record<string, number> = {};
@@ -438,7 +464,10 @@ function shapeMethodLevel(raw: RawSystemGraph): ShapedGraph {
       evidence: classifyNodeEvidence(observed),
     };
   });
-  const coverage = buildCoverage(byMethod, edges.length, nodesObserved, nodes.length);
+  // Furo 3: censo pela mesma fonte do nível class (invariante de view). No method-level
+  // o mapa == aresta crua, então `census.total === edges.length` aqui (byte-a-byte).
+  const census = computeRawCensus(raw);
+  const coverage = buildCoverage(census.byMethod, census.total, nodesObserved, nodes.length);
   return { level: 'method', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, byLayer, byStack, coverage, nodes, edges };
 }
 
@@ -476,7 +505,8 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
   const inDegree: Record<string, number> = {};
   const outDegree: Record<string, number> = {};
   const edges: ShapedEdge[] = [];
-  const byMethod = emptyEdgeByMethod(); // ADR-0028 P0.1 — censo (arestas de classe já dedup)
+  // O MAPA de classe dedupa `Service→Entity` (self-loops e arestas repetidas somem).
+  // O CENSO epistêmico NÃO — ele mede a aresta crua (Furo 3, `computeRawCensus`).
   for (const e of raw.edges || []) {
     const a = keyOf.get(e.fromNode);
     const b = keyOf.get(e.toNode);
@@ -488,7 +518,6 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
     outDegree[a] = (outDegree[a] || 0) + 1;
     const prov = edgeProvenance(e);
     const evidence = classifyEdgeEvidence(prov);
-    byMethod[evidence.method] += 1;
     edges.push({ fromNode: a, toNode: b, relationType: e.relationType, ...prov, evidence });
   }
 
@@ -511,6 +540,8 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
       evidence: classifyNodeEvidence(observed),
     };
   });
-  const coverage = buildCoverage(byMethod, edges.length, nodesObserved, nodes.length);
+  // Furo 3: censo sobre a aresta CRUA (invariante de view), não sobre o mapa dedup.
+  const census = computeRawCensus(raw);
+  const coverage = buildCoverage(census.byMethod, census.total, nodesObserved, nodes.length);
   return { level: 'class', truncated: !!raw.truncated, ...(raw.inventory ? { inventory: raw.inventory } : {}), counts: { nodes: nodes.length, edges: edges.length, byType }, byLayer, byStack, coverage, nodes, edges };
 }

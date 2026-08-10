@@ -44,6 +44,40 @@ describe("classKeyOf", () => {
     assert.equal(shaped.counts.byType.ENTITY, 1); // NÃO 4
     assert.equal(shaped.nodes.filter((n) => n.type === "ENTITY").length, 1);
   });
+
+  it("Furo 3 (censo): STATIC_PROVEN é INVARIANTE de view — colapsar o mapa NÃO encolhe a prova", () => {
+    // Um Service que chama 3 acessores da MESMA entidade: o scip prova 3 chamadas.
+    // O MAPA de classe dedupa em 1 aresta Service→Entity (relação de arquitetura),
+    // mas o CENSO epistêmico DEVE seguir contando as 3 chamadas provadas — senão
+    // trocar de zoom encolhia o número-vitrine STATIC_PROVEN (o bug do Furo 3).
+    const raw = {
+      nodes: [
+        { id: "SERVICE:d.Svc#run", type: "SERVICE", className: "Svc" },
+        { id: "ENTITY:d.Acc", type: "ENTITY", className: "Acc" },
+        { id: "ENTITY:d.Acc::Acc#getA", type: "ENTITY", className: "Acc" },
+        { id: "ENTITY:d.Acc::Acc#getB", type: "ENTITY", className: "Acc" },
+        { id: "ENTITY:d.Acc::Acc#getC", type: "ENTITY", className: "Acc" },
+      ],
+      edges: [
+        { fromNode: "SERVICE:d.Svc#run", toNode: "ENTITY:d.Acc::Acc#getA", relationType: "CALLS", metadata: { resolution: "compiler" } },
+        { fromNode: "SERVICE:d.Svc#run", toNode: "ENTITY:d.Acc::Acc#getB", relationType: "CALLS", metadata: { resolution: "compiler" } },
+        { fromNode: "SERVICE:d.Svc#run", toNode: "ENTITY:d.Acc::Acc#getC", relationType: "CALLS", metadata: { resolution: "compiler" } },
+      ],
+    };
+    const cls = shapeSystemGraph(raw as never, "class");
+    const mth = shapeSystemGraph(raw as never, "method");
+    // O MAPA de classe dedupa: 1 aresta Svc→Acc (relação de arquitetura).
+    assert.equal(cls.counts.edges, 1);
+    // O CENSO conta as 3 chamadas provadas — NÃO 1 (falha no código velho, que
+    // media byMethod sobre as arestas dedupadas).
+    assert.equal(cls.coverage.edges.byMethod.STATIC_PROVEN, 3);
+    assert.equal(cls.coverage.edges.total, 3);
+    // INVARIÂNCIA: o censo é o MESMO em class e method (é fato do código, não do zoom).
+    assert.deepEqual(cls.coverage.edges.byMethod, mth.coverage.edges.byMethod);
+    assert.equal(cls.coverage.edges.total, mth.coverage.edges.total);
+    // Entidade agrega em 1 nó (Furo 3 dos nós, intacto).
+    assert.equal(cls.counts.byType.ENTITY, 1);
+  });
 });
 
 describe("shapeSystemGraph — level=class (agregação por classe)", () => {
