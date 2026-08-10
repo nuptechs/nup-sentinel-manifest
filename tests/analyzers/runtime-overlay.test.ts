@@ -5,6 +5,8 @@ import {
   applyRuntimeOverlay,
   fetchRecentTraces,
   fetchRecentTracesWithReport,
+  carryForwardRuntime,
+  DEFAULT_RUNTIME_LKG_TTL_MS,
   type JaegerTrace,
 } from "../../server/analyzers/runtime-overlay";
 import { ApplicationGraph, GraphNode } from "../../server/analyzers/application-graph";
@@ -145,6 +147,87 @@ describe("ADR-0026 costura — applyRuntimeOverlay (merge no grafo)", () => {
     assert.equal(after1, 1);
     assert.equal(after2, 1); // não duplicou
     assert.equal(r2.entityEdges, 0); // 2ª passada não conta a aresta já existente
+  });
+});
+
+describe("Furo 4 (2026-08-10) — last-known-good do runtime (carryForwardRuntime)", () => {
+  const NOW = 1_700_000_000_000; // epoch fixo (função pura, sem relógio)
+  // snapshot ANTERIOR: 3 entidades observadas (1 recente, 1 no limite do TTL, 1 velha).
+  const prior = (lastSeenMs: number, extra: Record<string, unknown> = {}) => ({
+    id: `ENTITY:d.Acc`, type: "ENTITY", className: "Acc",
+    metadata: { runtimeHot: true, runtimeCount: 42, runtimeLastSeenMs: lastSeenMs, ...extra },
+  });
+
+  it("REGRESSÃO: janela quieta NÃO apaga o runtime bom — nó recente é herdado (stale)", () => {
+    // Grafo reconstruído do estático (a entidade existe, mas FRIA — a janela não a viu).
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("ENTITY:d.Acc", "ENTITY", "Acc", null, null, {}));
+    const prev = [prior(NOW - 3600_000)]; // observado 1h atrás
+    const r = carryForwardRuntime(g, prev, NOW, DEFAULT_RUNTIME_LKG_TTL_MS);
+    const md = g.getNode("ENTITY:d.Acc")!.metadata as Record<string, unknown>;
+    assert.equal(r.carried, 1);
+    assert.equal(md.runtimeHot, true);      // NÃO ficou fria (o bug era virar 0)
+    assert.equal(md.runtimeStale, true);    // mas TRANSPARENTE: observado antes, não agora
+    assert.equal(md.runtimeCount, 42);      // preserva a contagem real
+    assert.equal(md.runtimeLastSeenMs, NOW - 3600_000); // preserva o "quando" REAL
+  });
+
+  it("DECAIMENTO: nó não observado há mais que o TTL → NÃO herda (não afirma 'observado')", () => {
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("ENTITY:d.Acc", "ENTITY", "Acc", null, null, {}));
+    const prev = [prior(NOW - DEFAULT_RUNTIME_LKG_TTL_MS - 1)]; // 1ms além do TTL
+    const r = carryForwardRuntime(g, prev, NOW, DEFAULT_RUNTIME_LKG_TTL_MS);
+    assert.equal(r.decayed, 1);
+    assert.equal(r.carried, 0);
+    assert.equal((g.getNode("ENTITY:d.Acc")!.metadata as Record<string, unknown>).runtimeHot, undefined);
+  });
+
+  it("FRESH VENCE: nó já observado NESTA janela não vira stale (freshKept)", () => {
+    const g = new ApplicationGraph();
+    // reconstruído E já marcado hot pela janela atual (fresh, sem stale).
+    g.addNode(new GraphNode("ENTITY:d.Acc", "ENTITY", "Acc", null, null, { runtimeHot: true, runtimeCount: 5, runtimeLastSeenMs: NOW }));
+    const r = carryForwardRuntime(g, [prior(NOW - 3600_000)], NOW, DEFAULT_RUNTIME_LKG_TTL_MS);
+    const md = g.getNode("ENTITY:d.Acc")!.metadata as Record<string, unknown>;
+    assert.equal(r.freshKept, 1);
+    assert.equal(r.carried, 0);
+    assert.equal(md.runtimeStale, undefined); // fresh não recebe marca de stale
+    assert.equal(md.runtimeCount, 5);         // fresh vence: mantém o count da janela
+  });
+
+  it("RE-MINTA nó runtimeOnly que sumiu do estático (tabela/db-fragment)", () => {
+    const g = new ApplicationGraph(); // grafo vazio — o nó mintado não existe no rebuild
+    const prev = [{ id: "table:audit_log", type: "ENTITY", className: "audit_log",
+      metadata: { runtimeHot: true, runtimeOnly: true, synthetic: true, runtimeCount: 9, runtimeLastSeenMs: NOW - 1000 } }];
+    const r = carryForwardRuntime(g, prev, NOW, DEFAULT_RUNTIME_LKG_TTL_MS);
+    assert.equal(r.carried, 1);
+    const n = g.getNode("table:audit_log");
+    assert.ok(n, "re-materializou o nó runtimeOnly");
+    assert.equal((n!.metadata as Record<string, unknown>).runtimeStale, true);
+  });
+
+  it("nó que sumiu do estático e NÃO era runtimeOnly → decai (não re-inventa)", () => {
+    const g = new ApplicationGraph();
+    const r = carryForwardRuntime(g, [prior(NOW - 1000)], NOW, DEFAULT_RUNTIME_LKG_TTL_MS);
+    assert.equal(r.decayed, 1);
+    assert.equal(r.carried, 0);
+    assert.equal(g.getNode("ENTITY:d.Acc"), undefined);
+  });
+
+  it("sem timestamp de observação → NÃO herda (só carrega o que prova recência)", () => {
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("ENTITY:d.Acc", "ENTITY", "Acc", null, null, {}));
+    const prev = [{ id: "ENTITY:d.Acc", type: "ENTITY", className: "Acc", metadata: { runtimeHot: true } }]; // sem runtimeLastSeenMs
+    const r = carryForwardRuntime(g, prev, NOW, DEFAULT_RUNTIME_LKG_TTL_MS);
+    assert.equal(r.decayed, 1);
+    assert.equal(r.carried, 0);
+  });
+
+  it("byte-a-byte: sem previousNodes → no-op (não muta nada)", () => {
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("ENTITY:d.Acc", "ENTITY", "Acc", null, null, {}));
+    assert.deepEqual(carryForwardRuntime(g, undefined, NOW, DEFAULT_RUNTIME_LKG_TTL_MS), { carried: 0, decayed: 0, freshKept: 0 });
+    assert.deepEqual(carryForwardRuntime(g, [], NOW, DEFAULT_RUNTIME_LKG_TTL_MS), { carried: 0, decayed: 0, freshKept: 0 });
+    assert.equal((g.getNode("ENTITY:d.Acc")!.metadata as Record<string, unknown>).runtimeHot, undefined);
   });
 });
 

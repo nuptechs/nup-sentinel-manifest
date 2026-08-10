@@ -520,6 +520,79 @@ export function applyRuntimeTableObservations(
   return res;
 }
 
+// ─── Furo 4 (2026-08-10): LAST-KNOWN-GOOD do runtime (anti-apagamento) ───
+//
+// PROBLEMA: cada análise RECONSTRÓI o grafo do estático e o overlay só marca hot
+// os nós vistos na JANELA ATUAL de traços. Uma análise rodada numa janela QUIETA
+// (cron 3h, pouco tráfego) não vê os spans e o snapshot novo SOBRESCREVE o bom —
+// `RUNTIME_OBSERVED` desaba de 743→0/22 mesmo o sistema SENDO usado. Ao mesmo
+// tempo `evidence-health` (que olha o HUB, não o snapshot) segue dizendo
+// `runtime:fresh` → contradição que ATRAPALHA a decisão (o eixo do FOSSO fica
+// não-confiável). Mesma lição do watchdog: precisa de "último-bom" com decaimento.
+//
+// SOLUÇÃO (honesta, NÃO "guardar o máximo pra sempre"): um nó observado numa
+// análise ANTERIOR, com `runtimeLastSeenMs` DENTRO do TTL (default 7d), que NÃO
+// reapareceu nesta janela, é CARREGADO ADIANTE como `runtimeHot` + `runtimeStale`
+// (observado antes, não agora) preservando o `runtimeLastSeenMs` REAL. Fora do TTL
+// → DECAI (não observado há uma semana = não afirma mais "observado"). Fresh (visto
+// nesta janela) SEMPRE vence o stale. `nowMs` é injetado (função pura, sem relógio).
+export interface RuntimeCarryForwardResult {
+  /** nós hot herdados do snapshot anterior (dentro do TTL, não vistos nesta janela). */
+  carried: number;
+  /** nós hot do snapshot anterior descartados por decaimento (velhos > TTL / sem timestamp / sumiram do estático). */
+  decayed: number;
+  /** nós já observados NESTA janela (fresh) — mantidos, sem marca de stale. */
+  freshKept: number;
+}
+
+export const DEFAULT_RUNTIME_LKG_TTL_MS = 7 * 86400000; // 7 dias
+
+interface PriorNode { id: string; type?: string; className?: string; metadata?: Record<string, unknown> | null }
+
+/**
+ * Carrega adiante a observação de runtime do snapshot ANTERIOR para nós que não
+ * reapareceram na janela atual, com DECAIMENTO por TTL. PURA (muta o grafo, sem
+ * rede/relógio — `nowMs`/`ttlMs` injetados). Idempotente sobre nós fresh.
+ */
+export function carryForwardRuntime(
+  graph: ApplicationGraph,
+  previousNodes: PriorNode[] | undefined | null,
+  nowMs: number,
+  ttlMs: number = DEFAULT_RUNTIME_LKG_TTL_MS,
+): RuntimeCarryForwardResult {
+  const res: RuntimeCarryForwardResult = { carried: 0, decayed: 0, freshKept: 0 };
+  if (!Array.isArray(previousNodes) || !previousNodes.length || !Number.isFinite(nowMs) || ttlMs <= 0) return res;
+  for (const pn of previousNodes) {
+    if (!pn || typeof pn.id !== "string") continue;
+    const md = (pn.metadata || {}) as Record<string, unknown>;
+    if (md.runtimeHot !== true) continue;
+    const lastSeen = Number(md.runtimeLastSeenMs) || 0;
+    // sem prova de recência OU velho demais → NÃO afirma "observado" (decaimento honesto)
+    if (!lastSeen || nowMs - lastSeen > ttlMs) { res.decayed++; continue; }
+    const cur = graph.getNode(pn.id);
+    if (cur) {
+      const cmd = ((cur as { metadata?: Record<string, unknown> }).metadata ||= {}) as Record<string, unknown>;
+      if (cmd.runtimeHot === true) { res.freshKept++; continue; } // fresh desta janela vence
+      cmd.runtimeHot = true;
+      cmd.runtimeCount = Number(md.runtimeCount) || Number(cmd.runtimeCount) || 0;
+      cmd.runtimeLastSeenMs = lastSeen;
+      cmd.runtimeStale = true; // observado ANTES, não nesta janela — transparente
+      res.carried++;
+    } else if (md.runtimeOnly === true) {
+      // nó MINTADO (tabela/db-fragment) que sumiu do rebuild estático → re-materializa
+      // com a observação preservada (senão o "último-bom" some junto com o nó).
+      graph.addNode(new GraphNode(
+        pn.id, (pn.type || "ENTITY") as ConstructorParameters<typeof GraphNode>[1], pn.className || pn.id.split(":").pop() || pn.id, null, null,
+        { ...md, runtimeHot: true, runtimeStale: true, runtimeLastSeenMs: lastSeen },
+      ));
+      res.carried++;
+    } else {
+      res.decayed++; // sumiu do estático e não era runtimeOnly → não re-inventa nó
+    }
+  }
+  return res;
+}
+
 // ─── Leitor Jaeger (rede; gated + fail-soft + time-boxed) ───
 export interface FetchTracesOpts {
   baseUrl: string;
@@ -653,6 +726,10 @@ export interface RuntimeOverlaySummary {
   tablesMinted: number;
   entityNodesMarked: number;
   tableEntityEdges: number;
+  /** Furo 4 — nós hot herdados do snapshot anterior (LKG dentro do TTL). */
+  runtimeCarriedForward: number;
+  /** Furo 4 — nós hot do anterior descartados por decaimento (> TTL / sem timestamp). */
+  runtimeDecayed: number;
   /** fetch por serviço (HTTP status/retry/traços) — vai pro diagnóstico durável. */
   fetchReport: TraceFetchServiceReport[];
 }
@@ -663,6 +740,13 @@ export interface RunRuntimeOverlayDeps {
   /** injeção para teste; default = fetch global via fetchRecentTraces. */
   fetchFn?: typeof fetch;
   nowMs?: number;
+  /**
+   * Furo 4 — nós do snapshot ANTERIOR (carregam `runtimeHot`/`runtimeLastSeenMs`).
+   * Fornecidos pelo pipeline; ausente → sem carry-forward (byte-a-byte ao de hoje).
+   */
+  previousNodes?: PriorNode[] | null;
+  /** Furo 4 — TTL do last-known-good (ms). Default 7d. */
+  lkgTtlMs?: number;
 }
 
 /**
@@ -704,6 +788,16 @@ export async function runRuntimeOverlay(
   const tobs = applyRuntimeTableObservations(graph, hits);
   const dbSpanHits = hits.reduce((a, h) => a + h.count, 0);
 
+  // (3) LAST-KNOWN-GOOD (Furo 4): herda a observação recente do snapshot anterior
+  // para nós não vistos nesta janela — impede que uma janela quieta APAGUE o runtime.
+  const nowMs = deps.nowMs ?? Date.now();
+  const lkg = carryForwardRuntime(graph, deps.previousNodes, nowMs, deps.lkgTtlMs ?? DEFAULT_RUNTIME_LKG_TTL_MS);
+  if (lkg.carried > 0 || lkg.decayed > 0) {
+    log(
+      `Runtime overlay LKG: ${lkg.carried} nó(s) herdados do snapshot anterior (observados ≤${Math.round((deps.lkgTtlMs ?? DEFAULT_RUNTIME_LKG_TTL_MS) / 86400000)}d, não nesta janela) · ${lkg.decayed} decaído(s) por TTL · ${lkg.freshKept} fresh mantido(s). Janela quieta NÃO apaga o runtime bom.`,
+    );
+  }
+
   log(
     `Runtime overlay: traços=${traces.length} spans-DB=${dbSpanHits} · ROTA: pares=${pairs.length} arestas=${ov.entityEdges}entidade+${ov.wsv1Edges}java · TABELA→ENTIDADE: tabelas=${tobs.tablesObserved} (${tobs.entitiesResolved}✓/${tobs.tablesMinted}mint) nós=${tobs.nodesMarked} arestas=${tobs.edges}`,
   );
@@ -725,6 +819,8 @@ export async function runRuntimeOverlay(
     tablesMinted: tobs.tablesMinted,
     entityNodesMarked: tobs.nodesMarked,
     tableEntityEdges: tobs.edges,
+    runtimeCarriedForward: lkg.carried,
+    runtimeDecayed: lkg.decayed,
     fetchReport,
   };
 }
