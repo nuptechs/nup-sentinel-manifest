@@ -792,7 +792,12 @@ export interface ResolvedRuntimeOverlayConfig {
   opPathPattern?: RegExp;
 }
 
-const DEFAULT_OVERLAY_SERVICES = ["easynup-gateway", "easynup-backend"];
+// (removido o `DEFAULT_OVERLAY_SERVICES = easynup-*` — Furo 1 / isolamento
+// multi-tenant: o caminho de produção `resolveRuntimeOverlayConfig` não pode
+// mais cair num serviço de outro sistema; sem allowlist explícita o overlay
+// fica OFF. Os fallbacks inline em `fetchRecentTraces`/`extractRuntimePairs`
+// são só conveniência de chamada-direta/teste e nunca são acionados em produção
+// — o resolve sempre passa `cfg.services` vindo do perfil do próprio projeto.)
 
 function csvToList(v: unknown): string[] {
   if (Array.isArray(v)) return v.map((s) => String(s).trim()).filter(Boolean);
@@ -830,12 +835,20 @@ export function resolveRuntimeOverlayConfig(
   const jaegerUrl = firstStr(pp.jaegerUrl, env.RUNTIME_OVERLAY_JAEGER_URL, env.JAEGER_QUERY_URL);
   if (!jaegerUrl) return null; // gated: sem Jaeger, nada a fazer
 
-  const services =
-    (pp.services !== undefined ? csvToList(pp.services) : []).length
-      ? csvToList(pp.services)
-      : csvToList(env.RUNTIME_OVERLAY_SERVICES).length
-        ? csvToList(env.RUNTIME_OVERLAY_SERVICES)
-        : [...DEFAULT_OVERLAY_SERVICES];
+  // ISOLAMENTO MULTI-TENANT FAIL-CLOSED (Furo 1 da auditoria 2026-08-10): a
+  // allowlist de SERVIÇO OTel DEVE vir do projeto (ou de um env EXPLÍCITO). SEM
+  // ela, o overlay fica OFF — NUNCA cai num default de outro sistema. O default
+  // hardcoded `easynup-*` era um vazamento: um projeto novo (cliente) sem perfil
+  // herdava os traços do easynup e mintava tabelas de OUTRO sistema no mapa dele
+  // (provado: o snapshot do NuPIdentify continha `service_order`/`financial_entry`
+  // do easynup, que o identify não tem nem toca — vieram de uma análise rodada
+  // antes de o perfil `services:["nupidentity"]` existir). Cada sistema declara o
+  // SEU serviço; sem declaração, zero runtime — o mapa de um cliente jamais
+  // mostra o tráfego de outro. `jaegerUrl` segue compartilhado (é o hub, não dado).
+  const services = pp.services !== undefined && csvToList(pp.services).length
+    ? csvToList(pp.services)
+    : csvToList(env.RUNTIME_OVERLAY_SERVICES);
+  if (!services.length) return null; // sem allowlist de serviço = overlay OFF (isolamento)
 
   const gatewayService = firstStr(pp.gatewayService) || services[0];
   // Raízes de traço aceitas = o serviço de fronteira explícito + TODA a allowlist

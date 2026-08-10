@@ -17,20 +17,32 @@ describe("ADR-0028 P1.1 — resolveRuntimeOverlayConfig (cascata pura)", () => {
     assert.equal(resolveRuntimeOverlayConfig({ services: "nupidentify" }, {}), null);
   });
 
-  it("só env (comportamento legado) → default easynup, gateway = services[0]", () => {
-    const cfg = resolveRuntimeOverlayConfig(null, { JAEGER_QUERY_URL: "http://jaeger:16686" });
+  // ── ISOLAMENTO MULTI-TENANT (Furo 1, 2026-08-10): o 1º teste é o isolamento ──
+  // Antes, Jaeger sem allowlist de serviço caía no default `easynup-*`. Isso
+  // vazava: qualquer projeto novo (cliente) sem perfil herdava os traços do
+  // easynup e mintava tabelas de OUTRO sistema no mapa dele (provado no snapshot
+  // do NuPIdentify: `service_order`/`financial_entry` do easynup, que o identify
+  // não tem nem toca). Agora: sem allowlist de serviço explícita → overlay OFF.
+  it("ISOLAMENTO: Jaeger presente mas SEM allowlist de serviço → null (nunca herda easynup)", () => {
+    // um projeto-cliente sem `services` no perfil e sem env de serviço
+    assert.equal(resolveRuntimeOverlayConfig({ jaegerUrl: "http://jaeger:16686" }, {}), null);
+    // idem via env só de Jaeger (o caso exato do projeto que contaminou)
+    assert.equal(resolveRuntimeOverlayConfig(null, { JAEGER_QUERY_URL: "http://jaeger:16686" }), null);
+    // `services: []` explícito também desliga (não é "use o default")
+    assert.equal(resolveRuntimeOverlayConfig({ jaegerUrl: "http://j", services: [] }, {}), null);
+  });
+
+  it("com allowlist EXPLÍCITA no perfil → mira SÓ o serviço declarado (isolado)", () => {
+    const cfg = resolveRuntimeOverlayConfig(
+      { jaegerUrl: "http://jaeger:16686", services: ["easynup-gateway", "easynup-backend"] },
+      {},
+    );
     assert.ok(cfg);
-    assert.equal(cfg!.jaegerUrl, "http://jaeger:16686");
     assert.deepEqual(cfg!.services, ["easynup-gateway", "easynup-backend"]);
     assert.equal(cfg!.gatewayService, "easynup-gateway");
-    // Correção do RUNTIME_OBSERVED:0 — TODOS os serviços buscados são raízes
-    // candidatas de traço (não só o de fronteira), senão os traços rooteados no
-    // BACKEND (que carregam os spans de DB) seriam descartados.
     assert.deepEqual(cfg!.gatewayServices, ["easynup-gateway", "easynup-backend"]);
     assert.equal(cfg!.lookbackMs, 86400000);
     assert.equal(cfg!.limit, 400);
-    assert.equal(cfg!.apiKey, null);
-    assert.equal(cfg!.opPathPattern, undefined);
   });
 
   it("gatewayServices = fronteira explícita + allowlist, dedup e ordem preservada", () => {
@@ -84,18 +96,20 @@ describe("ADR-0028 P1.1 — resolveRuntimeOverlayConfig (cascata pura)", () => {
   });
 
   it("opPathPattern do projeto compila; string inválida cai no default (nunca lança)", () => {
-    const ok = resolveRuntimeOverlayConfig({ jaegerUrl: "http://j", opPathPattern: "/rest/[a-z]+" }, {});
+    // (services explícito: sem allowlist o overlay é OFF por isolamento — Furo 1)
+    const ok = resolveRuntimeOverlayConfig({ jaegerUrl: "http://j", services: ["svc"], opPathPattern: "/rest/[a-z]+" }, {});
     assert.ok(ok!.opPathPattern instanceof RegExp);
     assert.ok(ok!.opPathPattern!.test("/rest/foo"));
 
     // regex inválida NÃO derruba a análise: retorna o default (não undefined).
-    const bad = resolveRuntimeOverlayConfig({ jaegerUrl: "http://j", opPathPattern: "([" }, {});
+    const bad = resolveRuntimeOverlayConfig({ jaegerUrl: "http://j", services: ["svc"], opPathPattern: "([" }, {});
     assert.ok(bad!.opPathPattern instanceof RegExp);
   });
 
   it("números malformados no env são ignorados → cai no default seguro", () => {
     const cfg = resolveRuntimeOverlayConfig(null, {
       JAEGER_QUERY_URL: "http://j",
+      RUNTIME_OVERLAY_SERVICES: "svc",   // allowlist explícita (senão overlay OFF)
       RUNTIME_OVERLAY_LOOKBACK_MS: "abc",
       RUNTIME_OVERLAY_LIMIT: "",
     });
