@@ -9,6 +9,41 @@ describe("classKeyOf", () => {
     assert.equal(classKeyOf("REPOSITORY:a.b.ContractRepository.save(S)"), "REPOSITORY:a.b.ContractRepository");
     assert.equal(classKeyOf("SERVICE:a.b.X.m(java.lang.Long, java.lang.String)"), "SERVICE:a.b.X");
   });
+
+  it("Furo 3 (2026-08-10): membro de ENTITY `Classe::Classe#membro` colapsa na CLASSE", () => {
+    // O caso REAL do easynup: os getters/setters de cada @Entity vinham como
+    // `ENTITY:pkg.Acceptance::Acceptance#getCode` e NÃO colapsavam (sem `(`) →
+    // 220 entidades × ~8 métodos = 1722 nós ENTITY (inflação 7,8× na contagem).
+    const A = "ENTITY:easynup.persistence.entities.Acceptance";
+    assert.equal(classKeyOf(A, "ENTITY"), A);
+    assert.equal(classKeyOf(`${A}::Acceptance#getCode`, "ENTITY"), A);
+    assert.equal(classKeyOf(`${A}::Acceptance#<init>`, "ENTITY"), A);
+  });
+
+  it("Furo 3: ASSIMÉTRICO — SERVICE/função `file::fn` NÃO colapsa (preserva A5)", () => {
+    // As arestas função→função intra-arquivo (ADR-0031 §6 A5) exigem que os nós
+    // de função de SERVICE fiquem distintos — senão viram self-loop e somem.
+    assert.equal(classKeyOf("node:server/x.ts::fnA", "SERVICE"), "node:server/x.ts::fnA");
+    assert.equal(classKeyOf("node:server/x.ts::fnB", "SERVICE"), "node:server/x.ts::fnB");
+    // sem tipo (retrocompat) também preserva `::`
+    assert.equal(classKeyOf("node:server/x.ts::fnA"), "node:server/x.ts::fnA");
+  });
+
+  it("Furo 3: no nível=class, membros scip agregam — count NÃO infla", () => {
+    // 1 entidade Acceptance + 3 membros (ctor/getter/setter) → deve contar 1 ENTITY.
+    const rawScip = {
+      nodes: [
+        { id: "ENTITY:d.Acceptance", type: "ENTITY", className: "Acceptance" },
+        { id: "ENTITY:d.Acceptance::Acceptance#<init>", type: "ENTITY", className: "Acceptance" },
+        { id: "ENTITY:d.Acceptance::Acceptance#getCode", type: "ENTITY", className: "Acceptance" },
+        { id: "ENTITY:d.Acceptance::Acceptance#setCode", type: "ENTITY", className: "Acceptance" },
+      ],
+      edges: [],
+    };
+    const shaped = shapeSystemGraph(rawScip as never, "class");
+    assert.equal(shaped.counts.byType.ENTITY, 1); // NÃO 4
+    assert.equal(shaped.nodes.filter((n) => n.type === "ENTITY").length, 1);
+  });
 });
 
 describe("shapeSystemGraph — level=class (agregação por classe)", () => {

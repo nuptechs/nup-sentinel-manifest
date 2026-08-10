@@ -360,7 +360,23 @@ function canonicalFacet(
  * Remove o sufixo `.metodo(args)` quando presente (o `(` marca o método),
  * preservando `pacote.Classe`. Sem `(` = já é a classe.
  */
-export function classKeyOf(nodeId: string): string {
+export function classKeyOf(nodeId: string, nodeType?: string): string {
+  // ENTITY (Furo 3, auditoria 2026-08-10): os MEMBROS de DADO de uma @Entity
+  // vêm do scip como `TYPE:pkg.Classe::Classe#getX` (getter/setter/ctor). No
+  // nível "class" eles DEVEM colapsar na classe (`TYPE:pkg.Classe`) — senão cada
+  // acessor conta como um "nó ENTITY" distinto: 220 @Entity × ~8 acessores =
+  // 1722 nós ENTITY (inflação 7,8× na contagem servida à tela). ASSIMÉTRICO DE
+  // PROPÓSITO: só ENTITY colapsa o `::`/`#`. Para SERVICE/CONTROLLER/ROUTE os
+  // nós de FUNÇÃO (`file::fn`) são PRESERVADOS, porque as arestas função→função
+  // intra-arquivo são STATIC_PROVEN deliberado (ADR-0031 §6 A5 — "o par
+  // intra-arquivo conta"). Entidade = dado (acessor não é sub-entidade);
+  // serviço = comportamento (a chamada interna importa).
+  if (nodeType === "ENTITY") {
+    const dc = nodeId.indexOf("::");
+    if (dc >= 0) return nodeId.slice(0, dc);
+    const hash = nodeId.indexOf("#");
+    if (hash >= 0) return nodeId.slice(0, hash);
+  }
   const paren = nodeId.indexOf('(');
   if (paren < 0) return nodeId;
   const pre = nodeId.slice(0, paren); // TYPE:pacote.Classe.metodo
@@ -431,7 +447,7 @@ function shapeClassLevel(raw: RawSystemGraph): ShapedGraph {
   const classes = new Map<string, Agg>();
   const keyOf = new Map<string, string>();
   for (const n of raw.nodes) {
-    const key = classKeyOf(n.id);
+    const key = classKeyOf(n.id, n.type); // Furo 3: só ENTITY colapsa membros `::`
     keyOf.set(n.id, key);
     let c = classes.get(key);
     if (!c) {
