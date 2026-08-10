@@ -269,3 +269,49 @@ describe("frontendInventory — reconciliação inventário × participação", 
     assert.equal(inv.composableFns, 2);
   });
 });
+
+// ── Furo 2 (auditoria 2026-08-10): entidades Drizzle DECLARADAS ──
+// Antes, um nó `table:*` só nascia quando um HANDLER DE ROTA tocava a tabela.
+// Uma tabela do schema tocada só em job/worker ficava SEM nó estático → o
+// overlay de runtime a mintava como "invisível" (9/9 falsos-cegos no identify).
+describe("augmentGraphWithFullStack — entidades Drizzle declaradas (Furo 2)", () => {
+  const schemaFile = {
+    filePath: "shared/schema/enterprise.ts",
+    content:
+      'export const accessRequests = pgTable("access_requests", { id: text("id") });\n' +
+      'export const loginAttempts = pgTable("login_attempts", { id: text("id") });\n',
+  };
+
+  it("materializa um nó ENTITY table:<nome> por pgTable — SEM rota que a toque", () => {
+    const g = new ApplicationGraph();
+    // NENHUMA rota, NENHUM handler — só o schema. No código velho: 0 nós ENTITY.
+    const r = augmentGraphWithFullStack(g, [], [], [schemaFile]);
+    assert.equal(r.drizzleDeclared, 2);
+    const ar = g.getNode("table:access_requests");
+    const la = g.getNode("table:login_attempts");
+    assert.ok(ar, "access_requests (tocada só em job) tem nó declarado");
+    assert.ok(la);
+    // DECLARADO, não synthetic/runtimeOnly → o BIMR conta como resolvido (não minta).
+    const md = (ar!.metadata || {}) as Record<string, unknown>;
+    assert.equal(md.drizzleDeclared, true);
+    assert.notEqual(md.synthetic, true);
+    assert.notEqual(md.runtimeOnly, true);
+  });
+
+  it("idempotente: entidade existente de mesmo NOME FÍSICO vence (não duplica)", () => {
+    const g = new ApplicationGraph();
+    // casamento é pelo nome FÍSICO da tabela (toSnakeCase(className) == tabela).
+    g.addNode(new GraphNode("ENTITY:app.AccessRequests", "ENTITY", "AccessRequests", null, null, {}));
+    const r = augmentGraphWithFullStack(g, [], [], [schemaFile]);
+    // access_requests já casa a entidade existente → não recria; só login_attempts nasce.
+    assert.equal(r.drizzleDeclared, 1);
+    assert.equal(g.getNode("table:access_requests"), undefined);
+    assert.ok(g.getNode("table:login_attempts"));
+  });
+
+  it("arquivo sem pgTable → 0 declaradas (não inventa entidade)", () => {
+    const g = new ApplicationGraph();
+    const r = augmentGraphWithFullStack(g, [], [], [{ filePath: "server/x.ts", content: "export const f = () => 1;" }]);
+    assert.equal(r.drizzleDeclared, 0);
+  });
+});
