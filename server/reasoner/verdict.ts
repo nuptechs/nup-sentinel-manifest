@@ -42,6 +42,57 @@ export interface EvidenceVerdict {
   mode: "deterministic" | "llm-grounded";
 }
 
+/** Frescor de um eixo de prova externo (scip/config) — subconjunto do EdgeAxisHealth. */
+export interface ProofAxisFreshness {
+  status: "fresh" | "stale" | "absent" | "unknown";
+  stale: boolean;
+  ageHours: number | null;
+  edgeCount: number;
+}
+
+/**
+ * Caveats HONESTOS sobre o FRESCOR da prova que alimenta o veredito. Puro.
+ *
+ * O gap que isto fecha: o tier pode cantar STRONG contando arestas STATIC_PROVEN
+ * (scip) ou CONFIG_PROVEN que foram ingeridas há semanas — e o veredito não sabia,
+ * porque só lê o CENSO do grafo, não o FRESCOR da fonte. O `evidence-health` já
+ * detecta staleness/ausência (edgeAxisHealth), mas vivia num endpoint separado que
+ * o veredito nunca consultava. Aqui a leitura passa a admitir quando a prova que
+ * conta pode não refletir o código atual — nunca STRONG-sobre-prova-velha em silêncio.
+ *
+ * NÃO rebaixa o tier (staleness ≠ prova errada; o drift SHA, se configurado, é quem
+ * diz se o código mudou) — SURFACE o caveat, deixa o operador decidir.
+ */
+export function proofProvenanceCaveats(
+  staticAxis: ProofAxisFreshness,
+  configAxis: ProofAxisFreshness,
+  byMethod: Record<string, number>,
+): string[] {
+  const caveats: string[] = [];
+  const sp = byMethod.STATIC_PROVEN || 0;
+  const cp = byMethod.CONFIG_PROVEN || 0;
+  const unresolved = byMethod.STATIC_UNRESOLVED || 0;
+  const days = (h: number | null) => (h != null ? Math.max(1, Math.round(h / 24)) : null);
+
+  if (staticAxis.stale && sp > 0) {
+    const d = days(staticAxis.ageHours);
+    caveats.push(
+      `⚠ prova estática (scip) DESATUALIZADA${d != null ? ` há ~${d} d` : ""} — a leitura conta ` +
+        `${sp} aresta(s) provada(s) pelo compilador que podem não refletir o código atual`,
+    );
+  } else if (staticAxis.status === "absent" && sp === 0 && unresolved > 0) {
+    caveats.push(
+      `prova estática (scip) AUSENTE — o call-graph está por convenção/heurística ` +
+        `(${unresolved} aresta(s) só-declaradas). Ligue o CI de scip para prová-lo (STATIC_PROVEN)`,
+    );
+  }
+  if (configAxis.stale && cp > 0) {
+    const d = days(configAxis.ageHours);
+    caveats.push(`⚠ prova de wiring (config) DESATUALIZADA${d != null ? ` há ~${d} d` : ""} — ${cp} aresta(s) CONFIG_PROVEN podem estar velhas`);
+  }
+  return caveats;
+}
+
 /**
  * Decide o tier DETERMINÍSTICO a partir do censo — PROVEN-AWARE. Puro.
  *
