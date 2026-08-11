@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import type { ShapedGraph, ShapedNode, ShapedEdge } from "../../server/analyzers/system-graph.ts";
-import { buildMechanismSkeleton, traceMechanism } from "../../server/reasoner/mechanism.ts";
+import { buildMechanismSkeleton, traceMechanism, applyRuntimeOrder } from "../../server/reasoner/mechanism.ts";
 
 function node(id: string, type: string, extra: Partial<ShapedNode> = {}): ShapedNode {
   return { id, type, className: id.split(":").pop(), inDegree: 0, outDegree: 0, sensitive: false, evidence: { method: "STATIC_PROVEN", confidence: 0.7 }, ...extra } as ShapedNode;
@@ -105,5 +105,42 @@ describe("reasoner/mechanism — traceMechanism (orquestração do agente, sob g
     assert.ok(rep.steps.some((s) => /fluxo de negócio/.test(s.text)), "a intenção nomeada foi acoplada ao passo provado");
     assert.equal(rep.grounding.rejected, 1, "o chute não-ancorado foi rejeitado");
     assert.equal(rep.grounding.rejectedClaims[0].anchorId, "CHUTE|CALLS|INVENTADO");
+  });
+});
+
+describe("reasoner/mechanism — applyRuntimeOrder (a ordem REAL do OTel reordena o toque-em-dado)", () => {
+  // Passos como saem de uma entrada `route:runtime:` — arestas rota→tabela
+  // observadas (RUNTIME_OBSERVED), NÃO READS/WRITES. Este era o furo: o filtro
+  // antigo ignorava RUNTIME_OBSERVED e a ordem do OTel nunca se aplicava.
+  const step = (toLabel: string, order: number, relationType = "RUNTIME_OBSERVED") =>
+    ({ toLabel, order, relationType, fromLabel: "POST /api/oidc/token", edgeId: `e${order}` });
+
+  it("aplica runtimeRank em passo RUNTIME_OBSERVED rota→tabela (não só READS/WRITES)", () => {
+    // grafo em ordem alfabética (por alcance); OTel diz a ordem REAL de execução
+    const steps = [step("authorization_codes", 1), step("rate_limit_buckets", 2), step("session", 3)];
+    const ops = [
+      { table: "session", op: "read" as const, rank: 0 },
+      { table: "rate_limit_buckets", op: "write" as const, rank: 1 },
+      { table: "authorization_codes", op: "read" as const, rank: 2 },
+    ];
+    const { steps: out, orderedCount } = applyRuntimeOrder(steps, ops);
+    assert.equal(orderedCount, 3, "os 3 passos observados receberam rank do OTel");
+    // reordenado pela execução real: session → rate_limit_buckets → authorization_codes
+    assert.deepEqual(out.map((s) => s.toLabel), ["session", "rate_limit_buckets", "authorization_codes"]);
+    assert.deepEqual(out.map((s) => s.order), [1, 2, 3], "order reindexado pela nova sequência");
+  });
+
+  it("passo RUNTIME_OBSERVED cujo toLabel NÃO é tabela conhecida cai no alcance (seguro)", () => {
+    const steps = [step("session", 1), step("SERVICE:Outro", 2)];
+    const ops = [{ table: "session", op: "read" as const, rank: 5 }];
+    const { orderedCount } = applyRuntimeOrder(steps, ops);
+    assert.equal(orderedCount, 1, "só o que casa uma tabela do OTel é rankeado");
+  });
+
+  it("sem ops → orderedCount 0, passos intactos", () => {
+    const steps = [step("session", 1)];
+    const { steps: out, orderedCount } = applyRuntimeOrder(steps, []);
+    assert.equal(orderedCount, 0);
+    assert.equal(out[0].toLabel, "session");
   });
 });
