@@ -20,8 +20,18 @@ export type EvidenceTier = "STRONG" | "MODERATE" | "WEAK";
 
 export interface EvidenceVerdict {
   tier: EvidenceTier;
-  /** fração de arestas RUNTIME_OBSERVED (o eixo mais forte). */
+  /** fração de arestas RUNTIME_OBSERVED (o eixo dinâmico — pega o que o estático não vê). */
   observedRatio: number;
+  /**
+   * Fração de arestas PROVADAS por ALGUM método rigoroso: RUNTIME_OBSERVED (traço)
+   * + STATIC_PROVEN (compilador/scip) + CONFIG_PROVEN (wiring de DI). É o número da
+   * "leitura máxima" — quanto do grafo está ancorado em evidência, não em heurística
+   * declarada. O teto real (não 100%): o dinâmico (DI/reflexão/higher-order) que só o
+   * runtime pega + o que nenhum método alcança.
+   */
+  provenRatio: number;
+  /** fração só-declarada/heurística (STATIC_UNRESOLVED + UNKNOWN) — o que o mapa admite NÃO ter provado. */
+  unresolvedRatio: number;
   /** contagem por método de evidência (do censo do grafo). */
   byMethod: Record<string, number>;
   nodes: { observed: number; total: number };
@@ -33,10 +43,20 @@ export interface EvidenceVerdict {
 }
 
 /**
- * Decide o tier DETERMINÍSTICO a partir do censo. Puro.
- *  STRONG   = runtime cobre uma fatia real do grafo (convergência de eixos).
- *  MODERATE = provado estaticamente/config domina, runtime ralo (existe, pouco exercitado).
- *  WEAK     = muita aresta só-declarada/UNKNOWN (o mapa admite que sabe pouco).
+ * Decide o tier DETERMINÍSTICO a partir do censo — PROVEN-AWARE. Puro.
+ *
+ * A leitura é forte quando muito do grafo está PROVADO (por compilador OU runtime
+ * OU config) E há convergência DINÂMICA real (o runtime pega o que o estático não
+ * vê). Medir só o runtime seria perverso: mesclar mais arestas provadas pelo
+ * compilador CRESCE o denominador e BAIXA o observedRatio — adicionar prova não
+ * pode rebaixar o veredito. Por isso o eixo primário é o `provenRatio` (união dos
+ * três métodos), com o runtime como sinal de convergência.
+ *
+ *  STRONG   = muito provado (≥45%) com runtime real, OU runtime cobre ≥15% (o
+ *             dinâmico sozinho já é prova forte do que roda).
+ *  WEAK     = pouco provado por qualquer método (<20%) — mapa quase todo heurístico.
+ *  MODERATE = provado estaticamente domina mas runtime ralo (sabe a ESTRUTURA, não
+ *             o que de fato EXECUTA), ou zona intermediária.
  */
 export function computeEvidenceVerdict(graph: ShapedGraph): Omit<EvidenceVerdict, "explanation" | "mode"> {
   const cov = graph?.coverage;
@@ -46,25 +66,38 @@ export function computeEvidenceVerdict(graph: ShapedGraph): Omit<EvidenceVerdict
   const nodes = cov?.nodes ?? { observed: 0, total: (graph?.nodes?.length ?? 0) };
 
   const runtime = byMethod.RUNTIME_OBSERVED || 0;
-  const unknownish = (byMethod.UNKNOWN || 0) + (byMethod.STATIC_UNRESOLVED || 0);
-  const unknownRatio = total > 0 ? unknownish / total : 0;
+  const proven = runtime + (byMethod.STATIC_PROVEN || 0) + (byMethod.CONFIG_PROVEN || 0);
+  const unresolved = (byMethod.UNKNOWN || 0) + (byMethod.STATIC_UNRESOLVED || 0);
+  const provenRatio = total > 0 ? proven / total : 0;
+  const unresolvedRatio = total > 0 ? unresolved / total : 0;
 
   const reasons: string[] = [];
   let tier: EvidenceTier;
-  if (observedRatio >= 0.15 && runtime > 0) {
+  // STRONG por DOIS caminhos: (a) runtime sozinho cobre ≥15% (o dinâmico já é prova
+  // forte do que roda); (b) muito provado (≥45%, o compilador domina) COM
+  // convergência dinâmica real (≥10% observado). Só provar muito com runtime quase
+  // nulo NÃO é STRONG — é MODERATE (sabe a estrutura, não o que executa).
+  if (observedRatio >= 0.15 || (provenRatio >= 0.45 && observedRatio >= 0.1)) {
     tier = "STRONG";
-    reasons.push(`${(observedRatio * 100).toFixed(1)}% das arestas foram OBSERVADAS em runtime — convergência estático×runtime real`);
-  } else if (unknownRatio > 0.4) {
+    reasons.push(
+      `${(provenRatio * 100).toFixed(1)}% do grafo PROVADO (compilador+runtime+config) com convergência dinâmica real ` +
+        `(${(observedRatio * 100).toFixed(1)}% observado em runtime)`,
+    );
+  } else if (provenRatio < 0.2) {
     tier = "WEAK";
-    reasons.push(`${(unknownRatio * 100).toFixed(1)}% das arestas são só-declaradas/UNKNOWN — o mapa sabe pouco sobre o que roda`);
+    reasons.push(`só ${(provenRatio * 100).toFixed(1)}% do grafo está provado por algum método — o mapa é quase todo heurístico/declarado`);
   } else {
     tier = "MODERATE";
-    reasons.push(`estrutura provada estaticamente domina; runtime cobre ${(observedRatio * 100).toFixed(1)}% (existe, pouco exercitado)`);
+    reasons.push(
+      `${(provenRatio * 100).toFixed(1)}% provado (o compilador domina), mas runtime cobre só ${(observedRatio * 100).toFixed(1)}% ` +
+        `— sabe a ESTRUTURA, pouco do que de fato EXECUTA`,
+    );
   }
+  reasons.push(`${(unresolvedRatio * 100).toFixed(1)}% ainda só-declarado/heurístico (teto: dinâmico que só o runtime pega)`);
   if (nodes.total > 0) reasons.push(`${nodes.observed}/${nodes.total} nós exercitados por tráfego`);
   if (runtime === 0) reasons.push("nenhuma aresta observada nesta janela — leitura depende só do estático");
 
-  return { tier, observedRatio, byMethod, nodes, reasons };
+  return { tier, observedRatio, provenRatio, unresolvedRatio, byMethod, nodes, reasons };
 }
 
 function templateExplanation(v: Omit<EvidenceVerdict, "explanation" | "mode">): string {
@@ -102,7 +135,7 @@ export async function explainVerdict(graph: ShapedGraph, llm: ReasonerLLM | null
       "Escreva 2-3 frases explicando, para um gestor, o que esse tier significa e o que dá pra confiar. " +
       "REGRAS INVIOLÁVEIS: NÃO mude o tier nem invente números — explique EXATAMENTE o veredito e os números dados. " +
       "Responda só com a explicação em texto corrido.";
-    const user = JSON.stringify({ tier: v.tier, observedRatio: v.observedRatio, byMethod: v.byMethod, nodes: v.nodes, reasons: v.reasons }, null, 2);
+    const user = JSON.stringify({ tier: v.tier, provenRatio: v.provenRatio, observedRatio: v.observedRatio, unresolvedRatio: v.unresolvedRatio, byMethod: v.byMethod, nodes: v.nodes, reasons: v.reasons }, null, 2);
     const content = await llm(system, user);
     const text = typeof content === "string" ? content.trim() : "";
     if (text && !contradictsTier(text, v.tier)) {
