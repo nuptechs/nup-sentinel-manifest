@@ -86,6 +86,44 @@ export default router;
   });
 });
 
+describe("extractExpressRoutes — middleware de autorização BARE (anti falso-positivo SF-019/020)", () => {
+  // NuPIdentify usa `router.patch(path, requireAuth, requireAdmin, handler)`:
+  // `requireAdmin` é middleware bare (role implícita), não `requireRole("admin")`.
+  // Sem reconhecê-lo, o omission-engine acusava PRIVILEGE_ESCALATION numa rota que
+  // EXIGE admin (falso-positivo).
+  const IDENTIFY_STYLE = {
+    filePath: "server/routes/access-requests.routes.ts",
+    content: `import express, { type Router } from "express";
+import { requireAuth, requireAdmin } from "../middleware/auth";
+const router: Router = express.Router();
+
+router.patch("/:id/approve", requireAuth, requireAdmin, async (req, res) => { res.json({ ok: true }); });
+router.patch("/:id/reject", requireAuth, requireAdmin, async (req, res) => { res.json({ ok: true }); });
+
+app.use("/api/access-requests", router);
+`,
+  };
+  it("reconhece `requireAdmin` bare como anotação de segurança (role implícita 'admin')", () => {
+    const routes = extractExpressRoutes([IDENTIFY_STYLE]);
+    const approve = routes.find((r) => r.path.endsWith("/approve"));
+    assert.ok(approve, "a rota /approve deve ser extraída");
+    assert.deepEqual(approve!.requiredRoles, ["admin"], "requireAdmin ⇒ role 'admin' (limpa o falso-positivo)");
+    assert.match(approve!.permissionExpression ?? "", /requireAdmin/);
+  });
+  it("`requireAuth` SOZINHO NÃO confere role (login ≠ autoridade — segue sinalizável)", () => {
+    const onlyAuth = {
+      filePath: "server/routes/x.routes.ts",
+      content: `import express, { type Router } from "express";
+const router: Router = express.Router();
+router.post("/danger", requireAuth, async (req, res) => { res.json({}); });
+app.use("/api/x", router);
+`,
+    };
+    const [route] = extractExpressRoutes([onlyAuth]);
+    assert.deepEqual(route.requiredRoles, [], "requireAuth é autenticação, não autorização");
+  });
+});
+
 describe("extractExpressRoutes — cobertura de verbos, roles múltiplas e ruído", () => {
   it("reconhece todos os verbos HTTP e várias roles", () => {
     const file = {
