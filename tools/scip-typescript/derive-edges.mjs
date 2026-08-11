@@ -29,6 +29,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 import fs from 'fs';
 import { createRequire } from 'module';
+import { deriveDataAccess } from './scip-data-access.mjs';
 
 const require = createRequire(import.meta.url);
 const args = process.argv.slice(2);
@@ -199,16 +200,32 @@ const edges = [
   ...[...ifaceImpl.values()].map((e) => toEdge(e, 'interface-impl')),
 ];
 
+// ACESSO A DADOS (função→tabela READ/WRITE), compiler-accurate do MESMO índice —
+// prova o eixo que hoje é heurístico no lado Node/TS. Fail-soft: um erro aqui nunca
+// derruba a derivação de CALLS. `to` = símbolo da const de tabela; a agregação no
+// Manifest resolve pro nó de entidade. Ver scip-data-access.mjs.
+let dataAccess = [];
+let daStats = { tables: 0, verbSites: 0, resolved: 0, unresolvedTable: 0 };
+try {
+  const da = deriveDataAccess(idx);
+  dataAccess = da.edges;
+  daStats = da.stats;
+} catch (e) {
+  console.error(`[derive-edges] data-access falhou (fail-soft, segue só com CALLS): ${e && e.message}`);
+}
+
 // Compacto (sem indentação): 338k arestas indentadas passavam de 85MB → 413.
 process.stdout.write(
   JSON.stringify({
     tool: 'scip-typescript',
     schema: 'adr-0030.p2.2',
-    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size },
+    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size, dataAccess: dataAccess.length },
     edges,
+    dataAccess,
   }) + '\n',
 );
 console.error(
   `[derive-edges] STATIC_PROVEN=${proven.size} interface-impl=${ifaceImpl.size} (de ${idx.documents.length} documentos)` +
-    ` | diag: methodDefs=${nMethodDefs} methodRefs=${nMethodRefs} withEnclosing=${nWithEnclosing} attributed=${nAttributed} orphan=${nOrphan}`,
+    ` | diag: methodDefs=${nMethodDefs} methodRefs=${nMethodRefs} withEnclosing=${nWithEnclosing} attributed=${nAttributed} orphan=${nOrphan}` +
+    ` | data-access: tables=${daStats.tables} verbSites=${daStats.verbSites} resolved=${daStats.resolved} unresolvedTable=${daStats.unresolvedTable}`,
 );

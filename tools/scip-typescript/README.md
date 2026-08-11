@@ -82,3 +82,32 @@ o `STATIC_PROVEN` saiu de **0 → 14**; com a granularidade de **função** (A5)
 sobe para **165** (`compiler`; as 138 chamadas função→função do mesmo arquivo —
 antes descartadas como intra-nó — passam a contar, mais os pares cross-módulo
 abertos por função). 147 sub-nós de função materializados sob os 34 módulos.
+
+## Acesso a dados compiler-accurate (`scip-data-access.mjs`) — função→tabela READ/WRITE
+
+Além das arestas de chamada, o deriver extrai, do MESMO índice, quais funções
+**leem** ou **escrevem** em quais tabelas — o eixo que hoje é heurístico
+(`STATIC_UNRESOLVED`) no lado Node/TS. Sai na chave `dataAccess` do `edges.json`:
+
+```
+{ "dataAccess": [ { "from": "<fn-symbol>", "to": "<table-const-symbol>",
+                    "access": "read"|"write", "resolution": "compiler",
+                    "fromFile": "...", "toFile": "..." } ] }
+```
+
+**Como é provado** (verificado contra um `index.scip` REAL de Express+Drizzle —
+fixture `tests/fixtures/scip/express-drizzle-index.json`):
+- **verbo** = o símbolo do método-raiz resolvido pelo checker: `PgDatabase#select().`
+  → READ; `#insert()/#update()/#delete().` → WRITE (idem MySql/Sqlite). O SCIP **não**
+  seta os roles `ReadAccess`/`WriteAccess`, então o verbo — não o role — é o oráculo.
+- **tabela** = o símbolo de PROJETO na MESMA linha do verbo cuja definição é seguida
+  de `pgTable`/`mysqlTable`/`sqliteTable`/`pgView`.
+- **função contêiner** = a definição cujo `enclosing_range` contém a linha do verbo.
+
+**Muro de Rice (conservador):** tabela indecidível (parâmetro genérico, tabela de
+runtime, `sql``` cru) → aresta OMITIDA (`unresolvedTable`), nunca inventada; direção
+nunca chutada; efeito misto (`INSERT … RETURNING`) segue o verbo-raiz = WRITE.
+
+**Estado:** o deriver emite `dataAccess`; a AGREGAÇÃO no Manifest (mapear o símbolo
+de tabela → nó de entidade + emitir `READS_ENTITY`/`WRITES_ENTITY` `STATIC_PROVEN`)
+é a próxima fatia. Fail-soft: erro na extração de dados nunca derruba os CALLS.
