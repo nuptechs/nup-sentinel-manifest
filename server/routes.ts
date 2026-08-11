@@ -1804,6 +1804,58 @@ export async function registerRoutes(
     }
   });
 
+  // Reasoner — GAP DE RUNTIME (above-SOTA): pontos de entrada (rotas/controllers)
+  // que EXISTEM mas nunca foram exercitados por tráfego. NÃO é código morto (são
+  // alcançáveis de fora) — é falta de cobertura; a IA prioriza o que exercitar,
+  // grounded (nodeId real). Torna o teto do observedRatio ACIONÁVEL. Lê o snapshot.
+  app.get("/api/projects/:projectId/reasoner/runtime-gap", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const topN = Math.min(100, Math.max(1, parseInt(String(req.query.topN)) || 25));
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const sg = manifest.systemGraph;
+      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
+        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
+      }
+      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { resolveReasonerLLM } = await import("./reasoner/llm");
+      const { explainRuntimeGap } = await import("./reasoner/runtime-gap");
+      const report = await explainRuntimeGap(shapeSystemGraph(sg, "class"), resolveReasonerLLM(), { topN });
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing runtime-gap:", error);
+      res.status(500).json({ message: "Failed to compute runtime-gap" });
+    }
+  });
+
+  // Reasoner — VEREDITO TRI-EIXO (above-SOTA): a convergência STATIC+RUNTIME+CONFIG
+  // num tier honesto (STRONG/MODERATE/WEAK), decidido DETERMINISTICAMENTE sobre o
+  // censo de evidência; a IA só EXPLICA e é rejeitada se contradiz o tier. Lê o snapshot.
+  app.get("/api/projects/:projectId/reasoner/verdict", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const sg = manifest.systemGraph;
+      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
+        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
+      }
+      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { resolveReasonerLLM } = await import("./reasoner/llm");
+      const { explainVerdict } = await import("./reasoner/verdict");
+      const report = await explainVerdict(shapeSystemGraph(sg, "class"), resolveReasonerLLM());
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing verdict:", error);
+      res.status(500).json({ message: "Failed to compute verdict" });
+    }
+  });
+
   // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
   // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
