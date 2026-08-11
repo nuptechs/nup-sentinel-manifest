@@ -101,6 +101,34 @@ export function augmentGraphWithFullStack(
     }
     entityByTable.set(table, id);
   }
+  // SERVIÇOS DECLARADOS (fecha o ponto cego do parser, 2026-08-11): materializa um
+  // nó `node:<file>` para CADA arquivo de serviço declarado (`server/services/**`),
+  // análogo ao `drizzleDeclared` acima. Antes, um nó SERVICE só nascia da call-chain
+  // de uma ROTA que parseou (edge-driven, `mintNodeModule`) — então um serviço
+  // alcançado só por BARREL (`export … from "./x"`, que o resolvedor conservador de
+  // `call-chain.ts` não segue por design) ou só por rotas que o extractor pulava
+  // ficava SEM nó. Caso real (NuPIdentify): o PDP inteiro — `permission/index.ts`,
+  // `rebac/rebac-engine.ts`, `policy/policy-engine.ts`, `oidc/authorization.service.ts`
+  // — invisível ao grafo. Estes nós são DECLARADOS (`serviceDeclared`, não synthetic):
+  // existem porque o arquivo existe. Idempotente: se a call-chain já mintou o nó
+  // (mesmo id), preserva. As arestas de entrada seguem sendo edge-driven; um serviço
+  // declarado sem chamador resolvido aparece como candidato advisory no Reasoner
+  // (no-proven-caller) — honesto, não escondido.
+  let serviceDeclared = 0;
+  const SERVICE_FILE_RE = /(^|\/)server\/services\/.+\.(ts|js)$/;
+  for (const f of fileData) {
+    const file = f?.filePath;
+    if (!file || !SERVICE_FILE_RE.test(file)) continue;
+    if (/\.(test|spec)\.|\.d\.ts$/.test(file)) continue;
+    const id = `node:${file}`;
+    if (graph.getNode(id)) continue;
+    const base = (file.split("/").pop() || file).replace(/\.(js|ts)$/, "");
+    graph.addNode(new GraphNode(id, nodeBackendType(file), base, null, null, {
+      sourceFile: file, runtime: "node", serviceDeclared: true,
+    }));
+    serviceDeclared++;
+  }
+
   let nodeModules = 0;
   const mintNodeModule = (fileFn: string): string | null => {
     const file = fileFn.split("::")[0];

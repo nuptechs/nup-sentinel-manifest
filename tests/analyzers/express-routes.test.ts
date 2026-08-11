@@ -53,6 +53,39 @@ describe("extractExpressRoutes — mount + verbo + permissão (canário C1)", ()
   });
 });
 
+describe("extractExpressRoutes — declaração de router COM anotação de tipo TS (regressão do ponto cego)", () => {
+  // Bug real (NuPIdentify): `const router: Router = express.Router()` fazia o
+  // ROUTER_DECL_RE não casar → routerVars vazio → arquivo DESCARTADO inteiro →
+  // o PDP `/api/authorize` sumia do grafo. O regex agora tolera a anotação.
+  const TYPED = {
+    filePath: "server/routes/authorize.routes.ts",
+    content: `import express, { type Router, type Request, type Response } from "express";
+const router: Router = express.Router();
+
+router.post(
+  "/",
+  requireValidationAuth,
+  async (req: Request, res: Response) => { res.json({ allowed: true }); },
+);
+router.post("/batch", async (_req, res) => { res.json([]); });
+
+app.use("/api/authorize", router);
+export default router;
+`,
+  };
+  it("extrai rotas de um router declarado como `const router: Router = express.Router()`", () => {
+    const routes = extractExpressRoutes([TYPED]);
+    assert.equal(routes.length, 2, "as 2 rotas do router tipado devem ser extraídas");
+    assert.ok(routes.some((r) => r.method === "POST" && r.path === "/api/authorize"), "POST / compõe com o mount → /api/authorize");
+    assert.ok(routes.some((r) => r.method === "POST" && r.path === "/api/authorize/batch"));
+  });
+  it("o router SEM anotação segue funcionando (não regride)", () => {
+    const routes = extractExpressRoutes([GATEWAY_APP]);
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0].path, "/webhooks/inbound/:id");
+  });
+});
+
 describe("extractExpressRoutes — cobertura de verbos, roles múltiplas e ruído", () => {
   it("reconhece todos os verbos HTTP e várias roles", () => {
     const file = {

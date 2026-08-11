@@ -106,8 +106,13 @@ const PERMISSION_FNS = [
 ];
 
 // `const app = express()` / `const r = express.Router()` / `const r = Router()`.
+// O grupo opcional `(?::\s*[^=;]+)?` tolera a ANOTAÇÃO DE TIPO TypeScript entre o
+// nome e o `=` — `const router: Router = express.Router()`. Sem ele, arquivos que
+// anotam o router (authorize/oidc/auth.routes.ts do NuPIdentify) tinham `routerVars`
+// vazio e eram DESCARTADOS inteiros em `:293`, sumindo do grafo com todas as rotas e
+// os serviços a jusante. `[^=;]+` para antes do `=`/`;` (não engole a atribuição).
 const ROUTER_DECL_RE =
-  /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:express\s*\(\s*\)|express\s*\.\s*Router\s*\(\s*\)|Router\s*\(\s*\))/g;
+  /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=;]+)?\s*=\s*(?:express\s*\(\s*\)|express\s*\.\s*Router\s*\(\s*\)|Router\s*\(\s*\))/g;
 
 // `app.use('/prefix', routerVar)` — mount de um router sob um prefixo.
 const MOUNT_RE =

@@ -30,6 +30,29 @@ describe("augmentGraphWithFullStack (Onda 6)", () => {
     assert.equal(edge.metadata.synthetic, true);
   });
 
+  it("serviços DECLARADOS viram nó mesmo sem rota que os alcance (fecha o ponto cego do barrel)", () => {
+    // Um serviço só alcançado por barrel/re-export (que o resolvedor não segue) ou
+    // por rotas que o parser pulava ficava SEM nó. Agora todo `server/services/**`
+    // declarado vira nó — idempotente e sem depender de aresta resolvida.
+    const g = new ApplicationGraph();
+    const fileData = [
+      { filePath: "server/services/permission/index.ts", content: "export function checkPermission(){}" },
+      { filePath: "server/services/rebac/rebac-engine.ts", content: "export function check(){}" },
+      { filePath: "server/services/permission/index.test.ts", content: "// teste, deve ser ignorado" },
+      { filePath: "server/routes/access.routes.ts", content: "// rota, não é services/, ignorada por este bloco" },
+    ];
+    augmentGraphWithFullStack(g, [], [], fileData);
+    assert.ok(g.getNode("node:server/services/permission/index.ts"), "barrel index.ts declarado vira nó");
+    assert.ok(g.getNode("node:server/services/rebac/rebac-engine.ts"), "engine atrás de barrel vira nó");
+    assert.ok(!g.getNode("node:server/services/permission/index.test.ts"), "arquivo de teste NÃO vira nó");
+    const decl = g.getNode("node:server/services/permission/index.ts")!;
+    assert.equal((decl.metadata as Record<string, unknown>).serviceDeclared, true);
+    // idempotente: re-augmentar não duplica
+    const before = g.getAllNodes().length;
+    augmentGraphWithFullStack(g, [], [], fileData);
+    assert.equal(g.getAllNodes().length, before, "re-augmentar não duplica os nós declarados");
+  });
+
   it("tela sem backend Java casa com ROTA do gateway (método+path com :param)", () => {
     const g = new ApplicationGraph();
     const r = augmentGraphWithFullStack(
