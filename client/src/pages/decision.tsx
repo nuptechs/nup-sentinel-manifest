@@ -52,6 +52,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EvidenceHealthBanner, healthHeadline, type EvidenceHealthPayload } from "./decision-health";
+import { ReasonerPanel } from "./decision-reasoner";
 import { EVIDENCE, coverageSummary, hasEvidenceData, type GraphCoverage } from "./system-map-evidence";
 import { breakdownData } from "./system-map-proofs";
 import { CalibrationBands, bimrHeadline, type BimrPayload } from "./system-map-blind";
@@ -80,7 +81,7 @@ interface Project {
 }
 
 // ── Procedência: a assinatura embaixo de cada número ──────────────────
-function SourceNote({ endpoint, bits, testId }: { endpoint: string; bits?: (string | number | null | undefined)[]; testId: string }) {
+export function SourceNote({ endpoint, bits, testId }: { endpoint: string; bits?: (string | number | null | undefined)[]; testId: string }) {
   const extras = (bits ?? []).filter((b) => b != null && b !== "").map(String);
   return (
     <p className="mt-3 border-t pt-2 text-[11px] text-muted-foreground" data-testid={testId}>
@@ -97,7 +98,7 @@ const runLabel = (id?: number | string | null) => (id != null && id !== "" ? `ru
  * conteúdo. É aqui que a degradação vira ISOLADA — o erro de uma consulta não
  * escapa para as outras seções.
  */
-function SectionCard({
+export function SectionCard({
   title,
   icon,
   hint,
@@ -152,7 +153,7 @@ function SectionCard({
 }
 
 /** Vazio HONESTO: diz o que não sabemos, nunca desenha um zero no lugar. */
-function NotKnown({ children, testId }: { children: React.ReactNode; testId: string }) {
+export function NotKnown({ children, testId }: { children: React.ReactNode; testId: string }) {
   return (
     <p className="py-2 text-sm text-muted-foreground" data-testid={testId}>
       {children}
@@ -595,6 +596,9 @@ export default function DecisionPage() {
           projectId={projectId ?? undefined}
         />
       )}
+
+      {/* Raciocínio — IA governada sobre o substrato provado (4 endpoints /reasoner/*). */}
+      {enabled && <ReasonerPanel projectId={projectId ?? undefined} />}
 
       {/* âncora de leitura: repete o veredito no rodapé para quem rolou a página */}
       {enabled && health.suspect && (
