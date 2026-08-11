@@ -54,6 +54,22 @@ describe("reasoner/verdict — computeEvidenceVerdict (tier PROVEN-AWARE)", () =
     assert.ok(Math.abs(v.provenRatio - 0.452) < 0.01, "provenRatio ~45%");
   });
 
+  it("INVARIÂNCIA AO TAMANHO: identify pós-Leitura-Máxima (88% provado, observedRatio DESPENCA p/ 2.3%, mas 198 runtime) → segue STRONG", () => {
+    // capturar o call-graph provado cresce o denominador → observedRatio cai muito;
+    // o sinal de runtime absoluto (198 ≥ 25) preserva o STRONG. Adicionar prova NÃO rebaixa.
+    const v = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 198, STATIC_PROVEN: 7295, STATIC_UNRESOLVED: 1018 }, 0.023));
+    assert.equal(v.tier, "STRONG");
+    assert.ok(v.provenRatio > 0.85, "provenRatio ~88%");
+    assert.ok(v.observedRatio < 0.05, "observedRatio despencou, mas o tier não caiu");
+  });
+
+  it("provar MUITO com runtime quase nulo (7 arestas) NÃO é STRONG — MODERATE (estrutura sem execução)", () => {
+    // easynup pós-Leitura-Máxima: 75% provado, mas 7 runtime (<25) e observedRatio ~0
+    const v = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 7, STATIC_PROVEN: 30427, STATIC_UNRESOLVED: 9709 }, 0.0002));
+    assert.equal(v.tier, "MODERATE");
+    assert.ok(v.provenRatio > 0.7, "provado alto");
+  });
+
   it("caso REAL easynup (mesclado): 25% provado + 0.1% runtime → MODERATE (estrutura provada, runtime ausente)", () => {
     const v = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 7, STATIC_PROVEN: 3207, CONFIG_PROVEN: 22, STATIC_UNRESOLVED: 9709 }, 0.0005));
     assert.equal(v.tier, "MODERATE");

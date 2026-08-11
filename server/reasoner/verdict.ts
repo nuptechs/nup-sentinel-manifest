@@ -73,11 +73,16 @@ export function computeEvidenceVerdict(graph: ShapedGraph): Omit<EvidenceVerdict
 
   const reasons: string[] = [];
   let tier: EvidenceTier;
-  // STRONG por DOIS caminhos: (a) runtime sozinho cobre ≥15% (o dinâmico já é prova
-  // forte do que roda); (b) muito provado (≥45%, o compilador domina) COM
-  // convergência dinâmica real (≥10% observado). Só provar muito com runtime quase
-  // nulo NÃO é STRONG — é MODERATE (sabe a estrutura, não o que executa).
-  if (observedRatio >= 0.15 || (provenRatio >= 0.45 && observedRatio >= 0.1)) {
+  // Sinal de runtime INVARIANTE AO TAMANHO: capturar o call-graph provado pelo
+  // compilador (Leitura-Máxima) cresce o denominador e faz o observedRatio (runtime/
+  // total) despencar — usar SÓ ele rebaixaria um sistema bem-lido ao ADICIONAR prova.
+  // "Convergência dinâmica real" = ≥25 arestas observadas (absoluto, robusto ao
+  // tamanho do call-graph) OU ≥5% observado (cobre sistema pequeno bem-exercitado).
+  const hasRealRuntime = runtime >= 25 || observedRatio >= 0.05;
+  // STRONG por DOIS caminhos: (a) runtime domina (≥15% observado — dinâmico forte);
+  // (b) muito provado (≥45%) COM convergência dinâmica real. Só provar muito com
+  // runtime quase nulo NÃO é STRONG — é MODERATE (sabe a estrutura, não o que executa).
+  if (observedRatio >= 0.15 || (provenRatio >= 0.45 && hasRealRuntime)) {
     tier = "STRONG";
     reasons.push(
       `${(provenRatio * 100).toFixed(1)}% do grafo PROVADO (compilador+runtime+config) com convergência dinâmica real ` +
