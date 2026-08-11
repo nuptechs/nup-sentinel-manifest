@@ -1881,8 +1881,16 @@ export async function registerRoutes(
       const { resolveReasonerLLM } = await import("./reasoner/llm");
       const { buildMechanismSkeleton, traceMechanism } = await import("./reasoner/mechanism");
       const { jaegerRuntimeOrderPort } = await import("./reasoner/adapters/runtime-order.adapter");
-      // ORDEM REAL de execução (OTel/Jaeger) — gated por JAEGER_QUERY_URL, fail-soft.
-      const runtimeOrderPort = jaegerRuntimeOrderPort();
+      // ORDEM REAL de execução (OTel/Jaeger) — config resolvida POR PROJETO (a mesma
+      // do runtime-overlay: jaegerUrl + serviço + casamento de rota). Gated/fail-soft.
+      const { resolveRuntimeOverlayConfig, projectOverlayConfig } = await import("./analyzers/runtime-overlay");
+      const proj = await storage.getProject(projectId).catch(() => null);
+      const rtCfg = resolveRuntimeOverlayConfig(projectOverlayConfig(proj), process.env);
+      const runtimeOrderPort = jaegerRuntimeOrderPort(
+        rtCfg
+          ? { jaegerUrl: rtCfg.jaegerUrl, services: rtCfg.services, gatewayServices: rtCfg.gatewayServices, opPathPattern: rtCfg.opPathPattern, lookbackMs: rtCfg.lookbackMs, limit: rtCfg.limit }
+          : {},
+      );
       const shaped = shapeSystemGraph(sg, "class");
 
       // ORQUESTRAÇÃO: descobre os arquivos envolvidos no esqueleto e puxa o SOURCE
