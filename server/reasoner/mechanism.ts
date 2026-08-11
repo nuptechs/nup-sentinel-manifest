@@ -75,14 +75,19 @@ function isFlow(e: ShapedEdge): boolean {
   return FLOW_RELATIONS.has(String(e.relationType));
 }
 
-/** Resolve a entrada: id exato, senão o 1º nó cujo id/label contém a query (determinístico). */
+/**
+ * Resolve a entrada: id exato, senão o nó cujo id/label contém a query. PREFERE nós
+ * de ROTA RUNTIME (`route:runtime:…`) — a entrada mais específica de execução, que
+ * habilita a ordem REAL do OTel; depois rotas estáticas; depois o resto. Determinístico.
+ */
 function resolveEntry(graph: ShapedGraph, query: string): string | null {
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   if (nodes.some((n) => n.id === query)) return query;
   const q = query.toLowerCase();
+  const rank = (id: string) => (id.startsWith("route:runtime:") ? 0 : id.startsWith("route:") ? 1 : 2);
   const hits = nodes
     .filter((n) => n.id.toLowerCase().includes(q) || (n.className || "").toLowerCase().includes(q))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
   return hits[0]?.id ?? null;
 }
 

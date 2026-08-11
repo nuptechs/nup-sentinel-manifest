@@ -5,7 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { extractRuntimeOrder } from "../../server/reasoner/adapters/runtime-order.adapter.ts";
+import { extractRuntimeOrder, extractRuntimeOrderForRoute } from "../../server/reasoner/adapters/runtime-order.adapter.ts";
 import { applyRuntimeOrder } from "../../server/reasoner/mechanism.ts";
 import type { JaegerTrace } from "../../server/analyzers/runtime-overlay.ts";
 
@@ -43,6 +43,37 @@ describe("extractRuntimeOrder — ordem real por startTime", () => {
   it("nunca lança com entrada malformada", () => {
     assert.doesNotThrow(() => extractRuntimeOrder(null as any));
     assert.doesNotThrow(() => extractRuntimeOrder([{} as any]));
+  });
+});
+
+describe("extractRuntimeOrderForRoute — casamento SÃO por rota (reusa extractRuntimePairs)", () => {
+  const SVC = "nupidentity";
+  function gw(spanID: string, startTime: number, path: string): any {
+    return { spanID, processID: "p1", startTime, operationName: `POST ${path}`, tags: [{ key: "url.path", value: path }, { key: "http.request.method", value: "POST" }] };
+  }
+  function db(spanID: string, startTime: number, stmt: string): any {
+    return { spanID, processID: "p1", startTime, operationName: "db.query", references: [{ refType: "CHILD_OF", spanID: "root" }], tags: [{ key: "db.statement", value: stmt }] };
+  }
+  function trace(traceID: string, path: string, dbSpans: any[]): JaegerTrace {
+    return { traceID, processes: { p1: { serviceName: SVC } }, spans: [gw("root", 100, path), ...dbSpans] } as any;
+  }
+  it("extrai a ordem REAL só dos traços da rota-alvo (por startTime)", () => {
+    const t = trace("t1", "/api/oidc/token", [
+      db("d2", 300, "SELECT * FROM systems"),
+      db("d1", 200, "SELECT * FROM users"),
+      db("d3", 500, "INSERT INTO refresh_tokens VALUES ($1)"),
+    ]);
+    const ops = extractRuntimeOrderForRoute([t], "/api/oidc/token", { gatewayServices: [SVC] });
+    assert.deepEqual(ops.map((o) => o.table), ["users", "systems", "refresh_tokens"]);
+    assert.equal(ops[2].op, "write");
+  });
+  it("rota que NÃO casa → [] (nunca aplica ordem de outra rota)", () => {
+    const t = trace("t1", "/api/oidc/token", [db("d1", 200, "SELECT FROM users")]);
+    assert.deepEqual(extractRuntimeOrderForRoute([t], "/api/auth/login", { gatewayServices: [SVC] }), []);
+  });
+  it("sem traço / path vazio → [], nunca lança", () => {
+    assert.deepEqual(extractRuntimeOrderForRoute([], "/x", {}), []);
+    assert.doesNotThrow(() => extractRuntimeOrderForRoute(null as any, "", {}));
   });
 });
 
