@@ -136,11 +136,33 @@ describe("aggregateScipEdges (A5) — símbolo→FUNÇÃO→aresta-de-sistema", 
     assert.deepEqual(edges[0], { fromNode: FN.tenantMiddleware, toNode: FN.tenantLoadClaims, relationType: "CALLS", resolution: "compiler" });
   });
 
-  it("símbolo órfão (arquivo sem nó) → aresta descartada", () => {
+  it("Leitura-Máxima: arquivo órfão LOCAL vira nó de MÓDULO e a prova é CAPTURADA (default ON)", () => {
+    // client/src/lib/utils.ts não é nó arquitetural — antes a prova era descartada.
     const derived: ScipDerivedEdge[] = [{ from: SYM.utilCn, to: SYM.tenantService, resolution: "compiler" }];
-    const { edges, stats } = aggregateScipEdges(nodes, derived);
+    const { edges, moduleNodes, stats } = aggregateScipEdges(nodes, derived);
+    assert.equal(stats.orphanDropped, 0, "não descarta mais");
+    assert.equal(stats.moduleNodesAdded, 1);
+    assert.deepEqual(moduleNodes[0], { id: "node:client/src/lib/utils.ts", sourceFile: "client/src/lib/utils.ts", label: "utils.ts", runtime: "node" });
+    // granularidade de ARQUIVO no órfão: o endpoint é o MÓDULO, não `::fn`
+    assert.equal(edges.length, 1);
+    assert.equal(edges[0].fromNode, "node:client/src/lib/utils.ts");
+    assert.equal(edges[0].toNode, FN.tenantResolve);
+  });
+
+  it("com materializeOrphanModules:false → comportamento antigo (órfão descartado, byte-a-byte)", () => {
+    const derived: ScipDerivedEdge[] = [{ from: SYM.utilCn, to: SYM.tenantService, resolution: "compiler" }];
+    const { edges, stats } = aggregateScipEdges(nodes, derived, { materializeOrphanModules: false });
     assert.equal(edges.length, 0);
     assert.equal(stats.orphanDropped, 1);
+    assert.equal(stats.moduleNodesAdded, 0);
+  });
+
+  it("NUNCA materializa dependência externa (.d.ts / node_modules) — anti-ruído", () => {
+    // ambos externos: lib.dom.d.ts (.d.ts) — filtrado, aresta descartada
+    const dts: ScipDerivedEdge[] = [{ from: SYM.utilCn, to: SYM.external, resolution: "compiler" }];
+    const { moduleNodes, stats } = aggregateScipEdges(nodes, dts);
+    assert.ok(!moduleNodes.some((m) => /\.d\.ts$/.test(m.sourceFile)), "nenhum .d.ts materializado");
+    assert.equal(stats.orphanDropped, 1); // o endpoint externo dropou a aresta
   });
 
   it("auto-chamada (MESMA função nas duas pontas) → descartada", () => {
@@ -292,12 +314,15 @@ describe("aggregateScipEdges (F1) — arestas scip-JAVA agregam a STATIC_PROVEN"
     assert.ok(functionNodes.some((n) => n.id.startsWith("route:") && n.id.includes("::")));
   });
 
-  it("órfão: símbolo Java cujo `toFile` não casa nenhum nó → aresta descartada", () => {
+  it("órfão: símbolo Java cujo `toFile` não casa nenhum nó → descartado com materialização OFF", () => {
+    // Com ON (default) um arquivo .java LOCAL seria materializado; o filtro de projeto
+    // não distingue dep Java externa (o deriver já resolve só locais). Aqui provamos o
+    // caminho OFF: sem materialização, o órfão é descartado (byte-a-byte antigo).
     const nodes = javaFixtureGraph().nodes;
     const derived: ScipDerivedEdge[] = [
       { from: JSYM.createContract, to: JSYM.externalJava, resolution: "compiler", fromFile: JFILE.createSvc, toFile: "org/springframework/data/Repository.java" },
     ];
-    const { edges, stats } = aggregateScipEdges(nodes, derived);
+    const { edges, stats } = aggregateScipEdges(nodes, derived, { materializeOrphanModules: false });
     assert.equal(edges.length, 0);
     assert.equal(stats.orphanDropped, 1);
   });
@@ -357,6 +382,35 @@ describe("mergeScipEdges + shapeSystemGraph (F1) — arestas Java viram STATIC_P
     const after = shapeSystemGraph(graph, "class");
     assert.equal(after.coverage.edges.byMethod.STATIC_PROVEN, 2);
     assert.ok(after.edges.filter((e) => e.evidence.method === "STATIC_PROVEN").length === 2);
+  });
+});
+
+describe("orçamento de arestas (bounded anti-monólito) — prioriza arquitetural, reporta o excedente", () => {
+  const nodes = fixtureGraph().nodes;
+  // gera N arestas órfão→órfão (arquivos locais distintos, todos materializáveis)
+  function orphanEdges(n: number): ScipDerivedEdge[] {
+    const out: ScipDerivedEdge[] = [];
+    for (let i = 0; i < n; i++) {
+      out.push({
+        from: `scip-typescript npm p 1 \`src/u${i}.ts\`/f().`,
+        to: `scip-typescript npm p 1 \`src/v${i}.ts\`/g().`,
+        resolution: "compiler",
+      });
+    }
+    return out;
+  }
+  it("acima do orçamento: mantém até o teto e CONTA o excedente (nunca silêncio)", () => {
+    const { edges, stats } = aggregateScipEdges(nodes, orphanEdges(50), { edgeBudget: 20 });
+    assert.equal(edges.length, 20, "grafo bounded ao orçamento");
+    assert.equal(stats.cappedEdges, 30, "excedente reportado");
+  });
+  it("PRIORIDADE: aresta que toca nó ARQUITETURAL sobrevive ao orçamento antes de órfão↔órfão", () => {
+    const archEdge: ScipDerivedEdge = { from: SYM.tenantMiddleware, to: SYM.tenantService, resolution: "compiler" };
+    // 1 arquitetural + 10 órfão↔órfão, orçamento 1 → mantém a arquitetural, corta as 10
+    const { edges, stats } = aggregateScipEdges(nodes, [archEdge, ...orphanEdges(10)], { edgeBudget: 1 });
+    assert.equal(edges.length, 1);
+    assert.equal(edges[0].fromNode, FN.tenantMiddleware, "a arquitetural foi a mantida");
+    assert.equal(stats.cappedEdges, 10);
   });
 });
 

@@ -102,6 +102,21 @@ export interface FunctionNodeSpec {
   runtime?: string;
 }
 
+/**
+ * Nó de MÓDULO materializado para um arquivo que o compilador PROVOU participar de
+ * uma chamada mas que o extrator arquitetural não modelou (util/helper/lib/middleware).
+ * NÃO é invenção de arquitetura (§5): é um FATO — o arquivo existe e o checker do SCIP
+ * provou a chamada. Tipo `MODULE` (distinto de CONTROLLER/SERVICE/ENTITY) para a tela
+ * poder filtrar/estilizar. Sem ele, ~90% da prova do compilador era DESCARTADA como
+ * "órfã" porque o grafo só tinha nós dos tipos arquiteturais (ADR-0035 §Leitura-Máxima).
+ */
+export interface ModuleNodeSpec {
+  id: string; // `node:<file>`
+  sourceFile: string;
+  label: string;
+  runtime?: string;
+}
+
 export interface MergeStats {
   /** arestas derivadas recebidas. */
   derived: number;
@@ -117,6 +132,12 @@ export interface MergeStats {
   orphanDropped: number;
   /** auto-chamada (mesma função/nó nas duas pontas) → descartada (§4.2). */
   intraDropped: number;
+  /** nós de MÓDULO materializados para arquivos órfãos provados (Leitura-Máxima). */
+  moduleNodesAdded: number;
+  /** arestas descartadas por bater no teto de módulos materializados (bounded). */
+  cappedModules: number;
+  /** arestas provadas descartadas por bater no orçamento de arestas (bounded, reportado). */
+  cappedEdges: number;
 }
 
 // Extensões de arquivo TS/JS que um símbolo SCIP pode carregar.
@@ -280,14 +301,74 @@ function runtimeOfNode(n: RawSystemNode | undefined): string | undefined {
  * runtime do nó-pai — para nós `node:` o resultado é IDÊNTICO ao anterior (byte-a-
  * byte no TS). Símbolo cujo arquivo não sustenta nó → null (órfão, §5).
  */
+/** runtime inferido da extensão para um MÓDULO materializado (TS/JS → node). */
+function inferModuleRuntime(file: string): string | undefined {
+  return /\.(?:d\.ts|tsx?|mts|cts|jsx?)$/.test(file) ? "node" : undefined;
+}
+
+/**
+ * Materializa só arquivo do PROJETO — nunca dependência externa (ruído). Exclui
+ * type-defs `.d.ts` e qualquer coisa sob `node_modules/`. O deriver (`derive-edges.mjs`)
+ * já resolve só definições locais, então isto é defesa em profundidade contra o
+ * símbolo externo eventual (typescript/@types) escapar como nó de módulo.
+ */
+function isMaterializableFile(file: string): boolean {
+  if (!file) return false;
+  if (/\.d\.[mc]?ts$/.test(file)) return false; // type-defs .d.ts/.d.mts/.d.cts (externo)
+  if (/(?:^|\/)node_modules\//.test(file)) return false; // dependências
+  if (/(?:^|\/)dist\//.test(file)) return false; // saída de build (não é fonte)
+  return true;
+}
+
+/** Estado de materialização de módulos órfãos (bounded), threaded na agregação. */
+interface MaterializeCtx {
+  enabled: boolean;
+  cap: number;
+  moduleNodes: Map<string, ModuleNodeSpec>;
+  capped: { n: number };
+}
+
 function resolveEndpoint(
   parsed: { file: string; fn: string },
   fileIndex: Map<string, string>,
   nodeById: Map<string, RawSystemNode>,
   fnNodes: Map<string, FunctionNodeSpec>,
+  mat: MaterializeCtx,
 ): string | null {
-  const nodeId = fileIndex.get(parsed.file);
-  if (!nodeId) return null;
+  let nodeId = fileIndex.get(parsed.file);
+  if (!nodeId) {
+    // Arquivo provado pelo compilador mas SEM nó no grafo (util/helper/lib). Em vez
+    // de descartar a prova (§4.1 antigo), MATERIALIZA um nó de MÓDULO — bounded pelo
+    // teto. É fato, não arquitetura inventada (§5): o arquivo existe, a chamada é
+    // provada. Sem o flag → comportamento antigo (órfão descartado).
+    if (!mat.enabled || !isMaterializableFile(parsed.file)) return null;
+    const existing = mat.moduleNodes.get(parsed.file);
+    if (existing) {
+      nodeId = existing.id;
+    } else if (mat.moduleNodes.size < mat.cap) {
+      const id = `node:${parsed.file}`;
+      const spec: ModuleNodeSpec = {
+        id,
+        sourceFile: parsed.file,
+        label: parsed.file.split("/").pop() || parsed.file,
+        ...(inferModuleRuntime(parsed.file) ? { runtime: inferModuleRuntime(parsed.file) } : {}),
+      };
+      mat.moduleNodes.set(parsed.file, spec);
+      fileIndex.set(parsed.file, id);
+      nodeById.set(id, { id, type: "MODULE", metadata: { sourceFile: parsed.file, ...(spec.runtime ? { runtime: spec.runtime } : {}) } } as RawSystemNode);
+      nodeId = id;
+    } else {
+      mat.capped.n++;
+      return null; // teto atingido → órfão (bounded, reportado em stats)
+    }
+    // GRANULARIDADE DE ARQUIVO para módulos materializados: o endpoint É o nó de
+    // módulo (`node:<file>`), NÃO um sub-nó `::fn`. Isso mantém o grafo BOUNDED —
+    // num monólito grande a granularidade de função gera call-graph de centenas de
+    // milhares de arestas (inflaria o denominador quase-tautologicamente e o payload
+    // seria impossível de servir). O detalhe de FUNÇÃO fica só entre nós
+    // ARQUITETURAIS (rico p/ o mecanismo/dead-code), onde é bounded por construção.
+    return nodeId;
+  }
   const id = `${nodeId}::${parsed.fn}`;
   if (!fnNodes.has(id)) {
     const parent = nodeById.get(nodeId);
@@ -311,17 +392,39 @@ function resolveEndpoint(
  * tem `compiler` e `interface-impl`, `compiler` (resolução única) prevalece.
  * Retorna também as specs dos sub-nós de função a materializar no merge.
  */
+/** Teto default de nós de módulo materializados por projeto (bounded anti-pathologia). */
+export const DEFAULT_MODULE_CAP = 8000;
+/** Orçamento default de arestas provadas agregadas (bounded p/ monólito servível). */
+export const DEFAULT_EDGE_BUDGET = 30000;
+
+export interface AggregateOptions {
+  /** materializa nós de MÓDULO para arquivos órfãos provados (default: true). */
+  materializeOrphanModules?: boolean;
+  /** teto de módulos materializados (default: DEFAULT_MODULE_CAP). */
+  moduleCap?: number;
+  /** orçamento de arestas provadas agregadas (default: DEFAULT_EDGE_BUDGET). */
+  edgeBudget?: number;
+}
+
 export function aggregateScipEdges(
   nodes: RawSystemNode[],
   derived: ScipDerivedEdge[],
+  opts: AggregateOptions = {},
 ): {
   edges: AggregatedSystemEdge[];
   functionNodes: FunctionNodeSpec[];
+  moduleNodes: ModuleNodeSpec[];
   stats: Omit<MergeStats, "upgraded" | "added" | "functionNodesAdded">;
 } {
   const fileIndex = buildFileNodeIndex(nodes);
   const nodeById = nodeByIdIndex(nodes);
   const fnNodes = new Map<string, FunctionNodeSpec>();
+  const mat: MaterializeCtx = {
+    enabled: opts.materializeOrphanModules !== false, // default ON (Leitura-Máxima)
+    cap: opts.moduleCap ?? DEFAULT_MODULE_CAP,
+    moduleNodes: new Map<string, ModuleNodeSpec>(),
+    capped: { n: 0 },
+  };
   // Chave par-de-endpoints → melhor resolução vista (compiler > interface-impl).
   const best = new Map<string, "compiler" | "interface-impl">();
   let orphanDropped = 0;
@@ -333,8 +436,8 @@ export function aggregateScipEdges(
     const pa = functionOfScipSymbol(e.from, e.fromFile);
     const pb = functionOfScipSymbol(e.to, e.toFile);
     if (!pa || !pb) { orphanDropped++; continue; }
-    const na = resolveEndpoint(pa, fileIndex, nodeById, fnNodes);
-    const nb = resolveEndpoint(pb, fileIndex, nodeById, fnNodes);
+    const na = resolveEndpoint(pa, fileIndex, nodeById, fnNodes, mat);
+    const nb = resolveEndpoint(pb, fileIndex, nodeById, fnNodes, mat);
     if (!na || !nb) { orphanDropped++; continue; }
     if (na === nb) { intraDropped++; continue; }
     const key = pairKey(na, nb);
@@ -342,9 +445,27 @@ export function aggregateScipEdges(
     if (prev === "compiler") continue; // já é o mais forte
     if (prev === undefined || e.resolution === "compiler") best.set(key, e.resolution);
   }
+  // ORÇAMENTO DE ARESTAS (bounded, anti-monólito): num sistema enorme o call-graph
+  // provado tem centenas de milhares de arestas — impossível de servir. PRIORIZA as
+  // que tocam um nó ARQUITETURAL (a leitura do SISTEMA) e enche o resto do orçamento
+  // com órfão↔órfão; o excedente é DESCARTADO e CONTADO (`cappedEdges` — nunca silêncio).
+  const isMaterialized = (nodeId: string) => mat.moduleNodes.has(nodeId.startsWith("node:") ? nodeId.slice(5) : " ");
+  const budget = opts.edgeBudget ?? DEFAULT_EDGE_BUDGET;
+  const arch: Array<[string, "compiler" | "interface-impl"]> = [];
+  const orphanOnly: Array<[string, "compiler" | "interface-impl"]> = [];
+  for (const kv of best) {
+    const [from, to] = kv[0].split(EDGE_SEP);
+    (isMaterialized(from) && isMaterialized(to) ? orphanOnly : arch).push(kv);
+  }
+  const kept = arch.slice(0, budget);
+  let cappedEdges = Math.max(0, arch.length - budget);
+  for (const kv of orphanOnly) {
+    if (kept.length >= budget) { cappedEdges += orphanOnly.length - orphanOnly.indexOf(kv); break; }
+    kept.push(kv);
+  }
   const edges: AggregatedSystemEdge[] = [];
   const usedNodes = new Set<string>();
-  for (const [key, resolution] of best) {
+  for (const [key, resolution] of kept) {
     const [fromNode, toNode] = key.split(EDGE_SEP);
     edges.push({ fromNode, toNode, relationType: "CALLS", resolution });
     usedNodes.add(fromNode);
@@ -354,10 +475,22 @@ export function aggregateScipEdges(
   // (o dedup pode ter descartado a única aresta que o tocava via auto-chamada).
   const functionNodes: FunctionNodeSpec[] = [];
   for (const spec of fnNodes.values()) if (usedNodes.has(spec.id)) functionNodes.push(spec);
+  // só materializa o MÓDULO que é endpoint de ao menos 1 aresta final (file-level).
+  const moduleNodes: ModuleNodeSpec[] = [];
+  for (const spec of mat.moduleNodes.values()) if (usedNodes.has(spec.id)) moduleNodes.push(spec);
   return {
     edges,
     functionNodes,
-    stats: { derived: (derived || []).length, aggregated: edges.length, orphanDropped, intraDropped },
+    moduleNodes,
+    stats: {
+      derived: (derived || []).length,
+      aggregated: edges.length,
+      cappedEdges,
+      orphanDropped,
+      intraDropped,
+      moduleNodesAdded: moduleNodes.length,
+      cappedModules: mat.capped.n,
+    },
   };
 }
 
@@ -383,8 +516,9 @@ function pairKey(from: string, to: string, rel = "CALLS"): string {
 export function mergeScipEdges(
   rawGraph: RawSystemGraph,
   payload: ScipEdgesPayload | null | undefined,
+  opts: AggregateOptions = {},
 ): { graph: RawSystemGraph; stats: MergeStats } {
-  const zero: MergeStats = { derived: 0, aggregated: 0, upgraded: 0, added: 0, functionNodesAdded: 0, orphanDropped: 0, intraDropped: 0 };
+  const zero: MergeStats = { derived: 0, aggregated: 0, upgraded: 0, added: 0, functionNodesAdded: 0, orphanDropped: 0, intraDropped: 0, moduleNodesAdded: 0, cappedModules: 0, cappedEdges: 0 };
   if (!rawGraph || !Array.isArray(rawGraph.nodes) || !Array.isArray(rawGraph.edges)) {
     return { graph: rawGraph, stats: zero };
   }
@@ -392,7 +526,7 @@ export function mergeScipEdges(
   if (!Array.isArray(derived) || derived.length === 0) {
     return { graph: rawGraph, stats: zero };
   }
-  const { edges: aggregated, functionNodes, stats: aggStats } = aggregateScipEdges(rawGraph.nodes, derived);
+  const { edges: aggregated, functionNodes, moduleNodes, stats: aggStats } = aggregateScipEdges(rawGraph.nodes, derived, opts);
   if (aggregated.length === 0) {
     return { graph: rawGraph, stats: { ...aggStats, upgraded: 0, added: 0, functionNodesAdded: 0 } };
   }
@@ -403,9 +537,29 @@ export function mergeScipEdges(
     edges: rawGraph.edges.map((e) => ({ ...e, metadata: e.metadata ? { ...e.metadata } : e.metadata })),
   };
 
+  const existingIds = new Set(graph.nodes.map((n) => n.id));
+
+  // MATERIALIZA os nós de MÓDULO dos arquivos órfãos provados (Leitura-Máxima).
+  // Precede os sub-nós de função (que os referenciam como parentModule). Tipo
+  // MODULE + `materializedFrom:'scip'` para a tela distinguir do arquitetural.
+  for (const m of moduleNodes) {
+    if (existingIds.has(m.id)) continue;
+    existingIds.add(m.id);
+    graph.nodes.push({
+      id: m.id,
+      type: "MODULE",
+      className: m.label,
+      metadata: {
+        sourceFile: m.sourceFile,
+        ...(m.runtime ? { runtime: m.runtime } : {}),
+        scipProven: true,
+        materializedFrom: "scip",
+      },
+    } as never);
+  }
+
   // MATERIALIZA os sub-nós de função ausentes (A5). Sub-nó carrega proveniência
   // de arquivo + rótulo curto + `scipProven` (existe porque o checker o provou).
-  const existingIds = new Set(graph.nodes.map((n) => n.id));
   let functionNodesAdded = 0;
   for (const spec of functionNodes) {
     if (existingIds.has(spec.id)) continue;
