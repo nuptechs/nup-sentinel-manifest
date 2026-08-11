@@ -1727,6 +1727,47 @@ export async function registerRoutes(
     }
   });
 
+  // Reasoner — TRIAGEM DE CÓDIGO MORTO por convergência TRI-EIXO (above-SOTA). A
+  // pergunta que a leitura só-código (agente) não responde: "o que está MORTO?".
+  // Cruza ESTÁTICO (sem chamador/refutado) × RUNTIME (¬observado) × CONFIG/ROLE
+  // (¬ponto-de-entrada), com o MURO honesto (não-alcançável-pelo-robô = UNKNOWN,
+  // não morto). A IA só redige a pergunta "vale investigar remover?", sob o gate de
+  // grounding (claim sem nodeId provado é DESCARTADO e CONTADO no livro-razão). Sem
+  // chave de LLM → só o determinístico, byte-a-byte. Lê o snapshot; não re-analisa.
+  app.get("/api/projects/:projectId/reasoner/dead-code", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const topN = Math.min(100, Math.max(1, parseInt(String(req.query.topN)) || 20));
+
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const sg = manifest.systemGraph;
+      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
+        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
+      }
+
+      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { resolveReasonerLLM } = await import("./reasoner/llm");
+      const { triageDeadCode } = await import("./reasoner/dead-code");
+
+      const shaped = shapeSystemGraph(sg, "class");
+      const report = await triageDeadCode(shaped, resolveReasonerLLM(), { topN });
+
+      res.json({
+        projectId,
+        analysisRunId: snapshots[0].analysisRunId,
+        ...report,
+      });
+    } catch (error) {
+      console.error("Error computing dead-code triage:", error);
+      res.status(500).json({ message: "Failed to compute dead-code triage" });
+    }
+  });
+
   // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
   // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
