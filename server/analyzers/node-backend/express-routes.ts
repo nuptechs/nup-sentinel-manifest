@@ -96,6 +96,9 @@ const PERMISSION_FNS = [
   "requireRole",
   "requireRoles",
   "requireAnyRole",
+  "requireTenantRole",
+  "requireScope",
+  "requiredScopes",
   "hasPermission",
   "hasRole",
   "hasAnyRole",
@@ -247,11 +250,30 @@ const BARE_IDENT_RE = /^[A-Za-z_$][\w$]*$/;
 // não AUTORIZAÇÃO — write de dado privilegiado só atrás de login DEVE seguir
 // sinalizado (honesto: login ≠ autoridade).
 const BARE_AUTHZ_MIDDLEWARE: Record<string, string> = {
+  // role/admin (autorização por papel)
   requireAdmin: "admin",
   requireSuperAdmin: "super_admin",
   requireOwner: "owner",
+  requireSystemAdmin: "system_admin",
+  requireOrgAdmin: "org_admin",
+  requireTenantAdmin: "tenant_admin",
+  requireBillingAdmin: "billing_admin",
+  hasAdminRole: "admin",
+  // access/grant/rebac (autorização por relação/acesso)
+  requireSystemAccess: "system_access",
+  requireRebacAccess: "rebac",
+  requireGrantAccess: "grant",
+  hasAccess: "access",
+  // system/service auth (autoriza o CHAMADOR-sistema — X-System-*/mTLS/API key)
   requireValidationAuth: "system",
   requireSystemAuth: "system",
+  requireSystemApiKey: "system",
+  requireSystemOwnApiKey: "system",
+  requireSystemCredentials: "system",
+  // NÃO inclui: requireAuth/requireOidcAuth/requireClientCert (AUTENTICAÇÃO pura,
+  // não autorização) nem requireTenant (escopo, não gate de privilégio). Middleware
+  // que recebem a role como STRING (requireRole/requireTenantRole/requireScope/…)
+  // são tratados via PERMISSION_FNS acima.
 };
 
 /** Extrai (roles, expressão) do 1º middleware de permissão reconhecido nos args. */
