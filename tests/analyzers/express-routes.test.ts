@@ -110,6 +110,19 @@ app.use("/api/access-requests", router);
     assert.deepEqual(approve!.requiredRoles, ["admin"], "requireAdmin ⇒ role 'admin' (limpa o falso-positivo)");
     assert.match(approve!.permissionExpression ?? "", /requireAdmin/);
   });
+  it("cobre o vocabulário de autz do identify (requireSystemAdmin/SystemAccess) — SF-036", () => {
+    const CONSOLE = {
+      filePath: "server/routes/console.routes.ts",
+      content: `import express, { type Router } from "express";
+const router: Router = express.Router();
+router.post("/:systemId/provisioning/users/:userId/approve", requireAuth, requireSystemAccess, requireSystemAdmin, async (req, res) => { res.json({}); });
+app.use("/api/console", router);
+`,
+    };
+    const [route] = extractExpressRoutes([CONSOLE]);
+    assert.ok(route.requiredRoles.length > 0, "requireSystemAccess/requireSystemAdmin ⇒ autorizada");
+    assert.match(route.permissionExpression ?? "", /requireSystem/);
+  });
   it("`requireAuth` SOZINHO NÃO confere role (login ≠ autoridade — segue sinalizável)", () => {
     const onlyAuth = {
       filePath: "server/routes/x.routes.ts",
