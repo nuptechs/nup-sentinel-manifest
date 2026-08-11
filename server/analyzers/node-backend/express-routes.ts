@@ -237,6 +237,23 @@ function splitTopLevelArgs(args: string): string[] {
 
 const BARE_IDENT_RE = /^[A-Za-z_$][\w$]*$/;
 
+// Middleware de AUTORIZAÇÃO usado como identificador BARE (sem `(...)`) — a role é
+// IMPLÍCITA no nome, não vem de argumento string. Padrão dominante do NuPIdentify
+// (`router.patch(path, requireAuth, requireAdmin, handler)` — `requireAdmin` 100×,
+// `requireValidationAuth` 17×). Sem reconhecê-los, o extractor via `requiredRoles`
+// vazio e o omission-engine emitia PRIVILEGE_ESCALATION em rotas que EXIGEM admin —
+// falso-positivo (ex.: SF-019/SF-020 em /:id/approve e /:id/reject, ambas com
+// `requireAdmin`). NÃO inclui `requireAuth`: ele é AUTENTICAÇÃO (usuário logado),
+// não AUTORIZAÇÃO — write de dado privilegiado só atrás de login DEVE seguir
+// sinalizado (honesto: login ≠ autoridade).
+const BARE_AUTHZ_MIDDLEWARE: Record<string, string> = {
+  requireAdmin: "admin",
+  requireSuperAdmin: "super_admin",
+  requireOwner: "owner",
+  requireValidationAuth: "system",
+  requireSystemAuth: "system",
+};
+
 /** Extrai (roles, expressão) do 1º middleware de permissão reconhecido nos args. */
 function extractPermission(args: string): { roles: string[]; expression: string | null } {
   for (const fn of PERMISSION_FNS) {
@@ -251,6 +268,14 @@ function extractPermission(args: string): { roles: string[]; expression: string 
     while ((s = strRe.exec(inner)) !== null) roles.push(s[1]);
     if (roles.length > 0) {
       return { roles, expression: `${fn}(${inner.trim()})` };
+    }
+  }
+  // Fallback: middleware de autorização BARE (role implícita no nome). Só conta se
+  // aparece como referência de identificador — não confundir com uma chamada que
+  // teria caído no laço acima. A presença já confere a anotação de segurança.
+  for (const fn of Object.keys(BARE_AUTHZ_MIDDLEWARE)) {
+    if (new RegExp(`\\b${fn}\\b`).test(args)) {
+      return { roles: [BARE_AUTHZ_MIDDLEWARE[fn]], expression: fn };
     }
   }
   return { roles: [], expression: null };
