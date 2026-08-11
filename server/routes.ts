@@ -1768,6 +1768,42 @@ export async function registerRoutes(
     }
   });
 
+  // Reasoner — DOMÍNIOS por COMUNIDADE do grafo provado (above-SOTA). Transforma
+  // "o impacto toca 47 nós" em "toca o domínio X". Os domínios EMERGEM do que DE
+  // FATO se chama (arestas provadas), via detecção de comunidade determinística com
+  // damping de hubs (util compartilhado não cola tudo num blob); a IA só NOMEIA
+  // cada comunidade a partir dos membros reais, sob o gate (nome de comunidade
+  // inexistente é DESCARTADO). Sem chave → nome derivado do pacote. Lê o snapshot.
+  app.get("/api/projects/:projectId/reasoner/domains", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const minSize = Math.min(50, Math.max(2, parseInt(String(req.query.minSize)) || 4));
+
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) {
+        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      }
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const sg = manifest.systemGraph;
+      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
+        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
+      }
+
+      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { resolveReasonerLLM } = await import("./reasoner/llm");
+      const { nameDomains } = await import("./reasoner/domains");
+
+      const shaped = shapeSystemGraph(sg, "class");
+      const report = await nameDomains(shaped, resolveReasonerLLM(), { minSize });
+
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing domains:", error);
+      res.status(500).json({ message: "Failed to compute domains" });
+    }
+  });
+
   // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
   // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
