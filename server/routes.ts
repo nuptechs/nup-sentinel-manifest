@@ -1659,23 +1659,19 @@ export async function registerRoutes(
       const symbol = typeof req.query.symbol === "string" ? req.query.symbol.trim() : "";
       if (!symbol) return res.status(400).json({ message: "query param 'symbol' is required (ex: FooService, Contract)" });
 
-      const snapshots = await storage.getAnalysisSnapshots(projectId);
-      if (!snapshots.length) {
-        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
-      }
-      const manifest = (snapshots[0].manifestJson as any) || {};
-      const sg = manifest.systemGraph;
-      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
-        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
-      }
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
 
-      const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const { buildNarrativeSubgraph } = await import("./analyzers/narrative-subgraph");
       const { narrate } = await import("./analyzers/narrative");
       const { projectAllPerspectives, projectPerspective, parsePersona } = await import("./analyzers/narrative-projections");
 
-      const shaped = shapeSystemGraph(sg, "class");
-      const adrLinks = manifest?.adrLinks?.links; // AdrLink[] persistido (ou undefined)
+      const shaped = loaded.shaped;
+      const adrLinks = (loaded.manifest as any)?.adrLinks?.links; // AdrLink[] persistido (ou undefined)
       const sub = buildNarrativeSubgraph(shaped, symbol, {
         adrLinks: Array.isArray(adrLinks) ? adrLinks : undefined,
       });
@@ -1702,7 +1698,7 @@ export async function registerRoutes(
 
       res.json({
         projectId,
-        analysisRunId: snapshots[0].analysisRunId,
+        analysisRunId: loaded.analysisRunId,
         symbol,
         narrative,
         perspectives,
@@ -1740,26 +1736,21 @@ export async function registerRoutes(
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
       const topN = Math.min(100, Math.max(1, parseInt(String(req.query.topN)) || 20));
 
-      const snapshots = await storage.getAnalysisSnapshots(projectId);
-      if (!snapshots.length) {
-        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
-      }
-      const manifest = (snapshots[0].manifestJson as any) || {};
-      const sg = manifest.systemGraph;
-      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
-        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
-      }
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
 
-      const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const { resolveReasonerLLM } = await import("./reasoner/llm");
       const { triageDeadCode } = await import("./reasoner/dead-code");
 
-      const shaped = shapeSystemGraph(sg, "class");
-      const report = await triageDeadCode(shaped, resolveReasonerLLM(), { topN });
+      const report = await triageDeadCode(loaded.shaped, resolveReasonerLLM(), { topN });
 
       res.json({
         projectId,
-        analysisRunId: snapshots[0].analysisRunId,
+        analysisRunId: loaded.analysisRunId,
         ...report,
       });
     } catch (error) {
@@ -1780,24 +1771,19 @@ export async function registerRoutes(
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
       const minSize = Math.min(50, Math.max(2, parseInt(String(req.query.minSize)) || 4));
 
-      const snapshots = await storage.getAnalysisSnapshots(projectId);
-      if (!snapshots.length) {
-        return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
-      }
-      const manifest = (snapshots[0].manifestJson as any) || {};
-      const sg = manifest.systemGraph;
-      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
-        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
-      }
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
 
-      const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const { resolveReasonerLLM } = await import("./reasoner/llm");
       const { nameDomains } = await import("./reasoner/domains");
 
-      const shaped = shapeSystemGraph(sg, "class");
-      const report = await nameDomains(shaped, resolveReasonerLLM(), { minSize });
+      const report = await nameDomains(loaded.shaped, resolveReasonerLLM(), { minSize });
 
-      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+      res.json({ projectId, analysisRunId: loaded.analysisRunId, ...report });
     } catch (error) {
       console.error("Error computing domains:", error);
       res.status(500).json({ message: "Failed to compute domains" });
@@ -1813,18 +1799,16 @@ export async function registerRoutes(
       const projectId = parseInt(req.params.projectId);
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
       const topN = Math.min(100, Math.max(1, parseInt(String(req.query.topN)) || 25));
-      const snapshots = await storage.getAnalysisSnapshots(projectId);
-      if (!snapshots.length) return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
-      const manifest = (snapshots[0].manifestJson as any) || {};
-      const sg = manifest.systemGraph;
-      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
-        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
-      }
-      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
       const { resolveReasonerLLM } = await import("./reasoner/llm");
       const { explainRuntimeGap } = await import("./reasoner/runtime-gap");
-      const report = await explainRuntimeGap(shapeSystemGraph(sg, "class"), resolveReasonerLLM(), { topN });
-      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+      const report = await explainRuntimeGap(loaded.shaped, resolveReasonerLLM(), { topN });
+      res.json({ projectId, analysisRunId: loaded.analysisRunId, ...report });
     } catch (error) {
       console.error("Error computing runtime-gap:", error);
       res.status(500).json({ message: "Failed to compute runtime-gap" });
@@ -1838,18 +1822,16 @@ export async function registerRoutes(
     try {
       const projectId = parseInt(req.params.projectId);
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
-      const snapshots = await storage.getAnalysisSnapshots(projectId);
-      if (!snapshots.length) return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
-      const manifest = (snapshots[0].manifestJson as any) || {};
-      const sg = manifest.systemGraph;
-      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
-        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
-      }
-      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
       const { resolveReasonerLLM } = await import("./reasoner/llm");
       const { explainVerdict } = await import("./reasoner/verdict");
-      const report = await explainVerdict(shapeSystemGraph(sg, "class"), resolveReasonerLLM());
-      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+      const report = await explainVerdict(loaded.shaped, resolveReasonerLLM());
+      res.json({ projectId, analysisRunId: loaded.analysisRunId, ...loaded.overlays, ...report });
     } catch (error) {
       console.error("Error computing verdict:", error);
       res.status(500).json({ message: "Failed to compute verdict" });
@@ -1869,29 +1851,27 @@ export async function registerRoutes(
       if (!entry) return res.status(400).json({ message: "query param 'entry' is required (ex: authorize.routes, FooService)" });
       const maxSteps = Math.min(80, Math.max(4, parseInt(String(req.query.maxSteps)) || 40));
 
-      const snapshots = await storage.getAnalysisSnapshots(projectId);
-      if (!snapshots.length) return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
-      const manifest = (snapshots[0].manifestJson as any) || {};
-      const sg = manifest.systemGraph;
-      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
-        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
-      }
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
+      const shaped = loaded.shaped;
 
-      const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const { resolveReasonerLLM } = await import("./reasoner/llm");
       const { buildMechanismSkeleton, traceMechanism } = await import("./reasoner/mechanism");
       const { jaegerRuntimeOrderPort } = await import("./reasoner/adapters/runtime-order.adapter");
       // ORDEM REAL de execução (OTel/Jaeger) — config resolvida POR PROJETO (a mesma
       // do runtime-overlay: jaegerUrl + serviço + casamento de rota). Gated/fail-soft.
+      // Reusa o `loaded.project` (já carregado pelo loader) — sem 2ª ida ao storage.
       const { resolveRuntimeOverlayConfig, projectOverlayConfig } = await import("./analyzers/runtime-overlay");
-      const proj = await storage.getProject(projectId).catch(() => null);
-      const rtCfg = resolveRuntimeOverlayConfig(projectOverlayConfig(proj), process.env);
+      const rtCfg = resolveRuntimeOverlayConfig(projectOverlayConfig(loaded.project), process.env);
       const runtimeOrderPort = jaegerRuntimeOrderPort(
         rtCfg
           ? { jaegerUrl: rtCfg.jaegerUrl, services: rtCfg.services, gatewayServices: rtCfg.gatewayServices, opPathPattern: rtCfg.opPathPattern, lookbackMs: rtCfg.lookbackMs, limit: rtCfg.limit }
           : {},
       );
-      const shaped = shapeSystemGraph(sg, "class");
 
       // ORQUESTRAÇÃO: descobre os arquivos envolvidos no esqueleto e puxa o SOURCE
       // deles (o Sentinel lê o mesmo código que o agente leria) — só quando há LLM.
@@ -1925,7 +1905,7 @@ export async function registerRoutes(
       }
 
       const report = await traceMechanism(shaped, entry, llm, { maxSteps, sourceByFile, runtimeOrderPort });
-      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+      res.json({ projectId, analysisRunId: loaded.analysisRunId, ...report });
     } catch (error) {
       console.error("Error computing mechanism:", error);
       res.status(500).json({ message: "Failed to compute mechanism" });

@@ -20,24 +20,50 @@ function withCoverage(byMethod: Record<string, number>, observedRatio: number, n
   };
 }
 
-describe("reasoner/verdict — computeEvidenceVerdict (tier determinístico)", () => {
+describe("reasoner/verdict — computeEvidenceVerdict (tier PROVEN-AWARE)", () => {
   it("STRONG quando runtime cobre fatia real (convergência de eixos)", () => {
     const v = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 30, STATIC_PROVEN: 70 }, 0.3));
     assert.equal(v.tier, "STRONG");
   });
 
-  it("MODERATE quando estático domina e runtime é ralo", () => {
+  it("MODERATE quando estático domina e runtime é ralo (sabe estrutura, não o que roda)", () => {
+    // 100% provado, mas só 2% observado → NÃO é STRONG (convergência dinâmica quase nula)
     const v = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 2, STATIC_PROVEN: 98 }, 0.02));
     assert.equal(v.tier, "MODERATE");
   });
 
-  it("WEAK quando muita aresta é só-declarada/UNKNOWN", () => {
-    const v = computeEvidenceVerdict(withCoverage({ STATIC_PROVEN: 30, UNKNOWN: 50, STATIC_UNRESOLVED: 20 }, 0));
+  it("WEAK quando pouco está provado por QUALQUER método (grafo quase todo heurístico)", () => {
+    // provenRatio 15% (< 20%) → WEAK, mesmo com 15 arestas provadas
+    const v = computeEvidenceVerdict(withCoverage({ STATIC_PROVEN: 15, UNKNOWN: 55, STATIC_UNRESOLVED: 30 }, 0));
     assert.equal(v.tier, "WEAK");
   });
 
-  it("reporta observedRatio, byMethod e nós exercitados", () => {
+  it("MONOTONIA: adicionar prova NUNCA rebaixa o tier (o bug que motivou o proven-aware)", () => {
+    // grafo CRU: runtime domina o pouco que existe → STRONG
+    const cru = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 198, STATIC_UNRESOLVED: 1018 }, 0.163));
+    // grafo MESCLADO (scip adiciona 643 provadas): observedRatio CAI p/ 10.7%, mas provado SOBE p/ 45%
+    const merged = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 198, STATIC_PROVEN: 643, STATIC_UNRESOLVED: 1018 }, 0.107));
+    assert.equal(cru.tier, "STRONG");
+    assert.equal(merged.tier, "STRONG"); // NÃO caiu p/ WEAK só porque o denominador cresceu
+    assert.ok(merged.provenRatio > cru.provenRatio, "provenRatio sobe ao mesclar prova");
+  });
+
+  it("caso REAL identify (mesclado): 45% provado + 10.7% runtime → STRONG", () => {
+    const v = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 198, STATIC_PROVEN: 643, STATIC_UNRESOLVED: 1018 }, 0.107));
+    assert.equal(v.tier, "STRONG");
+    assert.ok(Math.abs(v.provenRatio - 0.452) < 0.01, "provenRatio ~45%");
+  });
+
+  it("caso REAL easynup (mesclado): 25% provado + 0.1% runtime → MODERATE (estrutura provada, runtime ausente)", () => {
+    const v = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 7, STATIC_PROVEN: 3207, CONFIG_PROVEN: 22, STATIC_UNRESOLVED: 9709 }, 0.0005));
+    assert.equal(v.tier, "MODERATE");
+    assert.ok(Math.abs(v.provenRatio - 0.25) < 0.01, "provenRatio ~25%");
+  });
+
+  it("reporta provenRatio, observedRatio, unresolvedRatio, byMethod e nós exercitados", () => {
     const v = computeEvidenceVerdict(withCoverage({ RUNTIME_OBSERVED: 1, STATIC_PROVEN: 99 }, 0.01, { observed: 3, total: 40 }));
+    assert.equal(v.provenRatio, 1); // tudo provado (runtime+static)
+    assert.equal(v.unresolvedRatio, 0);
     assert.equal(v.nodes.observed, 3);
     assert.equal(v.nodes.total, 40);
     assert.ok(v.reasons.some((r) => /exercitados por tráfego/.test(r)));
@@ -65,7 +91,7 @@ describe("reasoner/verdict — explainVerdict (IA sob checagem de consistência)
   it("REJEITA a prosa da IA que contradiz o tier (juiz é o determinístico)", async () => {
     // deterministicamente WEAK; a IA tenta dizer 'forte' → prosa descartada, fica o template
     const llm = async () => "A leitura é forte e totalmente confiável.";
-    const v = await explainVerdict(withCoverage({ UNKNOWN: 60, STATIC_PROVEN: 40 }, 0), llm);
+    const v = await explainVerdict(withCoverage({ UNKNOWN: 70, STATIC_PROVEN: 15, STATIC_UNRESOLVED: 15 }, 0), llm);
     assert.equal(v.tier, "WEAK");
     assert.equal(v.mode, "deterministic"); // prosa rejeitada
     assert.match(v.explanation, /FRACA/);
