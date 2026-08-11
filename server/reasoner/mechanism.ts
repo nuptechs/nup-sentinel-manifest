@@ -188,7 +188,15 @@ export function applyRuntimeOrder<T extends { toLabel: string; relationType: str
 
   let orderedCount = 0;
   const withRank = steps.map((s) => {
-    const isData = s.relationType === "READS_ENTITY" || s.relationType === "WRITES_ENTITY";
+    // Passo de toque-em-dado: READS/WRITES estáticos OU a aresta rota→tabela
+    // observada (RUNTIME_OBSERVED). Esta última é a forma dos passos quando a
+    // entrada é um nó `route:runtime:` — sem ela, a ordem real do OTel nunca
+    // se aplicava a rotas observadas. Passo cujo toLabel não casa uma tabela
+    // simplesmente não acha rank e cai na ordem por alcance (seguro).
+    const isData =
+      s.relationType === "READS_ENTITY" ||
+      s.relationType === "WRITES_ENTITY" ||
+      s.relationType === "RUNTIME_OBSERVED";
     const r = isData ? rankByNorm.get(norm(s.toLabel)) : undefined;
     if (r !== undefined) orderedCount++;
     return { ...s, ...(r !== undefined ? { runtimeRank: r } : {}) } as T & { runtimeRank?: number };
