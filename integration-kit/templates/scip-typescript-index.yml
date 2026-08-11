@@ -99,12 +99,16 @@ jobs:
         if: steps.index.outcome == 'success'
         continue-on-error: true
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/nuptechs/nup-sentinel-manifest/${MANIFEST_TOOLS_REF}/tools/scip-typescript/derive-edges.mjs" -o /tmp/derive-edges.mjs
-          test -s /tmp/derive-edges.mjs
+          BASE="https://raw.githubusercontent.com/nuptechs/nup-sentinel-manifest/${MANIFEST_TOOLS_REF}/tools/scip-typescript"
+          # o deriver importa o módulo irmão scip-data-access.mjs (arestas função→tabela
+          # READ/WRITE compiler-accurate do MESMO índice) — baixa os DOIS no mesmo dir.
+          curl -fsSL "${BASE}/derive-edges.mjs" -o /tmp/derive-edges.mjs
+          curl -fsSL "${BASE}/scip-data-access.mjs" -o /tmp/scip-data-access.mjs
+          test -s /tmp/derive-edges.mjs && test -s /tmp/scip-data-access.mjs
           SCIP_LIB=$(node -p "require.resolve('@sourcegraph/scip-typescript/dist/src/scip.js')")
           echo "scip-lib: ${SCIP_LIB}"
           node --max-old-space-size=6000 /tmp/derive-edges.mjs index.scip --scip-lib "${SCIP_LIB}" > edges.json
-          node -e "const e=require('./edges.json'); if(!e||!Array.isArray(e.edges)){console.error('edges.json invalido');process.exit(1);} console.log('counts:', JSON.stringify(e.counts), 'edges:', e.edges.length)"
+          node -e "const e=require('./edges.json'); if(!e||!Array.isArray(e.edges)){console.error('edges.json invalido');process.exit(1);} console.log('counts:', JSON.stringify(e.counts), 'edges:', e.edges.length, 'dataAccess:', (e.dataAccess||[]).length)"
 
       - name: POST arestas STATIC_PROVEN ao Manifest
         id: post_static
