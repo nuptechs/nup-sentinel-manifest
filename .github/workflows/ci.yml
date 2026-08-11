@@ -37,6 +37,12 @@ jobs:
       # dimensão) — é ruído esperado, não falha teste.
       - name: Test client (vitest)
         run: npm run test:client
+      # Guarda anti-drift de documentação: as docs autoritativas ancoram
+      # afirmações por SÍMBOLO (`arquivo:Símbolo`); este gate falha se uma
+      # âncora deixar de existir no código (doc e código divergiram). Zero
+      # dependência, determinístico (Node 20 já instalado acima).
+      - name: Verify docs (doc-verify)
+        run: node scripts/doc-verify.mjs --root . --marked
 
   # ADR-0023 O5 — o engine Java consolidado (dual-entrypoint HTTP+CLI) ganha
   # gate próprio: antes o código Java só era validado dentro do docker build

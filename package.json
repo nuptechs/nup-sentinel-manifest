@@ -14,7 +14,8 @@
     "test": "tsx --test $(find tests -name '*.test.ts')",
     "test:schemathesis": "bash scripts/schemathesis-local.sh",
     "db:push": "drizzle-kit push",
-    "test:client": "vitest run"
+    "test:client": "vitest run",
+    "doc:verify": "node scripts/doc-verify.mjs --root . --marked"
   },
   "dependencies": {
     "@angular/compiler": "^21.1.3",
