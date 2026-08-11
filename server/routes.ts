@@ -1856,6 +1856,71 @@ export async function registerRoutes(
     }
   });
 
+  // Reasoner — MECANISMO VERIFICADO (o Sentinel ORQUESTRA o agente, aterrado). O
+  // eixo em que o agente cru ainda vencia (o COMO: sequência/ramos/fail-closed). O
+  // esqueleto determinístico (BFS forward, arestas PROVADAS, runtime por passo) é o
+  // andaime; a IA lê o SOURCE dos arquivos envolvidos e nomeia a intenção de cada
+  // passo — mas passo sem edgeId provado é DESCARTADO (nada de chute). ?entry=<símbolo>.
+  app.get("/api/projects/:projectId/reasoner/mechanism", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const entry = typeof req.query.entry === "string" ? req.query.entry.trim() : "";
+      if (!entry) return res.status(400).json({ message: "query param 'entry' is required (ex: authorize.routes, FooService)" });
+      const maxSteps = Math.min(80, Math.max(4, parseInt(String(req.query.maxSteps)) || 40));
+
+      const snapshots = await storage.getAnalysisSnapshots(projectId);
+      if (!snapshots.length) return res.status(404).json({ message: "No analysis snapshot for this project yet — run an analysis first." });
+      const manifest = (snapshots[0].manifestJson as any) || {};
+      const sg = manifest.systemGraph;
+      if (!sg || !Array.isArray(sg.nodes) || !Array.isArray(sg.edges)) {
+        return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Este snapshot precede o system graph — re-rode a análise." });
+      }
+
+      const { shapeSystemGraph } = await import("./analyzers/system-graph");
+      const { resolveReasonerLLM } = await import("./reasoner/llm");
+      const { buildMechanismSkeleton, traceMechanism } = await import("./reasoner/mechanism");
+      const shaped = shapeSystemGraph(sg, "class");
+
+      // ORQUESTRAÇÃO: descobre os arquivos envolvidos no esqueleto e puxa o SOURCE
+      // deles (o Sentinel lê o mesmo código que o agente leria) — só quando há LLM.
+      const llm = resolveReasonerLLM();
+      let sourceByFile: Map<string, string> | undefined;
+      if (llm) {
+        const entryId = shaped.nodes.find((n) => n.id === entry || (n.className || "").toLowerCase().includes(entry.toLowerCase()) || n.id.toLowerCase().includes(entry.toLowerCase()))?.id;
+        if (entryId) {
+          const { steps } = buildMechanismSkeleton(shaped, entryId, { maxSteps });
+          const nodeById = new Map(shaped.nodes.map((n) => [n.id, n]));
+          const involvedIds = new Set<string>([entryId]);
+          for (const s of steps) {
+            const fn = shaped.nodes.find((n) => (n.className || n.id.split(":").pop()) === s.fromLabel);
+            const tn = shaped.nodes.find((n) => (n.className || n.id.split(":").pop()) === s.toLabel);
+            if (fn) involvedIds.add(fn.id);
+            if (tn) involvedIds.add(tn.id);
+          }
+          const wantFiles = new Set<string>();
+          for (const id of involvedIds) {
+            const sf = nodeById.get(id)?.sourceFile;
+            if (typeof sf === "string" && sf) wantFiles.add(sf);
+          }
+          if (wantFiles.size > 0) {
+            const files = await storage.getSourceFiles(projectId);
+            sourceByFile = new Map();
+            for (const f of files) {
+              if (wantFiles.has(f.filePath) && sourceByFile.size < 8) sourceByFile.set(f.filePath, f.content);
+            }
+          }
+        }
+      }
+
+      const report = await traceMechanism(shaped, entry, llm, { maxSteps, sourceByFile });
+      res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
+    } catch (error) {
+      console.error("Error computing mechanism:", error);
+      res.status(500).json({ message: "Failed to compute mechanism" });
+    }
+  });
+
   // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
   // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
