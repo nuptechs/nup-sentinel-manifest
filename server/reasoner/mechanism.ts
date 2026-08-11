@@ -22,6 +22,7 @@ import type { ShapedGraph, ShapedNode, ShapedEdge } from "../analyzers/system-gr
 import type { ReasonerLLM } from "./llm";
 import { parseJsonArray } from "./llm";
 import { groundClaims, emptyLedger, type GroundingLedger, type GroundableClaim } from "./grounding";
+import { nullRuntimeOrderPort, type RuntimeOp, type RuntimeOrderPort } from "./mechanism-ports";
 
 /** Relações que fazem parte do FLUXO de execução (não herança/associação estrutural). */
 const FLOW_RELATIONS = new Set(["CALLS", "READS_ENTITY", "WRITES_ENTITY", "RUNTIME_OBSERVED"]);
@@ -42,6 +43,8 @@ export interface MechanismStep {
   resolution?: string;
   /** intenção nomeada pela IA sob gate (ou o template determinístico). */
   text: string;
+  /** posição na ordem REAL de execução (do OTel), quando o passo casou um span. */
+  runtimeRank?: number;
 }
 
 export interface MechanismReport {
@@ -51,6 +54,10 @@ export interface MechanismReport {
   steps: MechanismStep[];
   /** quantos passos o runtime confirmou (vs só-estático). */
   runtimeConfirmed: number;
+  /** quantos passos foram ordenados pela ORDEM REAL de execução (OTel), não por alcance. */
+  runtimeOrderedSteps: number;
+  /** de onde veio a ordem dos passos. */
+  orderSource: "reachability" | "runtime-partial";
   /** ramos/pontos de decisão detectados deterministicamente (nós com fan-out > 1). */
   branches: Array<{ atLabel: string; fanOut: number }>;
   mode: "deterministic" | "llm-grounded";
@@ -157,6 +164,43 @@ export function buildMechanismSkeleton(
   return { steps, branches: dedupBranches };
 }
 
+/**
+ * PURO: reordena os passos pela ORDEM REAL de execução do OTel. Um passo que TOCA
+ * ENTIDADE (READS/WRITES) cujo alvo casa uma tabela observada recebe o `rank` real;
+ * os passos ordenados-por-runtime vêm primeiro (na ordem de execução), os demais
+ * seguem na ordem de alcance. Sem ops → devolve os passos intactos. Nunca lança.
+ */
+export function applyRuntimeOrder<T extends { toLabel: string; relationType: string; order: number }>(
+  steps: T[],
+  ops: RuntimeOp[],
+): { steps: (T & { runtimeRank?: number })[]; orderedCount: number } {
+  if (!Array.isArray(ops) || ops.length === 0) return { steps, orderedCount: 0 };
+  const rankByTable = new Map<string, number>();
+  for (const o of ops) if (!rankByTable.has(o.table)) rankByTable.set(o.table, o.rank);
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const rankByNorm = new Map<string, number>();
+  for (const [t, r] of rankByTable) rankByNorm.set(norm(t), r);
+
+  let orderedCount = 0;
+  const withRank = steps.map((s) => {
+    const isData = s.relationType === "READS_ENTITY" || s.relationType === "WRITES_ENTITY";
+    const r = isData ? rankByNorm.get(norm(s.toLabel)) : undefined;
+    if (r !== undefined) orderedCount++;
+    return { ...s, ...(r !== undefined ? { runtimeRank: r } : {}) } as T & { runtimeRank?: number };
+  });
+  // ordena: com runtimeRank primeiro (por rank), depois os demais (por order de alcance)
+  withRank.sort((a, b) => {
+    const ar = a.runtimeRank, br = b.runtimeRank;
+    if (ar !== undefined && br !== undefined) return ar - br;
+    if (ar !== undefined) return -1;
+    if (br !== undefined) return 1;
+    return a.order - b.order;
+  });
+  // reindexa `order` para refletir a nova sequência
+  withRank.forEach((s, i) => (s.order = i + 1));
+  return { steps: withRank, orderedCount };
+}
+
 function templateText(s: Omit<MechanismStep, "text">): string {
   const verb =
     s.relationType === "CALLS" ? "chama" : s.relationType === "READS_ENTITY" ? "lê" : s.relationType === "WRITES_ENTITY" ? "escreve" : s.relationType === "RUNTIME_OBSERVED" ? "→ (observado)" : s.relationType.toLowerCase();
@@ -176,7 +220,7 @@ export async function traceMechanism(
   graph: ShapedGraph,
   entryQuery: string,
   llm: ReasonerLLM | null,
-  opts: { maxDepth?: number; maxSteps?: number; sourceByFile?: Map<string, string> } = {},
+  opts: { maxDepth?: number; maxSteps?: number; sourceByFile?: Map<string, string>; runtimeOrderPort?: RuntimeOrderPort } = {},
 ): Promise<MechanismReport> {
   const resolvedEntryId = resolveEntry(graph, entryQuery);
   if (!resolvedEntryId) {
@@ -185,6 +229,8 @@ export async function traceMechanism(
       resolvedEntryId: null,
       steps: [],
       runtimeConfirmed: 0,
+      runtimeOrderedSteps: 0,
+      orderSource: "reachability",
       branches: [],
       mode: "deterministic",
       grounding: emptyLedger(),
@@ -225,14 +271,34 @@ export async function traceMechanism(
     }
   }
 
-  const steps: MechanismStep[] = raw.map((s) => ({ ...s, text: textByEdge.get(s.edgeId) || templateText(s) }));
+  let steps: MechanismStep[] = raw.map((s) => ({ ...s, text: textByEdge.get(s.edgeId) || templateText(s) }));
+
+  // ORDEM REAL (OTel): a porta devolve a sequência de execução observada; reordena
+  // os passos que tocam entidade. Fail-soft: sem porta/sem dados → ordem por alcance.
+  const port = opts.runtimeOrderPort ?? nullRuntimeOrderPort;
+  let runtimeOrderedSteps = 0;
+  let orderSource: MechanismReport["orderSource"] = "reachability";
+  try {
+    const ops = await port.orderedOpsFor(resolvedEntryId);
+    if (ops.length > 0) {
+      const applied = applyRuntimeOrder(steps, ops);
+      steps = applied.steps;
+      runtimeOrderedSteps = applied.orderedCount;
+      if (runtimeOrderedSteps > 0) orderSource = "runtime-partial";
+    }
+  } catch {
+    /* fail-soft: mantém a ordem por alcance */
+  }
+
   const runtimeConfirmed = steps.filter((s) => s.runtimeConfirmed).length;
   const summary =
     steps.length === 0
       ? `A entrada "${labelOf(graph.nodes.find((n) => n.id === resolvedEntryId), resolvedEntryId)}" não tem arestas de fluxo a jusante no grafo provado.`
-      : `Mecanismo de ${entryQuery}: ${steps.length} passo(s) PROVADO(s) em ordem de alcance, ${runtimeConfirmed} confirmado(s) por runtime, ${branches.length} ponto(s) de decisão. ` +
+      : `Mecanismo de ${entryQuery}: ${steps.length} passo(s) PROVADO(s) ` +
+        `(ordem ${orderSource === "runtime-partial" ? `REAL de execução do OTel em ${runtimeOrderedSteps} passo(s)` : "por alcance — sem traço de runtime"}), ` +
+        `${runtimeConfirmed} confirmado(s) por runtime, ${branches.length} ponto(s) de decisão. ` +
         `${mode === "llm-grounded" ? `IA nomeou a intenção sob gate (${ledger.rejected} chute(s) rejeitado(s)).` : "Modo determinístico (sem LLM)."} ` +
         `Cada passo é uma aresta provada — nenhum é chute não-ancorado.`;
 
-  return { entry: entryQuery, resolvedEntryId, steps, runtimeConfirmed, branches, mode, grounding: ledger, summary };
+  return { entry: entryQuery, resolvedEntryId, steps, runtimeConfirmed, runtimeOrderedSteps, orderSource, branches, mode, grounding: ledger, summary };
 }
