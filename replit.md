@@ -1,83 +1,10 @@
-# Manifest - Code-to-Permission Catalog Generator
+# Manifest — nota do Replit (stub)
 
-## Overview
-Manifest is an enterprise-grade static code intelligence tool designed to analyze frontend (Vue/React/Angular) and Spring Boot backend source code. Its primary purpose is to automatically generate a Technical Action Catalog for Identity and Access Management (IAM) systems. This tool aims to streamline the process of understanding and managing permissions by providing a comprehensive overview of technical operations derived directly from the codebase. The project envisions creating a comprehensive, editable catalog that bridges the gap between code implementation and IAM requirements, facilitating better security and compliance.
+> **Verificado @ cf394d3 · 2026-08-11.** Se código e este doc divergirem, o código vence — atualize este doc no MESMO PR.
+<!-- doc-verify: on -->
 
-## User Preferences
-I want iterative development. I expect you to ask clarifying questions about the implementation details and decisions. I prefer detailed explanations for complex parts of the code.
+A arquitetura autoritativa deste módulo vive em [`README.md`](README.md) e [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) — ambos code-anchored (`arquivo:símbolo`) e verificados pelo linter `scripts/doc-verify.mjs`.
 
-## System Architecture
-The application features a frontend built with React, TypeScript, Shadcn UI, and TailwindCSS. The backend is powered by Express, TypeScript, Drizzle ORM, and PostgreSQL. A standalone JVM service, utilizing the JavaParser AST library, handles Spring Boot code analysis. Frontend analysis is performed using the TypeScript compiler API (React/JS/TS), `@vue/compiler-sfc` (Vue SFCs), and `@angular/compiler` (Angular templates). A Semantic Engine, powered by OpenAI LLM (via Replit AI Integrations), is used for classifying technical operations and assigning criticality scores.
+O enquadramento antigo deste arquivo ("Code-to-Permission Catalog Generator") está **obsoleto**: o produto real é um **servidor de análise de evidência tri-eixo** (RUNTIME_OBSERVED / STATIC_PROVEN / CONFIG_PROVEN, mais o método de admissão STATIC_UNRESOLVED) que monta um grafo de aplicação, cataloga endpoints/permissões/entidades e provê evidência por REST, com veredito determinístico local. O catálogo de permissões e os geradores de manifesto são **uma das saídas**, não a tese.
 
-Key features include ZIP repository upload for automatic scanning, individual file uploads, AST-based parsing of frontend interaction points and Java backend components (controllers, services, repositories, entities), and building a graph connecting frontend interactions to backend endpoints with full method tracing. The system supports backend-only catalog generation, an editable catalog with human classification support, and first-class manifest output generation.
-
-A **Manifest Generation System** produces seven pipeline-ready output formats from catalog entries: MANIFEST.json, AGENTS.md, OpenAPI 3.0.3 Spec, Policy Matrix (including Keycloak, Okta, and AWS IAM policies), **Keycloak Realm Export** (full importable realm JSON with roles, clients, client scopes, authorization settings), **OPA/Rego Policies** (enforcement rules for Open Policy Agent with per-endpoint allow rules, role matching, and sensitive data guards), and **SOC2/LGPD Compliance Report** (auditable HTML document with endpoint inventory, access control matrix, personal data processing report per LGPD Art. 37, security findings, coverage metrics, and compliance checklist — printable to PDF).
-
-The Java Backend Analyzer uses JavaParser with JavaSymbolSolver for semantic AST analysis. The Frontend Analyzer, built in Node.js, uses framework-specific AST parsers to resolve handlers, trace HTTP calls, and identify HTTP client identifiers, employing a multi-pass architecture for robust cross-file HTTP service resolution and a **fifteen-tier HTTP resolution system**: local, serviceMap, objectMethodImport (imported object method calls), hookMethodBridge (hook-returned object methods), destructuredBinding (destructured hook returns via GCG), destructuredHookBridge (cross-file hook source tracing), contextHook, dynamicImport, globalCallGraph, serviceMapBroadSearch (cross-file method name matching), eventGraph (+serviceMap, +globalCallGraph), dispatchAction (Redux/Vuex store dispatch patterns), stateFlowGraph, architecturalLayerGraph, fuzzyGlobalMatch, and crossFileNameMatch (same-name function across project files). The system constructs an in-memory Application Graph model, facilitating detailed traversal and impact analysis.
-
-The enriched catalog model captures extensive metadata for each entry, including `resolutionPath`, `architectureType`, `interactionCategory`, `confidence`, `requiredRoles` (from Spring Security annotations), `securityAnnotations`, `entityFieldsMetadata` (JPA entity field enrichment including validation and sensitivity), `sensitiveFieldsAccessed`, `frontendRoute`, and `routeGuards`. Spring Security annotations are extracted, including SpEL expression parsing. JPA entity fields are enriched, and frontend router definitions (Vue Router, React Router, Angular Router) are parsed.
-
-An **Analysis Pipeline** encapsulates the full analysis workflow: graph construction, architecture detection, endpoint analysis, frontend interaction scanning, graph connection, deterministic classification, persistence, and finalization. It includes **Hybrid Incremental Analysis** with in-memory caching per project based on file content SHA-256 hashes, allowing reuse of frontend or backend analysis results if only one part of the codebase changes.
-
-A **Frontend-Only Analysis Enhancement** system enriches catalog entries for projects without Java backends:
-- **Frontend Inference Engine** (`server/analyzers/frontend-inference-engine.ts`): Post-processing step that infers backend structure from HTTP URLs — controller names from URL prefixes, entity names from resource paths, CRUD operations from HTTP methods, and role requirements from URL patterns (e.g., `/admin/*` → ADMIN role). Wired into the analysis pipeline after deterministic classification.
-- **Frontend Auth Pattern Detection**: Scans component source code for authentication patterns including auth hooks (`useAuth`, `usePermission`), HOC wrappers (`withAuth`, `ProtectedRoute`), conditional rendering guards (`isAdmin &&`), token checks (`localStorage.getItem('token')`), and API auth headers. Populates `requiredRoles`, `routeGuards`, and `securityAnnotations` fields.
-- **Custom Hook Return Tracing**: The GlobalCallGraph traces destructured returns from custom hooks (e.g., `const { save } = useMyService()`) AND non-destructured results (e.g., `const api = useApi()` → `api.method()`) to link component-level function calls back to the hook's implementation, enabling HTTP call propagation through hook boundaries.
-- **React Query Hook Detection**: Detects `useMutation` and `useQuery` hook patterns, extracting HTTP calls from `mutationFn`/`queryFn` and `queryKey` configurations, with graph node creation for destructured functions (`mutate`, `mutateAsync`).
-- **Barrel/Re-export Resolution**: The `buildHttpServiceMap` follows `export { X } from './Y'` and `export * from './Y'` re-export declarations to propagate HTTP call entries from implementation files through barrel/index files.
-- **Multi-hop Callee Traversal**: The `lookupGlobalCallGraph` follows callee chains up to 5 levels deep when the direct node has no HTTP calls, finding propagated calls through intermediate functions. Includes import-aware fallback lookups and cross-file name matching.
-- **Store Dispatch Pattern Resolution**: The `dispatchAction` tier traces Redux/Vuex/store dispatch patterns — `dispatch(actionCreator())`, `store.dispatch()`, `this.$store.dispatch()` — extracting action names and resolving them in the GlobalCallGraph.
-- **Cross-File Name Match Tier**: A low-confidence (0.50) last-resort tier that matches handler names against all GlobalCallGraph nodes across project files, finding same-name functions with HTTP calls in other files.
-- **Fuzzy Global Match Tier**: A safe fallback resolution tier that matches handler-called functions by unique name across the project (excluding common names like "load", "submit"), used only when no other tier resolves.
-- **React Router v6 Index Routes**: Route extraction handles `<Route index />` and `{ index: true }` patterns, inheriting parent path for index routes.
-- **Enhanced Route Matching**: Route enrichment uses multiple fallback strategies: component name, filename, directory path, PascalCase→kebab-case conversion, and Page/View/Screen suffix stripping.
-- **Manifest Completeness Metrics**: The manifest includes a `completeness` section with weighted scores for endpoint resolution, route coverage (measured by actual `frontendRoute` mappings), security coverage, entity coverage, controller coverage, and an overall completeness score. Displayed in the SOC2/LGPD Compliance Report as Section 6.
-
-A **Manifest Diff Engine** compares two analysis snapshots to produce structured diffs covering endpoints, screens, roles, entities, and security impact, storing analysis snapshots in the `analysis_snapshots` table.
-
-A **Git Integration System** provides first-class support for GitHub and GitLab repositories through an abstraction layer, enabling connection, branch listing, pull request analysis, and triggering analysis on connected projects via webhooks. PR analysis involves dual-branch analysis and manifest diff generation for security reports.
-
-A **Security Omission Engine** (`server/security/omission-engine.ts`) detects security flaws by absence — what SHOULD be protected but ISN'T. It uses structural comparison and pattern reasoning over the catalog entries to produce actionable findings:
-- **Unprotected Outlier Detection**: Groups endpoints by HTTP method + entity domain. When ≥50% of a group has security annotations but some don't, flags the unprotected ones as outliers with peer comparison context.
-- **Privilege Escalation Detection**: Identifies write operations (POST/PUT/PATCH) to role/permission/admin entities or fields without security constraints or with insufficient role protection.
-- **Sensitive Data Exposure Detection**: Flags GET endpoints accessing highly sensitive fields (password, token, SSN) without protection or with non-admin roles.
-- **Inconsistent Protection Detection**: Per-controller analysis — flags mutating endpoints without annotations when the majority of the controller is protected.
-- **Missing Protection on Critical Endpoints**: Flags high-criticality (≥60) unprotected endpoints not caught by other detectors.
-- **Security Coverage Metrics**: Computes protection rates overall, by HTTP method, by controller, and role distribution.
-- Findings are persisted in the `security_findings` table per analysis run and returned in the analysis result.
-- API: `GET /api/projects/:projectId/security-findings` with optional `?runId=` filter.
-- A **Security Audit** page (`/security`) provides a visual dashboard: summary cards (total findings, critical/high count, coverage %), severity distribution bar, and expandable finding cards with full evidence (target entry, peer comparison tables, coverage metrics by HTTP method).
-
-A **Platform Integration System** enables external system access via API Key Authentication (with project-scoped access and last-used tracking), Headless Analysis Endpoints for single-call or ZIP uploads, comprehensive OpenAPI Documentation, and Webhook Integration for GitHub and GitLab to auto-trigger analysis on configured projects.
-
-A **System Explorer** page provides a visual map of the analyzed system, grouping catalog entries by screen, with clickable interaction blocks that display a detailed trace panel showing the full resolution path from Frontend Interaction to Entities Touched, including all relevant metadata.
-
-## Frontend Analyzer Architecture (Modular)
-The `frontend-analyzer.ts` (456 lines) is a thin orchestrator that imports from extracted modules in `server/analyzers/frontend/`:
-- `http-service-map.ts` — canonical source for `buildHttpServiceMap`, `extractExports`, `extractClassMethods`, `extractHttpCallFromExpression`, `buildLocalVarMap`, `walkForHttpCalls`, `normalizeModulePath`
-- `global-call-graph.ts` — builds cross-file call graph with 15-tier HTTP resolution, callback tracking, optional chaining, hook result vars
-- `symbol-table.ts` — local HTTP client detection (`axios.create()`), compound key resolution, await unwrapping
-- `route-extraction.ts` — React Router v5/v6, Vue Router, Angular Router, file-path inference fallback
-- `auth-detection.ts` — auth hooks, HOCs, headers, tokens, conditional rendering, role extraction
-- `frontend-inference-engine.ts` — infers controller/entity/roles/security from HTTP URLs for frontend-only projects
-- `types.ts` — all shared type definitions
-
-## Known Technical Notes
-- **TypeScript ESM Import**: The `typescript` module must be imported via `import _ts from "typescript"; import ts = _ts;` pattern in `frontend-analyzer.ts` to handle ESM default export wrapping in the `tsx` runner. Using `import * as ts from "typescript"` can result in `ts.ScriptKind` being `undefined` at runtime.
-- **Pipeline Safety**: The analysis pipeline (`analysis-pipeline.ts`) only deletes existing catalog entries when the new analysis produces entries (>0). This prevents data loss if parsing fails.
-- **Frontend-Only Metrics**: For frontend-only projects, 303/363 AIM entries are correctly classified as "uiOnly" (setState, modal handlers). The 60 HTTP-relevant entries ALL resolve to endpoints (100%). The `interactionBreakdown` separates uiOnly from httpRelevant for accurate metric calculation.
-
-## External Dependencies
-- PostgreSQL
-- OpenAI LLM (via Replit AI Integrations)
-- Java JDK 17
-- Maven
-- Node.js 20
-- `JavaParser` library with `JavaSymbolSolver`
-- `@vue/compiler-sfc`
-- `@angular/compiler`
-- `adm-zip`
-- `multer`
-- `commander` (CLI tool)
-- `chalk` (CLI output formatting)
-- `cli-table3` (CLI table formatting)
+Nada aqui deve ser tratado como fonte de verdade sobre o código — leia o `README.md`.

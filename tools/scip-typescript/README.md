@@ -1,5 +1,8 @@
 # scip-typescript — backbone compiler-accurate de TS (ADR-0030 / P2 da ADR-0028)
 
+> **Verificado @ cf394d3 · 2026-08-11.** Se código e este doc divergirem, o código vence — atualize este doc no MESMO PR.
+<!-- doc-verify: on -->
+
 Ferramenta da **Engine A de TypeScript**: transforma um índice SCIP (produzido
 pelo `scip-typescript`, que usa o *type checker* de verdade) em arestas de
 call-graph **`STATIC_PROVEN`** para o mapa epistêmico (ADR-0028).
@@ -19,7 +22,7 @@ node tools/scip-typescript/derive-edges.mjs index.scip > edges.json
 ```
 
 `edges.json` = `{ counts, edges:[{from, to, kind:'CALLS', resolution:'compiler'|'interface-impl'}] }`.
-`resolution` casa direto com o `PRECISE_RESOLUTIONS` do `system-graph.ts:210` →
+`resolution` casa direto com o `PRECISE_RESOLUTIONS` do `server/analyzers/system-graph.ts:PRECISE_RESOLUTIONS` →
 classifica como `STATIC_PROVEN`.
 
 ## Provado ao vivo (NuPIdentify, 2026-08-05)
@@ -48,7 +51,7 @@ Estas arestas são **símbolo→símbolo** (função→função). O **motor de a
 (ADR-0031, `server/analyzers/scip-aggregate.ts`) faz a ponte: junta símbolo→
 nó-de-sistema e mescla as arestas provadas no `systemGraph` com
 `resolution:'compiler'`/'interface-impl' — que o `classifyEdgeEvidence`
-(`system-graph.ts:210`) já classifica como `STATIC_PROVEN`, sem tocar a
+(`server/analyzers/system-graph.ts:PRECISE_RESOLUTIONS`) já classifica como `STATIC_PROVEN`, sem tocar a
 classificação/rollup/censo.
 
 **A5 — granularidade de FUNÇÃO.** A junção original casava símbolo→nó por

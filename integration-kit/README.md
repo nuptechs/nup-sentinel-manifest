@@ -177,9 +177,11 @@ pelo servidor (vazio quando `healthy`).
 
 ### O mapa cobre o binário que está no ar? (eixo `drift`)
 
-Os quatro eixos acima dizem se a evidência **chega**. O `drift` diz outra coisa:
-se o que foi analisado é o que está **rodando**. Um mapa impecável e fresco pode
-descrever um commit que o ambiente já deixou para trás.
+Os **três eixos de evidência** acima (`STATIC_PROVEN` · `CONFIG_PROVEN` ·
+`RUNTIME_OBSERVED`) dizem se a evidência **chega**. O `drift` — o **4º eixo**, e
+o único que não é de evidência — diz outra coisa: se o que foi analisado é o que
+está **rodando**. Um mapa impecável e fresco pode descrever um commit que o
+ambiente já deixou para trás.
 
 Exige as duas pontas — sem elas o eixo responde `unknown` com motivo, **nunca**
 acusa drift (alarme falso gasta o crédito do alarme verdadeiro):
@@ -288,14 +290,14 @@ robô sintético (tail-sampling por atributo) se a cobertura importa.
 
 ---
 
-**6. BIMR "100% cego" num sistema que TEM as entidades modeladas (dogfood NuPIdentify, 2026-08-08).**
+**8. BIMR "100% cego" num sistema que TEM as entidades modeladas (dogfood NuPIdentify, 2026-08-08).**
 Se o analyzer da stack modela entidades com id `table:<nome>` (o caso Drizzle/TS),
 qualquer classificação por PREFIXO de id colide com o namespace dos nós mintados
 pelo overlay e declara o modelo inteiro como ponto cego — falso. Corrigido no
 servidor (classificação SÓ por `metadata.synthetic && runtimeOnly`); se você vir
 um `mintedRatio` de 100% num sistema com entidades no grafo, atualize o Manifest.
 
-**7. `oracleComparablePairs = 0` num sistema Node/Express com rotas casando.**
+**9. `oracleComparablePairs = 0` num sistema Node/Express com rotas casando.**
 Duas causas conhecidas no 2º sistema: (a) as rotas ESTÁTICAS extraídas do Express
 guardam o subpath do router (`/branding`) e não o caminho completo montado
 (`/api/tenant/branding`) → o observado não casa e a rota é mintada (origem não

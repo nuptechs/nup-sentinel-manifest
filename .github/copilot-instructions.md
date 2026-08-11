@@ -1,8 +1,13 @@
 # Manifest (Manifest) — AI Agent Guidelines
 
+> **Verificado @ cf394d3 · 2026-08-11.** Se código e este doc divergirem, o código vence — atualize este doc no MESMO PR.
+<!-- doc-verify: on -->
+
 ## Overview
 
-Static code analyzer and permission catalog generator. Scans Vue/React/Angular frontends + Spring Boot backends to produce security artifacts: permission manifests, OpenAPI specs, policy matrices, Keycloak configs, OPA Rego rules, and compliance reports. Includes a CLI tool and VSCode extension.
+**Servidor de análise de evidência tri-eixo** da plataforma NuP Sentinel. Parseia um repositório-alvo (Vue/React/Angular + Spring Boot), monta um grafo de aplicação e provê evidência por REST. Cada aresta carrega um **método** com confiança fixa (`server/analyzers/system-graph.ts:classifyEdgeEvidence`): `RUNTIME_OBSERVED` (0.95, traços OTel/Jaeger) · `STATIC_PROVEN` (0.80, índice SCIP compiler-accurate) · `CONFIG_PROVEN` (0.78, wiring DI do Spring) · `STATIC_UNRESOLVED` (0.40, heurística — o que o mapa **admite não ter provado**). O veredito determinístico local (`STRONG`/`MODERATE`/`WEAK`) vive em `server/reasoner/verdict.ts:computeEvidenceVerdict`.
+
+O catálogo de permissões e os geradores (manifests, OpenAPI, policy-matrix, Keycloak, OPA/Rego, compliance) são **uma das saídas**, não a tese. O robô de tráfego sintético, o Tribunal de convergência completo e as ferramentas MCP vivem no repo `nup-sentinel`, não aqui. Análise é sob demanda (HTTP `/api/analyze*` ou CLI) — **não há cron**. Inclui CLI e extensão VSCode.
 
 System ID: `manifest` — all OIDC permissions prefixed with `manifest:`.
 
@@ -44,14 +49,17 @@ vscode-extension/src/    ← Local + remote analyzer, catalog tree view
 
 ## Analysis Pipeline (core data flow)
 
+Orquestrado em `server/pipeline/analysis-pipeline.ts:runFullAnalysis` — ~12 estágios imperativos hardcoded (os rótulos "Step N/4" são cosméticos). Cache por projeto (TTL 30 min, invalida por hash SHA-256): `server/pipeline/analysis-pipeline.ts:CACHE_TTL_MS`.
+
 1. Upload `.zip` or connect GitHub/GitLab repo
 2. Repository scanner extracts `.java`, `.tsx`, `.vue`, `.ts` files
-3. **Java Analyzer Engine** (subprocess) parses Spring Boot → endpoints + permissions
+3. **Java Analyzer Engine** (subprocess, via `server/analyzers/backend-java-client.ts:buildApplicationGraph`) parses Spring Boot → endpoints + permissions
 4. **Frontend Analyzer** extracts HTTP calls (fetch, axios, $http)
-5. **Semantic Engine** correlates frontend calls ↔ backend endpoints
+5. **Graph connector + deterministic classifier** correlate frontend calls ↔ backend endpoints (`server/analyzers/deterministic-classifier.ts:classifyEntriesDeterministic`). A classificação por LLM (`server/analyzers/semantic-engine.ts:classifyEntries`) é **opt-in**, fora do pipeline, provider **OpenAI**.
 6. **Architecture Detector** validates layering (controller → service → repo)
-7. **Generators** produce outputs (manifest, OpenAPI, policies, etc.)
-8. Results stored in DB (`analysisRuns`, `sourceFiles`)
+7. **Overlays de LEITURA** — `STATIC_PROVEN` (scip) e `CONFIG_PROVEN` (config) são POSTados por fora e mesclados ao servir `/graph` (`server/analyzers/graph-overlays.ts:applyPersistedOverlays`, precedência scip > config), NÃO construídos aqui
+8. **Generators** produce outputs (manifest, OpenAPI, policies, etc.)
+9. Results stored in DB (`analysisRuns`, `sourceFiles`)
 
 ## Output Generators
 
