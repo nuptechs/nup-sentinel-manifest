@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import type { ShapedGraph } from "../../server/analyzers/system-graph.ts";
-import { computeEvidenceVerdict, explainVerdict } from "../../server/reasoner/verdict.ts";
+import { computeEvidenceVerdict, explainVerdict, proofProvenanceCaveats, type ProofAxisFreshness } from "../../server/reasoner/verdict.ts";
 
 function withCoverage(byMethod: Record<string, number>, observedRatio: number, nodes = { observed: 5, total: 10 }): ShapedGraph {
   const total = Object.values(byMethod).reduce((a, b) => a + b, 0);
@@ -111,5 +111,41 @@ describe("reasoner/verdict — explainVerdict (IA sob checagem de consistência)
     assert.equal(v.tier, "WEAK");
     assert.equal(v.mode, "deterministic"); // prosa rejeitada
     assert.match(v.explanation, /FRACA/);
+  });
+});
+
+describe("reasoner/verdict — proofProvenanceCaveats (robustez do scip: nunca STRONG-sobre-prova-velha em silêncio)", () => {
+  const fresh: ProofAxisFreshness = { status: "fresh", stale: false, ageHours: 3, edgeCount: 500 };
+  const staleScip: ProofAxisFreshness = { status: "stale", stale: true, ageHours: 24 * 45, edgeCount: 500 };
+  const absent: ProofAxisFreshness = { status: "absent", stale: false, ageHours: null, edgeCount: 0 };
+
+  it("scip DESATUALIZADO enquanto o tier conta STATIC_PROVEN → caveat com a idade em dias", () => {
+    const c = proofProvenanceCaveats(staleScip, absent, { STATIC_PROVEN: 643, RUNTIME_OBSERVED: 198 });
+    assert.equal(c.length, 1);
+    assert.match(c[0], /DESATUALIZADA.*~45 d/);
+    assert.match(c[0], /643 aresta/);
+  });
+
+  it("scip AUSENTE e grafo apoiado em só-declaradas → caveat acionável (ligue o CI de scip)", () => {
+    const c = proofProvenanceCaveats(absent, absent, { STATIC_PROVEN: 0, STATIC_UNRESOLVED: 1018 });
+    assert.equal(c.length, 1);
+    assert.match(c[0], /AUSENTE/);
+    assert.match(c[0], /Ligue o CI de scip/);
+  });
+
+  it("scip FRESCO → nenhum caveat (a leitura não reclama do que está em dia)", () => {
+    assert.deepEqual(proofProvenanceCaveats(fresh, fresh, { STATIC_PROVEN: 643, CONFIG_PROVEN: 22 }), []);
+  });
+
+  it("scip ausente MAS há STATIC_PROVEN (config assado) → não acusa ausência (sp>0)", () => {
+    // defensivo: não há scip fresco mas o grafo tem prova estática de outra fonte
+    assert.deepEqual(proofProvenanceCaveats(absent, fresh, { STATIC_PROVEN: 100, STATIC_UNRESOLVED: 50 }), []);
+  });
+
+  it("config DESATUALIZADO enquanto conta CONFIG_PROVEN → caveat de wiring", () => {
+    const staleConfig: ProofAxisFreshness = { status: "stale", stale: true, ageHours: 24 * 10, edgeCount: 22 };
+    const c = proofProvenanceCaveats(fresh, staleConfig, { STATIC_PROVEN: 643, CONFIG_PROVEN: 22 });
+    assert.equal(c.length, 1);
+    assert.match(c[0], /wiring.*DESATUALIZADA/);
   });
 });

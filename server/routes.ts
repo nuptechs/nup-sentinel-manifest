@@ -1829,9 +1829,41 @@ export async function registerRoutes(
       });
       if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
       const { resolveReasonerLLM } = await import("./reasoner/llm");
-      const { explainVerdict } = await import("./reasoner/verdict");
+      const { explainVerdict, proofProvenanceCaveats } = await import("./reasoner/verdict");
       const report = await explainVerdict(loaded.shaped, resolveReasonerLLM());
-      res.json({ projectId, analysisRunId: loaded.analysisRunId, ...loaded.overlays, ...report });
+
+      // FRESCOR DA PROVA (robustez do scip): o tier pode contar arestas STATIC_PROVEN/
+      // CONFIG_PROVEN ingeridas há semanas — reusa o `edgeAxisHealth` do evidence-health
+      // (mesma autoridade de staleness, sem 2ª verdade) para o veredito ADMITIR quando a
+      // prova que conta pode não refletir o código atual. Fail-soft: erro aqui não
+      // derruba o veredito (o caveat é honestidade adicional, não o veredito).
+      let provenance: unknown;
+      let caveats: string[] = [];
+      try {
+        const { edgeAxisHealth, resolveThresholds } = await import("./analyzers/evidence-health");
+        const th = resolveThresholds(process.env);
+        const now = Date.now();
+        const proj = loaded.project as { scipEdges?: unknown; configEdges?: unknown } | null;
+        const staticAxis = edgeAxisHealth(proj?.scipEdges ?? null, th.staticHours, now);
+        const configAxis = edgeAxisHealth(proj?.configEdges ?? null, th.configHours, now);
+        caveats = proofProvenanceCaveats(staticAxis, configAxis, report.byMethod);
+        provenance = {
+          static: { status: staticAxis.status, stale: staticAxis.stale, ageHours: staticAxis.ageHours, edgeCount: staticAxis.edgeCount },
+          config: { status: configAxis.status, stale: configAxis.stale, ageHours: configAxis.ageHours, edgeCount: configAxis.edgeCount },
+          caveats,
+        };
+      } catch (e) {
+        console.error("verdict provenance freshness failed (fail-soft):", e);
+      }
+
+      res.json({
+        projectId,
+        analysisRunId: loaded.analysisRunId,
+        ...loaded.overlays,
+        ...report,
+        reasons: caveats.length > 0 ? [...report.reasons, ...caveats] : report.reasons,
+        ...(provenance ? { provenance } : {}),
+      });
     } catch (error) {
       console.error("Error computing verdict:", error);
       res.status(500).json({ message: "Failed to compute verdict" });
