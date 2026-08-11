@@ -1880,6 +1880,9 @@ export async function registerRoutes(
       const { shapeSystemGraph } = await import("./analyzers/system-graph");
       const { resolveReasonerLLM } = await import("./reasoner/llm");
       const { buildMechanismSkeleton, traceMechanism } = await import("./reasoner/mechanism");
+      const { jaegerRuntimeOrderPort } = await import("./reasoner/adapters/runtime-order.adapter");
+      // ORDEM REAL de execução (OTel/Jaeger) — gated por JAEGER_QUERY_URL, fail-soft.
+      const runtimeOrderPort = jaegerRuntimeOrderPort();
       const shaped = shapeSystemGraph(sg, "class");
 
       // ORQUESTRAÇÃO: descobre os arquivos envolvidos no esqueleto e puxa o SOURCE
@@ -1913,7 +1916,7 @@ export async function registerRoutes(
         }
       }
 
-      const report = await traceMechanism(shaped, entry, llm, { maxSteps, sourceByFile });
+      const report = await traceMechanism(shaped, entry, llm, { maxSteps, sourceByFile, runtimeOrderPort });
       res.json({ projectId, analysisRunId: snapshots[0].analysisRunId, ...report });
     } catch (error) {
       console.error("Error computing mechanism:", error);
