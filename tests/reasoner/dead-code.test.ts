@@ -136,6 +136,23 @@ describe("reasoner/dead-code — findDeadCodeCandidates (determinístico, tri-ei
     assert.ok(candidates.some((c) => c.node.id === "node:x.service.ts"), "sem sinal de import, comportamento antigo");
   });
 
+  it("ENTRY-FILE por config (package.json/index.html): raiz rodada direto NÃO é morta", () => {
+    // main.tsx / seed.ts / migrate.ts são rodados direto (não importados, sem chamador).
+    // Config prova que são entradas → não mortos. O que NÃO está em config segue advisory.
+    const nodes: ShapedNode[] = [
+      node({ id: "node:client/src/main.tsx", type: "MODULE", inDegree: 0, outDegree: 3, sourceFile: "client/src/main.tsx" }),
+      node({ id: "node:server/seed-nuptechs.ts", type: "SERVICE", inDegree: 0, outDegree: 2, sourceFile: "server/seed-nuptechs.ts" }),
+      node({ id: "node:server/register-mystery.ts", type: "SERVICE", inDegree: 0, outDegree: 2, sourceFile: "server/register-mystery.ts" }),
+    ];
+    const entry = new Set(["client/src/main.tsx", "server/seed-nuptechs.ts"]); // NÃO inclui register-mystery
+    const { candidates, excluded } = findDeadCodeCandidates(graph(nodes, []), undefined, entry);
+    assert.ok(!candidates.some((c) => c.node.id === "node:client/src/main.tsx"), "entry main.tsx não é candidato");
+    assert.ok(!candidates.some((c) => c.node.id === "node:server/seed-nuptechs.ts"), "entry seed não é candidato");
+    assert.equal(excluded.entryPoints, 2);
+    // o que NÃO está em config segue advisory (não chuta por nome — honesto)
+    assert.ok(candidates.some((c) => c.node.id === "node:server/register-mystery.ts" && c.tier === "no-proven-caller"), "script fora da config segue advisory");
+  });
+
   it("EXCLUI gatilho @Scheduled (root legítimo) e superfície CONTROLLER — nenhum é morto", () => {
     const { candidates, excluded } = findDeadCodeCandidates(scenario());
     assert.ok(!candidates.some((c) => c.node.id === "SERVICE:ScheduledJob"));
