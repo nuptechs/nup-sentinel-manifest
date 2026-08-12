@@ -83,6 +83,37 @@ describe("reasoner/dead-code — findDeadCodeCandidates (determinístico, tri-ei
     assert.equal(ref!.tier, "runtime-refuted");
   });
 
+  it("ROLLUP: módulo com inDegree 0 mas função `::fn` chamada NÃO é isolado (mata FP)", () => {
+    // Reproduz o FP real do identify: o serviço (MÓDULO) não recebe aresta direta,
+    // mas a agregação scip resolve a chamada em granularidade de FUNÇÃO — a aresta
+    // aterrissa em `node:...svc.ts::verifyAuditChain`. Sem o rollup, o módulo parece
+    // isolado. Com o rollup, deixa de ser candidato.
+    const nodes: ShapedNode[] = [
+      node({ id: "node:server/routes/audit.routes.ts", type: "MODULE", inDegree: 0, outDegree: 1 }),
+      node({ id: "node:server/services/audit-verify.service.ts", type: "SERVICE", inDegree: 0, outDegree: 0, sourceFile: "server/services/audit-verify.service.ts" }),
+    ];
+    const edges: ShapedEdge[] = [
+      // aresta file-scoped: chamador (arquivo) → SUB-NÓ de função do serviço
+      edge("node:server/routes/audit.routes.ts::<module>", "node:server/services/audit-verify.service.ts::verifyAuditChain", { resolution: "compiler" }),
+    ];
+    const { candidates } = findDeadCodeCandidates(graph(nodes, edges));
+    assert.ok(
+      !candidates.some((c) => c.node.id === "node:server/services/audit-verify.service.ts"),
+      "serviço com função chamada NÃO deve ser candidato a dead-code",
+    );
+  });
+
+  it("ROLLUP não mascara morto de verdade: módulo SEM função chamada segue isolado", () => {
+    const nodes: ShapedNode[] = [
+      node({ id: "node:server/services/orphan.service.ts", type: "SERVICE", inDegree: 0, outDegree: 0, sourceFile: "server/services/orphan.service.ts" }),
+      node({ id: "node:server/services/other.service.ts", type: "SERVICE", inDegree: 0, outDegree: 0, sourceFile: "server/services/other.service.ts" }),
+    ];
+    // aresta entra num sub-nó de OUTRO módulo — não credita o orphan.
+    const edges: ShapedEdge[] = [edge("X::<module>", "node:server/services/other.service.ts::used")];
+    const { candidates } = findDeadCodeCandidates(graph(nodes, edges));
+    assert.ok(candidates.some((c) => c.node.id === "node:server/services/orphan.service.ts" && c.tier === "isolated"), "orphan continua isolado");
+  });
+
   it("EXCLUI gatilho @Scheduled (root legítimo) e superfície CONTROLLER — nenhum é morto", () => {
     const { candidates, excluded } = findDeadCodeCandidates(scenario());
     assert.ok(!candidates.some((c) => c.node.id === "SERVICE:ScheduledJob"));

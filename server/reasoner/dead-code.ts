@@ -126,11 +126,20 @@ export function findDeadCodeCandidates(graph: ShapedGraph): {
 
   // Índice de arestas de ENTRADA por nó (para inspecionar refutação).
   const inbound = new Map<string, ShapedEdge[]>();
+  // ROLLUP de sub-nó → módulo pai: a agregação scip resolve a chamada em
+  // granularidade de FUNÇÃO — a aresta aterrissa em `node:<file>::<fn>`, não no
+  // MÓDULO `node:<file>`. Sem rolar isso, um serviço cuja FUNÇÃO é chamada (mas o
+  // módulo não recebe aresta direta) parece "isolado" → falso-positivo de dead-code
+  // (caso real identify: audit-verify.service chamado de audit.routes via
+  // `verifyAuditChain`). Um módulo NÃO é morto se qualquer função sua tem entrada.
+  const moduleHasCalledChild = new Set<string>();
   for (const e of edges) {
     if (!e || typeof e.toNode !== "string") continue;
     const arr = inbound.get(e.toNode);
     if (arr) arr.push(e);
     else inbound.set(e.toNode, [e]);
+    const sep = e.toNode.indexOf("::");
+    if (sep > 0) moduleHasCalledChild.add(e.toNode.slice(0, sep)); // credita o módulo pai
   }
 
   for (const n of nodes) {
@@ -153,7 +162,11 @@ export function findDeadCodeCandidates(graph: ShapedGraph): {
     }
 
     const ins = inbound.get(n.id) || [];
-    const inDeg = n.inDegree ?? ins.length;
+    // in-degree efetivo: entrada direta OU entrada num sub-nó de função do módulo
+    // (rollup acima). `n.inDegree` do grafo pode não rolar sub-nós; quando ele diz 0
+    // mas há entrada direta ou de função, resgatamos para 1 (não-isolado).
+    const baseInDeg = n.inDegree ?? ins.length;
+    const inDeg = baseInDeg > 0 ? baseInDeg : ins.length > 0 || moduleHasCalledChild.has(n.id) ? 1 : 0;
     const outDeg = n.outDegree ?? 0;
 
     // ── sem chamador provado (estático nem DI-config) ──
