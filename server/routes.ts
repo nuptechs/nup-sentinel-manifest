@@ -2048,7 +2048,24 @@ export async function registerRoutes(
       );
 
       const { traceMechanism } = await import("./reasoner/mechanism");
-      const report = await traceMechanism(shaped, entryForMech, null, { maxSteps, runtimeOrderPort });
+      let report = await traceMechanism(shaped, entryForMech, null, { maxSteps, runtimeOrderPort });
+      // Fallback de PROFUNDIDADE: se a entrada resolveu num nó de MÓDULO (`node:file`
+      // sem `::`) que não tem arestas de saída próprias, as CHAMADAS moram nos sub-nós
+      // de função (`node:file::fn`). Re-tenta do filho com mais saídas provadas — assim
+      // pedir o serviço/arquivo (não a função exata) ainda gera o diagrama. 1 retry.
+      if ((report.steps?.length ?? 0) === 0 && report.resolvedEntryId && !report.resolvedEntryId.includes("::")) {
+        const base = report.resolvedEntryId;
+        const outDeg = new Map<string, number>();
+        for (const e of shaped.edges) {
+          const f = (e as { fromNode?: string }).fromNode;
+          if (f) outDeg.set(f, (outDeg.get(f) ?? 0) + 1);
+        }
+        const best = shaped.nodes
+          .map((n) => n.id)
+          .filter((id) => id.startsWith(base + "::") && (outDeg.get(id) ?? 0) > 0)
+          .sort((a, b) => (outDeg.get(b) ?? 0) - (outDeg.get(a) ?? 0))[0];
+        if (best) report = await traceMechanism(shaped, best, null, { maxSteps, runtimeOrderPort });
+      }
 
       // rótulo→tipo para papel preciso do lifeline (repositório/serviço/rota/db).
       const labelType = new Map<string, string>();

@@ -56,9 +56,11 @@ export function toMermaid(model: SequenceModel): string {
   const src =
     model.source === "runtime"
       ? "OBSERVADO em execução real (alta confiança)"
-      : model.source === "static"
-        ? "TOPOLOGIA provada pelo compilador (ordem não é a real)"
-        : "sem dados";
+      : model.source === "runtime-partial"
+        ? "OBSERVADO em parte (ordem real onde houve tráfego; resto por alcance)"
+        : model.source === "static"
+          ? "TOPOLOGIA provada pelo compilador (ordem não é a real)"
+          : "sem dados";
   lines.push(`  note over ${model.participants[0]?.id || "sistema"}: Fonte — ${esc(src)}`);
   if (hasInferred) lines.push(`  note over ${model.participants[0]?.id || "sistema"}: setas ---> são inferidas (verificar)`);
   return lines.join("\n");
