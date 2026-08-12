@@ -50,6 +50,17 @@ describe("sequence — mechanismToSequence (mapeamento puro)", () => {
     assert.equal(m.messages[1].kind, "db-write");
   });
 
+  it("alvo tipado ENTITY (tabela) → lifeline 'db' + mensagem db-read com verbo 'lê'", () => {
+    const m = mechanismToSequence(
+      report([{ order: 1, fromLabel: "Route", toLabel: "users", relationType: "CALLS", method: "RUNTIME_OBSERVED", runtimeConfirmed: true }]),
+      { labelType: new Map([["users", "ENTITY"]]) },
+    );
+    const usersP = m.participants.find((p) => p.label === "users");
+    assert.equal(usersP?.kind, "db", "tabela vira lifeline db");
+    assert.equal(m.messages[0].kind, "db-read", "toque de runtime numa tabela = leitura");
+    assert.match(toMermaid(m), /lê users/);
+  });
+
   it("sem passos → fonte 'none' com nota honesta (não finge)", () => {
     const m = mechanismToSequence(report([]));
     assert.equal(m.source, "none");

@@ -2067,11 +2067,13 @@ export async function registerRoutes(
         if (best) report = await traceMechanism(shaped, best, null, { maxSteps, runtimeOrderPort });
       }
 
-      // rótulo→tipo para papel preciso do lifeline (repositório/serviço/rota/db).
+      // rótulo→tipo para papel preciso do lifeline (repositório/serviço/rota/db). Usa
+      // o MESMO rótulo que o mechanism produz (className/methodName/último segmento do
+      // id) — assim TABELAS (`table:x` type ENTITY) casam e viram lifeline `db`.
       const labelType = new Map<string, string>();
-      for (const n of shaped.nodes) {
-        const lbl = (n as { className?: string; methodName?: string }).className || (n as { methodName?: string }).methodName;
-        if (lbl && !labelType.has(lbl)) labelType.set(lbl, String((n as { type?: string }).type || ""));
+      for (const n of shaped.nodes as Array<{ id: string; type?: string; className?: string; methodName?: string }>) {
+        const lbl = n.className || n.methodName || String(n.id).split(":").pop() || n.id;
+        if (lbl && !labelType.has(lbl)) labelType.set(lbl, String(n.type || ""));
       }
 
       const { mechanismToSequence } = await import("./reasoner/sequence/sequence-model");
