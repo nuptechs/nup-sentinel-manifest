@@ -42,3 +42,24 @@ export function readMultistackFlags(
     frontendHttpTemplate: isOn(env.MANIFEST_MULTISTACK_HTTP_TEMPLATE),
   };
 }
+
+export type FrontendHttpTemplateMode = "on" | "off" | "auto";
+
+/**
+ * Modo da captura HTTP do template rest-express (D6) — ADR-0028: o default OFF
+ * cego custou 1 peça de 12 no mapa do NuPIdentify (o único extractor que
+ * entende useQuery({queryKey})/apiRequest ficava desligado). Semântica:
+ *   env truthy (1/true/on/yes)      → "on"   (força ligado, como antes);
+ *   env setado com OUTRO valor      → "off"  (força desligado — opt-out);
+ *   env AUSENTE ou vazio            → "auto" (liga por DETECÇÃO do template —
+ *       client/src + wouter/@tanstack/react-query; detectRestExpressTemplate).
+ * A captura é superset estrito (G3), então auto-detecção não remove nada; o
+ * golden G1/G2 segue intacto porque o fixture Vue não dispara a detecção.
+ */
+export function frontendHttpTemplateMode(
+  env: Record<string, string | undefined> = process.env,
+): FrontendHttpTemplateMode {
+  const v = env.MANIFEST_MULTISTACK_HTTP_TEMPLATE;
+  if (v === undefined || v.trim() === "") return "auto";
+  return isOn(v) ? "on" : "off";
+}

@@ -279,12 +279,45 @@ export function augmentGraphWithFullStack(
 export interface ApiLayerIndex { [module: string]: { [fn: string]: string } }
 
 const EXPORT_RE = /export\s+(?:async\s+)?(?:function\s+(\w+)|const\s+(\w+)\s*=)/g;
-const URL_RE = /(\/(?:easynup|api)\/[A-Za-z0-9_\-./${}:]*[A-Za-z0-9_\-.}])/;
+
+// ─── Raízes de frontend + prefixos de URL de API (generalização ADR-0028) ───
+// O NuPIdentify (template rest-express/React) mapeou 1 peça de 12 porque TUDO
+// aqui era hardcoded pra `frontend/src` + `.vue` + `/easynup|/api`. Agora:
+//   raiz    — `frontend/src` (Vue easynup) OU `client/src` (rest-express/React);
+//   página  — `.vue` OU `.tsx`/`.jsx`;
+//   URL     — prefixos parametrizáveis via MANIFEST_FRONTEND_API_URL_PREFIXES
+//             (CSV, ex. "easynup,api,v2"; default preserva o comportamento).
+const FE_SRC = "(?:^|\\/)(?:frontend|client)\\/src\\/";
+const FE_API_FILE_RE = new RegExp(FE_SRC + "api\\/[\\w-]+\\.ts$");
+const FE_COMPOSABLES_FILE_RE = new RegExp(FE_SRC + "composables\\/.*\\.ts$");
+const FE_SOURCE_FILE_RE = new RegExp(FE_SRC + ".*\\.(vue|tsx|jsx|ts)$");
+const FE_API_DIR_RE = new RegExp(FE_SRC + "api\\/");
+const FE_API_OR_COMPOSABLES_DIR_RE = new RegExp(FE_SRC + "(?:api|composables)\\/");
+const FE_VUE_FILE_RE = new RegExp(FE_SRC + ".*\\.vue$");
+const FE_PAGE_EXT_RE = /\.(vue|tsx|jsx|ts)$/;
+
+const DEFAULT_API_URL_PREFIXES = "easynup|api";
+
+/** Padrão (alternância regex) dos prefixos de URL de API reconhecidos. */
+export function apiUrlPrefixPattern(env: Record<string, string | undefined> = process.env): string {
+  const raw = env.MANIFEST_FRONTEND_API_URL_PREFIXES;
+  if (!raw || !raw.trim()) return DEFAULT_API_URL_PREFIXES;
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim().replace(/^\/+/, "").replace(/\/+$/, ""))
+    .filter(Boolean)
+    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return parts.length ? parts.join("|") : DEFAULT_API_URL_PREFIXES;
+}
+
+const apiUrlRe = (flags = ""): RegExp =>
+  new RegExp("(\\/(?:" + apiUrlPrefixPattern() + ")\\/[A-Za-z0-9_\\-./${}:]*[A-Za-z0-9_\\-.}])", flags);
 
 export function indexApiLayer(fileData: { filePath: string; content: string }[]): ApiLayerIndex {
   const idx: ApiLayerIndex = {};
+  const URL_RE = apiUrlRe();
   for (const f of fileData) {
-    if (!/frontend\/src\/api\/[\w-]+\.ts$/.test(f.filePath)) continue;
+    if (!FE_API_FILE_RE.test(f.filePath)) continue;
     const mod = f.filePath.replace(/.*\/api\//, "").replace(/\.ts$/, "");
     const marks: { name: string; at: number }[] = [];
     let m: RegExpExecArray | null;
@@ -336,9 +369,9 @@ export function linkViewsViaApiLayer(
   const seen = new Set<string>();
   const routed = routedPageBases(fileData);
   for (const f of fileData) {
-    if (!/frontend\/src\/.*\.(vue|ts)$/.test(f.filePath) || /frontend\/src\/api\//.test(f.filePath)) continue;
+    if (!FE_SOURCE_FILE_RE.test(f.filePath) || FE_API_DIR_RE.test(f.filePath)) continue;
     if (!isRoutedPage(f.filePath, routed)) continue; // TELA = roteada; componente vai via propagação
-    const component = (f.filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
+    const component = (f.filePath.split("/").pop() || "").replace(FE_PAGE_EXT_RE, "");
     let im: RegExpExecArray | null;
     IMPORT_RE.lastIndex = 0;
     while ((im = IMPORT_RE.exec(f.content)) !== null) {
@@ -376,7 +409,6 @@ export function linkViewsViaApiLayer(
 // (authFetch direto) → aresta direta. Ambos determinísticos, via= rastreável.
 
 const COMPOSABLE_IMPORT_RE = /import\s*(?:type\s*)?\{([^}]+)\}\s*from\s*['"](?:@\/|\.{1,2}\/(?:\.\.\/)*)composables\/([\w-]+)['"]/g;
-const URL_RE_G = /(\/(?:easynup|api)\/[A-Za-z0-9_\-./${}:]*[A-Za-z0-9_\-.}])/g;
 
 export interface ComposableIndex { [module: string]: { [fn: string]: { url: string; via: string; filePath?: string }[] } }
 
@@ -385,9 +417,10 @@ export function indexComposableLayer(
   apiIdx: ApiLayerIndex,
 ): ComposableIndex {
   const out: ComposableIndex = {};
+  const URL_RE_G = apiUrlRe("g");
   const pendingChildren: { mod: string; fn: string; filePath: string; kids: string[] }[] = [];
   for (const f of fileData) {
-    if (!/frontend\/src\/composables\/.*\.ts$/.test(f.filePath)) continue;
+    if (!FE_COMPOSABLES_FILE_RE.test(f.filePath)) continue;
     const mod = (f.filePath.split("/").pop() || "").replace(/\.ts$/, "");
     // api fns importadas neste composable
     const apiFns: { fn: string; url: string; via: string }[] = [];
@@ -528,10 +561,11 @@ export function linkViewsViaComposablesAndInline(
   // ── por arquivo: alvos DIRETOS (api-import + inline) e usos de composable ──
   interface FileFacts { base: string; filePath: string; isVue: boolean; direct: { t: string; via: string }[]; composableKeys: string[]; vueImports: string[]; }
   const facts = new Map<string, FileFacts>();
+  const URL_RE_G = apiUrlRe("g");
   for (const f of fileData) {
-    if (!/frontend\/src\/.*\.(vue|ts)$/.test(f.filePath)) continue;
-    if (/frontend\/src\/(api|composables)\//.test(f.filePath)) continue;
-    const base = (f.filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
+    if (!FE_SOURCE_FILE_RE.test(f.filePath)) continue;
+    if (FE_API_OR_COMPOSABLES_DIR_RE.test(f.filePath)) continue;
+    const base = (f.filePath.split("/").pop() || "").replace(FE_PAGE_EXT_RE, "");
     const ff: FileFacts = { base, filePath: f.filePath, isVue: f.filePath.endsWith(".vue"), direct: [], composableKeys: [], vueImports: [] };
     // api direto
     let ia: RegExpExecArray | null;
@@ -644,26 +678,58 @@ export function linkViewsViaComposablesAndInline(
 // de frontend que chama backend (301 nós — componentes/painéis/composables
 // viravam "tela"), enquanto a contagem correta de telas do easynup é a do
 // router (154 rotas / 143 arquivos roteados). Definição dura daqui em diante:
-//   TELA  = .vue importado pelo router.ts (fonte da verdade)
+//   TELA  = arquivo importado pelo ROUTER (fonte da verdade). Router = Vue
+//           (`router.ts` com strings '*.vue') OU React (ADR-0028 —
+//           `App.tsx`/`router.tsx`/`routes.tsx` com wouter
+//           `<Route component={X}/>` ou react-router `element={<X/>}` /
+//           `Component: X`; a base é o basename do módulo importado).
 //   resto = COMPONENTE — as chamadas dele são ATRIBUÍDAS às telas que o
 //           importam (travessia da árvore de imports .vue, fixpoint ≤4 níveis)
-// Fallback sem router no payload: /pages/ no path (compat com testes/payloads
-// parciais). Nada de nó "view:" pra não-roteado — o mapa fala a MESMA língua
-// que o código.
+// Fallback sem router no payload: /pages/ + extensão de página (.vue/.tsx/.jsx)
+// no path (compat com testes/payloads parciais). Nada de nó "view:" pra
+// não-roteado — o mapa fala a MESMA língua que o código.
 
 const ROUTER_VUE_RE = /['"]([^'"]+\.vue)['"]/g;
 const VUE_IMPORT_RE = /import\s+\w+\s+from\s+['"]([^'"]+\.vue)['"]/g;
 
-/** Set de BASENAMES (sem .vue) roteados pelo router.ts do payload. */
+const ROUTER_FILE_RE = new RegExp(FE_SRC + "(?:router|routes|App)\\.(?:ts|js|tsx|jsx)$");
+// React: identificador referenciado numa rota → módulo importado → basename.
+const DEFAULT_IMPORT_RE = /import\s+([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^}]*\})?\s+from\s+['"]([^'"]+)['"]/g;
+const LAZY_IMPORT_RE = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:React\.)?lazy\s*\(\s*(?:async\s*)?\(\)\s*=>\s*import\s*\(\s*['"]([^'"]+)['"]/g;
+const JSX_ROUTE_COMPONENT_RE = /component=\{\s*([A-Za-z_$][\w$]*)\s*\}/g; // wouter / react-router v5
+const JSX_ROUTE_ELEMENT_RE = /element\s*[=:]\s*\{?\s*<\s*([A-Za-z_$][\w$]*)/g; // react-router v6 (JSX attr OU objeto de rota)
+const OBJ_ROUTE_COMPONENT_RE = /\b[Cc]omponent\s*:\s*([A-Za-z_$][\w$]*)/g; // createBrowserRouter / objetos de rota
+
+const moduleBase = (path: string): string =>
+  (path.split("/").pop() || "").replace(/\.(vue|tsx|jsx|ts|js)$/, "");
+
+/** Set de BASENAMES (sem extensão) roteados pelo router do payload. */
 export function routedPageBases(fileData: { filePath: string; content: string }[]): Set<string> {
   const bases = new Set<string>();
   for (const f of fileData) {
-    if (!/frontend\/src\/router\.(ts|js)$/.test(f.filePath)) continue;
+    if (!ROUTER_FILE_RE.test(f.filePath)) continue;
     let m: RegExpExecArray | null;
+    // Vue: qualquer string '*.vue' no router é página roteada (lazy ou não).
     ROUTER_VUE_RE.lastIndex = 0;
     while ((m = ROUTER_VUE_RE.exec(f.content)) !== null) {
-      const base = (m[1].split("/").pop() || "").replace(/\.vue$/, "");
+      const base = moduleBase(m[1]);
       if (base) bases.add(base);
+    }
+    // React: só entra base cujo identificador RESOLVE num import (precisão —
+    // identificador solto numa rota não vira tela sem sabermos o arquivo).
+    const importPath = new Map<string, string>();
+    for (const re of [DEFAULT_IMPORT_RE, LAZY_IMPORT_RE]) {
+      re.lastIndex = 0;
+      while ((m = re.exec(f.content)) !== null) importPath.set(m[1], m[2]);
+    }
+    for (const re of [JSX_ROUTE_COMPONENT_RE, JSX_ROUTE_ELEMENT_RE, OBJ_ROUTE_COMPONENT_RE]) {
+      re.lastIndex = 0;
+      while ((m = re.exec(f.content)) !== null) {
+        const mod = importPath.get(m[1]);
+        if (!mod) continue;
+        const base = moduleBase(mod);
+        if (base) bases.add(base);
+      }
     }
   }
   return bases;
@@ -671,9 +737,9 @@ export function routedPageBases(fileData: { filePath: string; content: string }[
 
 /** Arquivo é TELA? (roteado; fallback /pages/ quando o payload não tem router) */
 export function isRoutedPage(filePath: string, routed: Set<string>): boolean {
-  const base = (filePath.split("/").pop() || "").replace(/\.(vue|ts)$/, "");
+  const base = (filePath.split("/").pop() || "").replace(FE_PAGE_EXT_RE, "");
   if (routed.size > 0) return routed.has(base);
-  return /\/pages\//.test(filePath) && filePath.endsWith(".vue");
+  return /\/pages\//.test(filePath) && /\.(vue|tsx|jsx)$/.test(filePath);
 }
 
 // ─── INVENTÁRIO do frontend (reconciliação, 2026-08-01) ───
@@ -693,9 +759,9 @@ export function frontendInventory(fileData: { filePath: string; content: string 
   const routed = routedPageBases(fileData);
   let vueComponents = 0, composableFiles = 0, composableFns = 0;
   for (const f of fileData) {
-    if (/frontend\/src\/.*\.vue$/.test(f.filePath)) {
+    if (FE_VUE_FILE_RE.test(f.filePath)) {
       if (!isRoutedPage(f.filePath, routed)) vueComponents++;
-    } else if (/frontend\/src\/composables\/.*\.ts$/.test(f.filePath)) {
+    } else if (FE_COMPOSABLES_FILE_RE.test(f.filePath)) {
       composableFiles++;
       let m: RegExpExecArray | null;
       EXPORT_RE.lastIndex = 0;

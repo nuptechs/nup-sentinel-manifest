@@ -33,6 +33,21 @@ const QUERY_VAR_RE =
 const API_REQUEST_RE =
   /apiRequest\s*\(\s*(['"`])([^'"`]+)\1\s*(?:,\s*(['"`])([^'"`]+)\3)?/g;
 
+// Assinatura do template rest-express/React (NuPIdentify e afins): código de
+// frontend em `client/src` importando wouter ou @tanstack/react-query. O
+// easynup Vue (frontend/src + @tanstack/vue-query) NÃO dispara — G1/G2 intactos.
+const CLIENT_SRC_RE = /(?:^|\/)client\/src\/.*\.(?:tsx|jsx|ts|js)$/;
+const TEMPLATE_MARKER_RE = /from\s+['"](?:wouter|@tanstack\/react-query)['"]/;
+
+/** O payload é um app do template rest-express/React? (gate do modo "auto") */
+export function detectRestExpressTemplate(
+  files: { filePath: string; content: string }[],
+): boolean {
+  return files.some(
+    (f) => CLIENT_SRC_RE.test(f.filePath) && TEMPLATE_MARKER_RE.test(f.content),
+  );
+}
+
 function lineAt(content: string, index: number): number {
   let line = 1;
   for (let i = 0; i < index && i < content.length; i++) {

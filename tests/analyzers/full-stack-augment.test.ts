@@ -312,6 +312,118 @@ describe("frontendInventory — reconciliação inventário × participação", 
   });
 });
 
+// ── ADR-0028: TELA React (padrão NuPIdentify — client/src + wouter + useQuery) ──
+// O mapa do NuPIdentify tinha 0 nós de frontend: router só era lido de
+// frontend/src/router.ts com strings .vue, e o fallback exigia .vue. Agora o
+// router React (App.tsx com wouter/react-router) também é fonte da verdade.
+describe("TELA React (ADR-0028 — client/src + wouter/react-router)", () => {
+  const app = {
+    filePath: "client/src/App.tsx",
+    content:
+      'import { Switch, Route } from "wouter";\n' +
+      'import NotFound from "@/pages/not-found";\n' +
+      'import Dashboard from "@/pages/dashboard";\n' +
+      'import UploadPage from "@/pages/upload";\n' +
+      "function Router() {\n" +
+      "  return (<Switch>\n" +
+      '    <Route path="/" component={Dashboard} />\n' +
+      '    <Route path="/upload" component={UploadPage} />\n' +
+      "    <Route component={NotFound} />\n" +
+      "  </Switch>);\n" +
+      "}\n",
+  };
+
+  it("routedPageBases lê App.tsx wouter: component={X} → basename do módulo importado", async () => {
+    const { routedPageBases, isRoutedPage } = await import("../../server/analyzers/full-stack-augment.ts");
+    const bases = routedPageBases([app]);
+    assert.ok(bases.has("dashboard"), "página com path explícito");
+    assert.ok(bases.has("upload"), "nome do identificador ≠ basename: vale o basename do import");
+    assert.ok(bases.has("not-found"), "rota catch-all (sem path) também é tela");
+    assert.equal(isRoutedPage("client/src/pages/dashboard.tsx", bases), true);
+    assert.equal(isRoutedPage("client/src/components/data-table.tsx", bases), false, "componente não roteado não é tela");
+  });
+
+  it("react-router v6: lazy + element={<X/>} e Component: X em objeto de rota", async () => {
+    const { routedPageBases } = await import("../../server/analyzers/full-stack-augment.ts");
+    const router = {
+      filePath: "frontend/src/routes.tsx",
+      content:
+        'import { createBrowserRouter } from "react-router-dom";\n' +
+        'import Home from "./pages/home";\n' +
+        'const Relatorio = lazy(() => import("./pages/relatorio"));\n' +
+        "export const router = createBrowserRouter([\n" +
+        '  { path: "/", Component: Home },\n' +
+        '  { path: "/rel", element: <Relatorio /> },\n' +
+        "]);\n",
+    };
+    const bases = routedPageBases([router]);
+    assert.ok(bases.has("home"), "Component: X (objeto de rota)");
+    assert.ok(bases.has("relatorio"), "element={<X/>} com import lazy");
+  });
+
+  it("identificador de rota SEM import correspondente não vira base (precisão)", async () => {
+    const { routedPageBases } = await import("../../server/analyzers/full-stack-augment.ts");
+    const bases = routedPageBases([{
+      filePath: "client/src/App.tsx",
+      content: '<Route path="/x" component={Fantasma} />',
+    }]);
+    assert.equal(bases.size, 0, "sem import não sabemos o arquivo — não inventa tela");
+  });
+
+  it("fallback sem router: /pages/*.tsx é tela; .ts solto e lib/ não são", async () => {
+    const { isRoutedPage } = await import("../../server/analyzers/full-stack-augment.ts");
+    assert.equal(isRoutedPage("client/src/pages/dashboard.tsx", new Set()), true, "página React no fallback");
+    assert.equal(isRoutedPage("client/src/pages/helpers.ts", new Set()), false, ".ts puro não é página");
+    assert.equal(isRoutedPage("client/src/lib/queryClient.ts", new Set()), false);
+  });
+
+  it("interação de página React roteada minta VIEW e casa a rota Express do gateway", () => {
+    const g = new ApplicationGraph();
+    const files = [app, { filePath: "client/src/pages/dashboard.tsx", content: "export default function Dashboard() {}" }];
+    const its = [interaction({
+      component: "Dashboard", sourceFile: "client/src/pages/dashboard.tsx",
+      httpMethod: "GET", url: "/api/projects/1/graph", mappedBackendNode: null,
+    })];
+    const r = augmentGraphWithFullStack(g, its, [route("GET", "/api/projects/:id/graph")], files);
+    assert.equal(r.views, 1, "página .tsx roteada vira VIEW");
+    const e = g.getOutgoingEdges("view:Dashboard")[0];
+    assert.equal(e.toNode, "route:GET:/api/projects/:id/graph");
+  });
+
+  it("interação de COMPONENTE React (não roteado no App.tsx) NÃO minta VIEW", () => {
+    const g = new ApplicationGraph();
+    const its = [interaction({
+      component: "DataTable", sourceFile: "client/src/components/data-table.tsx",
+      httpMethod: "GET", url: "/api/x", mappedBackendNode: null,
+    })];
+    augmentGraphWithFullStack(g, its, [route("GET", "/api/x")], [app]);
+    assert.equal(g.getNode("view:DataTable"), undefined, "componente não é tela");
+  });
+});
+
+describe("apiUrlPrefixPattern — prefixo de URL de API parametrizável (ADR-0028)", () => {
+  it("default preserva easynup|api; CSV da env limpa barras e escapa regex", async () => {
+    const { apiUrlPrefixPattern } = await import("../../server/analyzers/full-stack-augment.ts");
+    assert.equal(apiUrlPrefixPattern({}), "easynup|api");
+    assert.equal(apiUrlPrefixPattern({ MANIFEST_FRONTEND_API_URL_PREFIXES: " easynup, /v2/ " }), "easynup|v2");
+    assert.equal(apiUrlPrefixPattern({ MANIFEST_FRONTEND_API_URL_PREFIXES: " , " }), "easynup|api", "CSV vazio cai no default");
+  });
+
+  it("indexApiLayer respeita prefixo custom da env", async () => {
+    const { indexApiLayer } = await import("../../server/analyzers/full-stack-augment.ts");
+    process.env.MANIFEST_FRONTEND_API_URL_PREFIXES = "svc";
+    try {
+      const idx = indexApiLayer([{
+        filePath: "frontend/src/api/x.ts",
+        content: "export async function doIt(){ return authFetch(`${B}/svc/doIt.v1`); }\n",
+      }]);
+      assert.equal(idx.x.doIt, "/svc/doIt.v1");
+    } finally {
+      delete process.env.MANIFEST_FRONTEND_API_URL_PREFIXES;
+    }
+  });
+});
+
 // ── Furo 2 (auditoria 2026-08-10): entidades Drizzle DECLARADAS ──
 // Antes, um nó `table:*` só nascia quando um HANDLER DE ROTA tocava a tabela.
 // Uma tabela do schema tocada só em job/worker ficava SEM nó estático → o
