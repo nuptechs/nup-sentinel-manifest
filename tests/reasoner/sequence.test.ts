@@ -86,6 +86,15 @@ describe("sequence — toMermaid (renderer)", () => {
     assert.ok(!/: SELECT: users; join/.test(mm), "sem ':'/';' cru no rótulo");
   });
 
+  it("fonte 'runtime-partial' → legenda OBSERVADO (não 'sem dados')", () => {
+    const m = mechanismToSequence(report([
+      { order: 1, fromLabel: "Route", toLabel: "Svc", method: "RUNTIME_OBSERVED", runtimeConfirmed: true },
+    ], { runtimeConfirmed: 1, runtimeOrderedSteps: 1, orderSource: "runtime-partial" }));
+    const mm = toMermaid(m);
+    assert.match(mm, /Fonte — OBSERVADO/);
+    assert.ok(!/Fonte — sem dados/.test(mm), "não deve dizer 'sem dados' quando há execução observada");
+  });
+
   it("modelo vazio → diagrama honesto sem passos (não lança)", () => {
     const mm = toMermaid(mechanismToSequence(report([])));
     assert.match(mm, /^sequenceDiagram/);
