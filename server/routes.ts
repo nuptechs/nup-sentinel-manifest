@@ -66,6 +66,14 @@ const scipEdgesSchema = z.object({
     )
     .max(500_000)
     .optional(),
+  // IMPORT-REACHABILITY (eixo SOTA de dead-code, modelo Knip/ts-prune): pares
+  // (arquivoA → arquivoB) provando que A referencia um símbolo definido em B. Um
+  // arquivo só é morto se NEM chamado NEM importado NEM com tráfego. NÃO entra no
+  // grafo de chamadas nem no proven-ratio — sinal dedicado consumido pelo reasoner.
+  imports: z
+    .array(z.object({ from: z.string().min(1).max(1024), to: z.string().min(1).max(1024) }))
+    .max(1_000_000)
+    .optional(),
 });
 
 // ADR-0035 §4 — payload do `POST /config-edges`: saída do resolvedor
@@ -518,6 +526,7 @@ export async function registerRoutes(
         schema: parsed.data.schema ?? "adr-0031.p2",
         edges: parsed.data.edges,
         ...(parsed.data.dataAccess ? { dataAccess: parsed.data.dataAccess } : {}),
+        ...(parsed.data.imports ? { imports: parsed.data.imports } : {}),
         ingestedAt: new Date().toISOString(),
       };
       await storage.updateProjectScipEdges(projectId, payload);
@@ -1764,7 +1773,10 @@ export async function registerRoutes(
       const { resolveReasonerLLM } = await import("./reasoner/llm");
       const { triageDeadCode } = await import("./reasoner/dead-code");
 
-      const report = await triageDeadCode(loaded.shaped, resolveReasonerLLM(), { topN });
+      const report = await triageDeadCode(loaded.shaped, resolveReasonerLLM(), {
+        topN,
+        importReachableFiles: loaded.importReachableFiles,
+      });
 
       res.json({
         projectId,

@@ -118,13 +118,45 @@ for (const d of idx.documents)
 // Definition e mapeia o símbolo ao `relative_path` do documento que o define.
 // (scip-typescript também ganha o campo; lá o arquivo coincide com o parse-de-crases.)
 const defDoc = new Map(); // symbol → relative_path da def
+// Índice GLOBAL de definição de TODO símbolo (não só método): imports referenciam
+// tipos/classes/consts/funções — precisamos saber em qual arquivo cada um é definido
+// para o eixo de IMPORT-REACHABILITY (barril de re-export / namespace-import / DI que
+// o call-graph não captura como chamada). Modelo SOTA (Knip/ts-prune): arquivo só é
+// morto se NEM chamado NEM importado NEM com tráfego runtime.
+const defDocAll = new Map(); // QUALQUER símbolo → relative_path da def
 for (const d of idx.documents) {
   const rel = relPathOf(d);
   if (!rel) continue;
   for (const o of d.occurrences || []) {
-    if (!isMethodSym(o.symbol)) continue;
     if (!(rolesOf(o) & DEFINITION)) continue;
-    if (!defDoc.has(o.symbol)) defDoc.set(o.symbol, rel);
+    if (isMethodSym(o.symbol) && !defDoc.has(o.symbol)) defDoc.set(o.symbol, rel);
+    if (!defDocAll.has(o.symbol)) defDocAll.set(o.symbol, rel);
+  }
+}
+
+// IMPORT-REACHABILITY: o arquivo B é ALCANÇÁVEL se QUALQUER outro arquivo A referencia
+// um símbolo definido em B. Granularidade de ARQUIVO, dedup — 1 par por (A,B), bounded
+// por arquivos². Consumido SÓ pelo reasoner de dead-code (NÃO entra no grafo de chamadas
+// nem no proven-ratio — é um EIXO distinto: dependência de módulo ⊇ chamada+import+tipo).
+//
+// NOTA scip-typescript: o role IMPORT (bit 2) NÃO é emitido — imports viram referência
+// role-0 comum. Por isso o sinal é "referência cross-file a símbolo do projeto", não
+// `roles & IMPORT`. Crucial p/ o BARRIL de re-export: `export * from "./x"` não define
+// símbolo próprio, MAS o scip emite um símbolo de MÓDULO do arquivo (`.../`file.ts`/`)
+// que os importadores REFERENCIAM — é assim que o barril prova estar em uso.
+const importsSet = new Set(); // "fromFile => toFile"
+const imports = [];
+for (const d of idx.documents) {
+  const fromFile = relPathOf(d);
+  if (!fromFile) continue;
+  for (const o of d.occurrences || []) {
+    if (rolesOf(o) & DEFINITION) continue; // só referências (role 0)
+    const toFile = defDocAll.get(o.symbol);
+    if (!toFile || toFile === fromFile) continue; // externo (sem def no projeto) ou auto
+    const key = fromFile + ' => ' + toFile;
+    if (importsSet.has(key)) continue;
+    importsSet.add(key);
+    imports.push({ from: fromFile, to: toFile });
   }
 }
 
@@ -248,13 +280,15 @@ process.stdout.write(
   JSON.stringify({
     tool: 'scip-typescript',
     schema: 'adr-0030.p2.2',
-    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size, fileScoped: fileScoped.size, dataAccess: dataAccess.length },
+    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size, fileScoped: fileScoped.size, dataAccess: dataAccess.length, imports: imports.length },
     edges,
     dataAccess,
+    imports,
   }) + '\n',
 );
 console.error(
   `[derive-edges] STATIC_PROVEN=${proven.size} interface-impl=${ifaceImpl.size} (de ${idx.documents.length} documentos)` +
     ` | diag: methodDefs=${nMethodDefs} methodRefs=${nMethodRefs} withEnclosing=${nWithEnclosing} attributed=${nAttributed} orphan=${nOrphan} fileScoped=${nFileScoped}` +
-    ` | data-access: tables=${daStats.tables} verbSites=${daStats.verbSites} resolved=${daStats.resolved} unresolvedTable=${daStats.unresolvedTable}`,
+    ` | data-access: tables=${daStats.tables} verbSites=${daStats.verbSites} resolved=${daStats.resolved} unresolvedTable=${daStats.unresolvedTable}` +
+    ` | import-reach: pares=${imports.length}`,
 );

@@ -41,6 +41,10 @@ export interface LoadedReasonerGraph {
   project: unknown;
   /** estatística dos merges (ausente quando não houve overlay). */
   overlays: { scipStats?: unknown; configStats?: unknown };
+  /** IMPORT-REACHABILITY: conjunto de arquivos (relative_path) IMPORTADOS por outro
+   *  arquivo do projeto — eixo dedicado de dead-code (modelo Knip). Vazio se não houver
+   *  o campo `imports` no store scip (retrocompat). */
+  importReachableFiles: Set<string>;
 }
 
 export interface LoadFailure {
@@ -94,6 +98,20 @@ export async function loadReasonerGraph(
   const { shapeSystemGraph } = await import("../analyzers/system-graph");
   const shaped = shapeSystemGraph(overlays.graph, level);
 
+  // Conjunto de arquivos IMPORTADOS (o lado `to` dos pares) — fail-soft.
+  const importReachableFiles = new Set<string>();
+  try {
+    const imp = (project as { scipEdges?: { imports?: unknown } } | null)?.scipEdges?.imports;
+    if (Array.isArray(imp)) {
+      for (const e of imp) {
+        const to = (e as { to?: unknown })?.to;
+        if (typeof to === "string" && to) importReachableFiles.add(to);
+      }
+    }
+  } catch (e) {
+    logger.error("[reasoner] import-reachability load failed (fail-soft):", e);
+  }
+
   return {
     ok: true,
     shaped,
@@ -104,5 +122,6 @@ export async function loadReasonerGraph(
       ...(overlays.scipStats ? { scipStats: overlays.scipStats } : {}),
       ...(overlays.configStats ? { configStats: overlays.configStats } : {}),
     },
+    importReachableFiles,
   };
 }
