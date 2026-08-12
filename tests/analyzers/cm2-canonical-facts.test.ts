@@ -10,6 +10,9 @@ describe("ADR-0026 CM2 — regra do pack Node (nodeBackendType por path)", () =>
     assert.equal(nodeBackendType("packages/core/src/repositories/index.js"), "REPOSITORY");
     assert.equal(nodeBackendType("src/db/user.repository.ts"), "REPOSITORY");
     assert.equal(nodeBackendType("a/b/ContractRepository.ts"), "REPOSITORY");
+    // segmento `/repos?/` — a convenção do próprio fixture mini-easynup
+    assert.equal(nodeBackendType("services/gateway/src/repos/webhook-repo.ts"), "REPOSITORY");
+    assert.equal(nodeBackendType("srv/repo/run-repo.ts"), "REPOSITORY");
   });
   it("handler/serviço/módulo Node → SERVICE (não chuta REPOSITORY sem sinal)", () => {
     assert.equal(nodeBackendType("services/gateway/src/routes/contract.routes.js"), "SERVICE");

@@ -13,7 +13,8 @@
 import { ApplicationGraph, GraphNode, GraphEdge } from "./application-graph";
 import type { FrontendInteraction } from "./frontend-analyzer";
 import type { ExpressRoute } from "./node-backend/express-routes";
-import { extractDrizzleEntities } from "./node-backend/drizzle-schema";
+import { resolveHandlerEntities } from "./node-backend/express-routes";
+import { extractDrizzleEntities, drizzleSymbolIndex } from "./node-backend/drizzle-schema";
 import { toSnakeCase, entityTableName } from "./nuptechs-conventions";
 import { nodeBackendType } from "./canonical-model";
 
@@ -90,7 +91,8 @@ export function augmentGraphWithFullStack(
   // resolvidos e o overlay casa em vez de mintar. Idempotente: se a entidade já
   // existe (Java @Entity de mesmo nome, ou já criada), preserva o nó existente.
   let drizzleDeclared = 0;
-  for (const ent of extractDrizzleEntities(fileData)) {
+  const drizzleEntities = extractDrizzleEntities(fileData);
+  for (const ent of drizzleEntities) {
     const table = toSnakeCase(ent.entity);
     if (!table || entityByTable.has(table)) continue;
     const id = `table:${table}`;
@@ -131,26 +133,12 @@ export function augmentGraphWithFullStack(
   }
 
   let nodeModules = 0;
-  const mintNodeModule = (fileFn: string): string | null => {
-    const file = fileFn.split("::")[0];
-    if (!file) return null;
-    const id = `node:${file}`;
-    if (!graph.getNode(id)) {
-      const base = (file.split("/").pop() || file).replace(/\.(js|ts)$/, "");
-      // CM2 (ADR-0026): o papel do módulo Node é decidido pela regra do pack
-      // (por path) — repositório Node é tier de DADOS (mesmo Postgres do Java),
-      // não SERVICE genérico. Ver nota de honestidade em nodeBackendType.
-      graph.addNode(new GraphNode(id, nodeBackendType(file), base, null, null, {
-        sourceFile: file, runtime: "node", synthetic: true,
-      }));
-      nodeModules++;
-    }
-    return id;
-  };
-  const dataEdge = (fromId: string, r: ExpressRoute) => {
-    const ops = r.persistenceOperations || [];
+  // Toque de dados: liga um nó Node às tabelas (casando entidade Java pelo nome
+  // físico ou mintando `table:` drizzleOnly). Compartilhado entre a aresta do
+  // FIM da cadeia da rota (dataEdge) e as entidades PRÓPRIAS do repositório.
+  const touchEdges = (fromId: string, tables: string[], ops: string[]) => {
     const isWrite = ops.some((o) => /write|insert|update|delete|upsert/i.test(o));
-    for (const table of r.entitiesTouched || []) {
+    for (const table of tables) {
       let target = entityByTable.get(table);
       if (!target) {
         target = `table:${table}`;
@@ -165,6 +153,39 @@ export function augmentGraphWithFullStack(
         ops: ops.join(","),
       }));
     }
+  };
+  // Entidades PRÓPRIAS do repositório (ADR-0026 CM2): quando o call-chain surfa
+  // um módulo de repositório, o nó REPOSITORY nasce ligado às tabelas Drizzle
+  // que o PRÓPRIO arquivo toca (resolveHandlerEntities reusada sobre o conteúdo)
+  // — não só ao toque agregado da rota que o alcançou.
+  const drizzleIdx = drizzleSymbolIndex(drizzleEntities);
+  const contentByPath = new Map(fileData.map((f) => [f.filePath, f.content]));
+  const mintNodeModule = (fileFn: string): string | null => {
+    const file = fileFn.split("::")[0];
+    if (!file) return null;
+    const id = `node:${file}`;
+    if (!graph.getNode(id)) {
+      const base = (file.split("/").pop() || file).replace(/\.(js|ts)$/, "");
+      // CM2 (ADR-0026): o papel do módulo Node é decidido pela regra do pack
+      // (por path) — repositório Node é tier de DADOS (mesmo Postgres do Java),
+      // não SERVICE genérico. Ver nota de honestidade em nodeBackendType.
+      const type = nodeBackendType(file);
+      graph.addNode(new GraphNode(id, type, base, null, null, {
+        sourceFile: file, runtime: "node", synthetic: true,
+      }));
+      nodeModules++;
+      if (type === "REPOSITORY") {
+        const content = contentByPath.get(file);
+        if (content && drizzleIdx.size > 0) {
+          const { entities, operations } = resolveHandlerEntities(content, drizzleIdx);
+          touchEdges(id, entities, operations);
+        }
+      }
+    }
+    return id;
+  };
+  const dataEdge = (fromId: string, r: ExpressRoute) => {
+    touchEdges(fromId, r.entitiesTouched || [], r.persistenceOperations || []);
   };
   // EXT-ROTA (ADR-0026): índice fullPath → id do nó wsv1 (endpoint Java), já
   // mintado antes do full-stack. Liga a rota gateway que PROXIA (proxiesTo) ao

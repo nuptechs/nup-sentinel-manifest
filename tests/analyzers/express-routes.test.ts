@@ -432,3 +432,78 @@ describe("expressRoutesToImpactEndpoints", () => {
     assert.deepEqual(out[0].fullCallChain, []);
   });
 });
+
+// ── ADR-0026 CM2 upstream fix: a rota alcança o REPOSITÓRIO via alias+barrel+DI ──
+describe("extractExpressRoutes — cadeia até packages/core/src/repositories (alias tsconfig + barrel + DI)", () => {
+  const MONOREPO = [
+    {
+      filePath: "tsconfig.json",
+      content: `{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@core/*": ["packages/core/src/*"] }
+  }
+}`,
+    },
+    {
+      filePath: "packages/core/src/db/schema.ts",
+      content: `import { pgTable, integer, text } from "drizzle-orm/pg-core";
+export const notifications = pgTable("notification", { id: integer("id").primaryKey(), body: text("body") });
+`,
+    },
+    {
+      filePath: "packages/core/src/repositories/notification.repository.ts",
+      content: `import { db } from "../db/client";
+import { notifications } from "../db/schema";
+export class NotificationRepository {
+  async create(p: unknown) { await db.insert(notifications).values(p); }
+}
+`,
+    },
+    {
+      filePath: "packages/core/src/repositories/index.ts",
+      content: `export * from "./notification.repository";\n`,
+    },
+    {
+      filePath: "services/gateway/src/services/notification.service.ts",
+      content: `import { NotificationRepository } from "@core/repositories";
+export class NotificationService {
+  constructor(private readonly repo: NotificationRepository) {}
+  async send(p: unknown) { return this.repo.create(p); }
+}
+`,
+    },
+    {
+      filePath: "services/gateway/src/app.ts",
+      content: `import express from "express";
+import { NotificationService } from "./services/notification.service";
+
+const app = express();
+const notifRouter = express.Router();
+const svc = new NotificationService(null as any);
+
+notifRouter.post("/send", async (req, res) => {
+  await svc.send(req.body);
+  res.status(202).end();
+});
+
+app.use("/notifications", notifRouter);
+export { app };
+`,
+    },
+  ];
+
+  it("entitiesTouched/persistenceOperations chegam do repositório e o callChain termina nele", () => {
+    const routes = extractExpressRoutes(MONOREPO);
+    const post = routes.find((r) => r.method === "POST" && r.path === "/notifications/send");
+    assert.ok(post, "rota POST /notifications/send extraída");
+    assert.deepEqual(post!.entitiesTouched, ["notification"], "toque do repositório 3 arquivos abaixo");
+    assert.deepEqual(post!.persistenceOperations, ["write"]);
+    const last = post!.callChain[post!.callChain.length - 1];
+    assert.equal(
+      last,
+      "packages/core/src/repositories/notification.repository.ts::NotificationRepository.create",
+      "cadeia ancora no método do repositório",
+    );
+  });
+});

@@ -7,6 +7,12 @@ const SUPPORTED_EXTENSIONS = new Set([
   ".java", ".ts", ".tsx", ".js", ".jsx", ".vue", ".py", ".cs",
 ]);
 
+// tsconfig.json/tsconfig.*.json entram por BASENAME (não por extensão): o
+// call-chain do backend Node resolve aliases de import via compilerOptions.paths
+// (node-backend/call-chain.ts). Sem eles no payload, cadeias por alias
+// (`@core/repositories`) param no 1º hop. Só tsconfig — .json genérico segue fora.
+const TSCONFIG_BASENAME_RE = /^tsconfig(\.[\w.-]+)?\.json$/;
+
 const IGNORED_DIRS = new Set([
   "node_modules", ".git", "dist", "build", "target", ".idea",
   ".vscode", ".gradle", "__pycache__", ".next", "out", "bin", "obj",
@@ -62,7 +68,11 @@ export function extractAndScanZip(zipPathOrBuffer: string | Buffer): ScannedFile
     if (isIgnoredPath(entryPath)) { ignoredByDir++; continue; }
 
     const ext = path.extname(entryPath).toLowerCase();
-    if (!SUPPORTED_EXTENSIONS.has(ext)) { ignoredByExt++; continue; }
+    const basename = entryPath.split("/").pop() || "";
+    if (!SUPPORTED_EXTENSIONS.has(ext) && !TSCONFIG_BASENAME_RE.test(basename)) {
+      ignoredByExt++;
+      continue;
+    }
 
     if (entry.header.size > MAX_FILE_SIZE) {
       ignoredBySize++;

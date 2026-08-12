@@ -182,8 +182,10 @@ function readCallArgs(content: string, openParenIdx: number): string {
  *   delete(sym)                        → delete
  *   referência nua a um símbolo conhecido → read (fallback)
  * Símbolos casados por nome (assume nomes únicos no backend Node — limite do D4).
+ * Exportada: o full-stack-augment a REUSA sobre o CONTEÚDO de arquivos de
+ * repositório Node para ligar o nó REPOSITORY às suas entidades Drizzle.
  */
-function resolveHandlerEntities(
+export function resolveHandlerEntities(
   args: string,
   drizzle: Map<string, DrizzleEntity>,
 ): { entities: string[]; operations: string[] } {

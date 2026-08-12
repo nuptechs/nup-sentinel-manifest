@@ -15,9 +15,16 @@
 // REGRA DE OURO (conservadora): só liga o que dá pra provar por declaração
 // local ou import resolvido. Na dúvida — símbolo não encontrado, resolução
 // ambígua, dispatch dinâmico — NÃO liga (falso negativo > falso positivo).
-// Fora de escopo, documentado: dynamic dispatch (handlers[k]()), DI containers,
-// cadeias de re-export/barrel (export * from), callbacks higher-order
-// (arr.map(fn)), herança/super, pacotes npm, aliases tsconfig arbitrários.
+// DENTRO do escopo (tudo ainda por prova sintática, nunca por chute):
+//   · aliases do tsconfig (compilerOptions.paths/baseUrl, tsconfig*.json do
+//     próprio payload — o que fazia a cadeia parar antes de packages/core);
+//   · barrels/re-exports (`export * from`, `export { x } from`, `export * as ns`);
+//   · DI simples por construtor (parameter property tipada, `this.x = param`
+//     tipado, `this.x = new Classe()`) — `this.repo.save()` resolve pela
+//     ANOTAÇÃO DE TIPO do membro, que é declaração, não runtime.
+// Fora de escopo, documentado: dynamic dispatch (handlers[k]()), DI por
+// CONTAINER (token/decorator — awilix/inversify/nest), callbacks higher-order
+// (arr.map(fn)), herança/super, pacotes npm, DI por interface (impl ≠ tipo).
 //
 // Vive atrás de MANIFEST_MULTISTACK_NODE (só o parser Express o invoca).
 // DEFAULT OFF ⇒ ninguém chama este módulo ⇒ pipeline byte-a-byte (G2).
@@ -72,9 +79,130 @@ function isCandidateFile(f: { filePath: string; content: string }): boolean {
   return true;
 }
 
+// ── Aliases do tsconfig (compilerOptions.paths) ──
+// O payload pode conter tsconfig.json/tsconfig.*.json (o scanner os aceita por
+// basename). Cada config vira um conjunto de padrões `@core/* → packages/core/
+// src/*`, ESCOPADO ao diretório do próprio tsconfig (config mais próxima do
+// importador vence — semântica de monorepo). Parsing JSONC fail-soft: config
+// quebrada é ignorada, nunca derruba o resolver. `extends` fora de escopo — em
+// monorepo cada pacote com paths próprios já cobre o caso real.
+
+interface TsconfigPattern {
+  /** parte antes do `*` (ou a chave inteira, se exata). */
+  prefix: string;
+  /** parte depois do `*`. */
+  suffix: string;
+  exact: boolean;
+  /** bases já resolvidas contra dir+baseUrl; `*` preservado p/ substituição. */
+  targets: string[];
+}
+
+export interface TsconfigPathsIndex {
+  /** ordenado por dir mais específico primeiro (config mais próxima vence). */
+  configs: { dir: string; patterns: TsconfigPattern[] }[];
+}
+
+const TSCONFIG_BASENAME_RE = /(^|\/)tsconfig(\.[\w.-]+)?\.json$/;
+
+/** Remove comentários (fora de strings) e vírgulas finais — tsconfig é JSONC. */
+function stripJsonc(text: string): string {
+  let out = "";
+  let i = 0;
+  let inString = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (ch === "\\") {
+        out += text[i + 1] ?? "";
+        i += 2;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "*") {
+      i += 2;
+      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out.replace(/,\s*([}\]])/g, "$1");
+}
+
+/** Join relativo determinístico ("a/b" + "../c" → "a/c"), sem fs. */
+function joinRelative(dir: string, rel: string): string {
+  const out: string[] = dir ? dir.split("/") : [];
+  for (const seg of rel.split("/")) {
+    if (seg === "." || seg === "") continue;
+    if (seg === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join("/");
+}
+
+/** Indexa os `compilerOptions.paths` de todo tsconfig*.json do payload. */
+export function buildTsconfigPathsIndex(
+  files: { filePath: string; content: string }[],
+): TsconfigPathsIndex {
+  const configs: TsconfigPathsIndex["configs"] = [];
+  for (const f of files) {
+    if (!TSCONFIG_BASENAME_RE.test(f.filePath)) continue;
+    try {
+      const json = JSON.parse(stripJsonc(f.content)) as {
+        compilerOptions?: { baseUrl?: unknown; paths?: Record<string, unknown> };
+      };
+      const co = json?.compilerOptions;
+      if (!co?.paths || typeof co.paths !== "object") continue;
+      const dir = f.filePath.includes("/")
+        ? f.filePath.slice(0, f.filePath.lastIndexOf("/"))
+        : "";
+      const base = joinRelative(dir, typeof co.baseUrl === "string" ? co.baseUrl : ".");
+      const patterns: TsconfigPattern[] = [];
+      for (const key of Object.keys(co.paths)) {
+        const raw = co.paths[key];
+        const targets = (Array.isArray(raw) ? raw : []).filter(
+          (t): t is string => typeof t === "string",
+        );
+        if (targets.length === 0) continue;
+        const star = key.indexOf("*");
+        patterns.push({
+          prefix: star >= 0 ? key.slice(0, star) : key,
+          suffix: star >= 0 ? key.slice(star + 1) : "",
+          exact: star < 0,
+          targets: targets.map((t) => joinRelative(base, t)),
+        });
+      }
+      if (patterns.length > 0) configs.push({ dir, patterns });
+    } catch {
+      // JSONC quebrado/exótico ⇒ config ignorada (fail-soft, nunca derruba).
+    }
+  }
+  configs.sort((a, b) => b.dir.length - a.dir.length);
+  return { configs };
+}
+
 /**
  * Resolve um module specifier para um path do projeto. Relativos com
- * extensões/index.*; alias `@/`/`~/` com roots derivados do próprio importador
+ * extensões/index.*; aliases do tsconfig (paths — config mais próxima do
+ * importador vence); alias `@/`/`~/` com roots derivados do próprio importador
  * (todo prefixo que termina em src/) + convenções. Pacote npm ⇒ null.
  * Lookup em Set — O(1), sem o indexOf linear do normalizeModulePath do frontend.
  */
@@ -82,6 +210,7 @@ export function resolveBackendModulePath(
   importerPath: string,
   spec: string,
   pathSet: Set<string>,
+  aliases?: TsconfigPathsIndex,
 ): string | null {
   const EXTS = ["", ".ts", ".js", ".tsx", ".jsx", "/index.ts", "/index.js"];
 
@@ -105,6 +234,32 @@ export function resolveBackendModulePath(
       resolved.push(seg);
     }
     return tryBase(resolved.join("/"));
+  }
+
+  // Aliases do tsconfig ANTES da heurística `@/` — config declarada vence chute.
+  // Escopo: só configs cujo dir é prefixo do importador (raiz "" vale pra todos).
+  if (aliases) {
+    for (const cfg of aliases.configs) {
+      if (cfg.dir && importerPath !== cfg.dir && !importerPath.startsWith(cfg.dir + "/")) {
+        continue;
+      }
+      for (const p of cfg.patterns) {
+        let bases: string[];
+        if (p.exact) {
+          if (spec !== p.prefix) continue;
+          bases = p.targets;
+        } else {
+          if (!spec.startsWith(p.prefix)) continue;
+          if (p.suffix && !spec.endsWith(p.suffix)) continue;
+          const mid = spec.slice(p.prefix.length, spec.length - p.suffix.length);
+          bases = p.targets.map((t) => t.replace("*", mid));
+        }
+        for (const base of bases) {
+          const hit = tryBase(base);
+          if (hit) return hit;
+        }
+      }
+    }
   }
 
   if (spec.startsWith("@/") || spec.startsWith("~/")) {
@@ -138,6 +293,7 @@ function importClosure(
   entryFiles: string[],
   byPath: Map<string, string>,
   pathSet: Set<string>,
+  aliases?: TsconfigPathsIndex,
 ): Set<string> {
   const seen = new Set<string>();
   const queue = entryFiles.filter((p) => byPath.has(p));
@@ -150,7 +306,7 @@ function importClosure(
     let m: RegExpExecArray | null;
     while ((m = MODULE_SPEC_RE.exec(content)) !== null) {
       const spec = m[1] || m[2] || m[3];
-      const resolved = resolveBackendModulePath(path, spec, pathSet);
+      const resolved = resolveBackendModulePath(path, spec, pathSet, aliases);
       if (resolved && !seen.has(resolved)) queue.push(resolved);
     }
   }
@@ -162,19 +318,37 @@ interface ImportBinding {
   originalName: string; // "default" | "*" | nome exportado
 }
 
-/** Espelho do parseImportBindingsInternal do frontend, com resolução própria. */
+interface ParsedImports {
+  bindings: Map<string, ImportBinding>;
+  /** re-export nomeado do barrel: nome EXPORTADO → origem (`export {a as b} from`). */
+  reexportNamed: Map<string, ImportBinding>;
+  /** origens de `export * from "./x"` (ordem de declaração — 1º acerto vence). */
+  reexportStars: string[];
+}
+
+/** Espelho do parseImportBindingsInternal do frontend, com resolução própria.
+ *  Também indexa os RE-EXPORTS do arquivo (barrels): `export * from`,
+ *  `export { a as b } from`, `export * as ns from` e `export { x }` de um
+ *  binding importado — tudo declaração sintática, dentro da regra de ouro. */
 function parseImports(
   sourceFile: ts.SourceFile,
   importerPath: string,
   pathSet: Set<string>,
-): Map<string, ImportBinding> {
+  aliases?: TsconfigPathsIndex,
+): ParsedImports {
   const bindings = new Map<string, ImportBinding>();
+  const reexportNamed = new Map<string, ImportBinding>();
+  const reexportStars: string[] = [];
+  // `export { x }` sem specifier: o nome local pode ser um IMPORT — resolve
+  // depois do visit, quando todos os bindings já são conhecidos.
+  const localReexports: { exported: string; local: string }[] = [];
   const visit = (node: ts.Node) => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const resolved = resolveBackendModulePath(
         importerPath,
         node.moduleSpecifier.text,
         pathSet,
+        aliases,
       );
       if (resolved && node.importClause) {
         if (node.importClause.name) {
@@ -197,11 +371,50 @@ function parseImports(
           }
         }
       }
+    } else if (ts.isExportDeclaration(node)) {
+      const specText =
+        node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)
+          ? node.moduleSpecifier.text
+          : null;
+      if (specText) {
+        const resolved = resolveBackendModulePath(importerPath, specText, pathSet, aliases);
+        if (resolved) {
+          if (!node.exportClause) {
+            reexportStars.push(resolved); // export * from "./x"
+          } else if (ts.isNamedExports(node.exportClause)) {
+            for (const spec of node.exportClause.elements) {
+              reexportNamed.set(spec.name.text, {
+                sourcePath: resolved,
+                originalName: spec.propertyName ? spec.propertyName.text : spec.name.text,
+              });
+            }
+          } else if (ts.isNamespaceExport(node.exportClause)) {
+            // export * as ns from "./x" — ns.fn resolve no arquivo de origem.
+            reexportNamed.set(node.exportClause.name.text, {
+              sourcePath: resolved,
+              originalName: "*",
+            });
+          }
+        }
+      } else if (node.exportClause && ts.isNamedExports(node.exportClause)) {
+        for (const spec of node.exportClause.elements) {
+          localReexports.push({
+            exported: spec.name.text,
+            local: spec.propertyName ? spec.propertyName.text : spec.name.text,
+          });
+        }
+      }
     }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  return bindings;
+  for (const { exported, local } of localReexports) {
+    const imported = bindings.get(local);
+    // Só vira re-export se o binding local É um import (barrel `import`+`export`);
+    // nome declarado no próprio arquivo já está em names — não precisa daqui.
+    if (imported && !reexportNamed.has(exported)) reexportNamed.set(exported, imported);
+  }
+  return { bindings, reexportNamed, reexportStars };
 }
 
 // ── Indexação de funções de um arquivo ──
@@ -219,6 +432,17 @@ interface FileIndex {
   imports: Map<string, ImportBinding>;
   /** variável local → nome da classe (const r = new Repo()). */
   instanceTypes: Map<string, string>;
+  /**
+   * DI simples por construtor: "Classe.membro" → nome do TIPO declarado
+   * (parameter property `private repo: Repo`, propriedade tipada `repo: Repo`,
+   * `this.repo = param` com param tipado, ou `this.repo = new Repo()`).
+   * Resolve `this.repo.save()` pela declaração — nunca por runtime.
+   */
+  memberTypes: Map<string, string>;
+  /** re-export nomeado do barrel: nome exportado → origem. */
+  reexportNamed: Map<string, ImportBinding>;
+  /** origens de `export * from "./x"`. */
+  reexportStars: string[];
 }
 
 /** Dono de uma função declarada dentro de object literal: `const svc = { fn(){} }`. */
@@ -232,10 +456,78 @@ function objectLiteralOwner(node: ts.Node): string | null {
   return null;
 }
 
-function indexFile(sourceFile: ts.SourceFile): Omit<FileIndex, "imports"> {
+/** Nome do tipo de uma anotação `x: Tipo` (só TypeReference simples). */
+function typeNameOf(typeNode: ts.TypeNode | undefined): string | null {
+  if (!typeNode || !ts.isTypeReferenceNode(typeNode)) return null;
+  return ts.isIdentifier(typeNode.typeName) ? typeNode.typeName.text : null;
+}
+
+/**
+ * DI simples por construtor — registra "Classe.membro" → Tipo a partir de:
+ *   · parameter property: `constructor(private repo: Repo)`;
+ *   · propriedade tipada/inicializada: `repo: Repo` / `repo = new Repo()`;
+ *   · atribuição no corpo: `this.repo = param` (param tipado) / `= new Repo()`.
+ */
+function indexClassMemberTypes(
+  cls: ts.ClassDeclaration,
+  className: string,
+  memberTypes: Map<string, string>,
+): void {
+  const put = (member: string, type: string | null) => {
+    if (type && !memberTypes.has(`${className}.${member}`)) {
+      memberTypes.set(`${className}.${member}`, type);
+    }
+  };
+  for (const member of cls.members) {
+    if (ts.isPropertyDeclaration(member) && ts.isIdentifier(member.name)) {
+      const fromType = typeNameOf(member.type);
+      const fromNew =
+        member.initializer &&
+        ts.isNewExpression(member.initializer) &&
+        ts.isIdentifier(member.initializer.expression)
+          ? member.initializer.expression.text
+          : null;
+      put(member.name.text, fromType ?? fromNew);
+    } else if (ts.isConstructorDeclaration(member)) {
+      const paramTypes = new Map<string, string>();
+      for (const param of member.parameters) {
+        if (!ts.isIdentifier(param.name)) continue;
+        const type = typeNameOf(param.type);
+        if (!type) continue;
+        paramTypes.set(param.name.text, type);
+        // parameter property (private/public/protected/readonly) VIRA membro
+        const mods = ts.getModifiers?.(param) ?? [];
+        if (mods.length > 0) put(param.name.text, type);
+      }
+      // `this.x = y` no corpo: y identifier tipado ou `new Classe()`.
+      const scanAssign = (node: ts.Node) => {
+        if (
+          ts.isBinaryExpression(node) &&
+          node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isPropertyAccessExpression(node.left) &&
+          node.left.expression.kind === ts.SyntaxKind.ThisKeyword &&
+          ts.isIdentifier(node.left.name)
+        ) {
+          const member2 = node.left.name.text;
+          if (ts.isIdentifier(node.right)) put(member2, paramTypes.get(node.right.text) ?? null);
+          else if (ts.isNewExpression(node.right) && ts.isIdentifier(node.right.expression)) {
+            put(member2, node.right.expression.text);
+          }
+        }
+        ts.forEachChild(node, scanAssign);
+      };
+      if (member.body) scanAssign(member.body);
+    }
+  }
+}
+
+function indexFile(
+  sourceFile: ts.SourceFile,
+): Omit<FileIndex, "imports" | "reexportNamed" | "reexportStars"> {
   const names = new Map<string, string>();
   const fns: IndexedFn[] = [];
   const instanceTypes = new Map<string, string>();
+  const memberTypes = new Map<string, string>();
   let currentClass: string | null = null;
 
   const register = (canonical: string, node: ts.Node, aliases: string[]) => {
@@ -249,6 +541,7 @@ function indexFile(sourceFile: ts.SourceFile): Omit<FileIndex, "imports"> {
     if (ts.isClassDeclaration(node)) {
       const prev = currentClass;
       currentClass = node.name ? node.name.text : null;
+      if (currentClass) indexClassMemberTypes(node, currentClass, memberTypes);
       ts.forEachChild(node, visit);
       currentClass = prev;
       return;
@@ -289,7 +582,56 @@ function indexFile(sourceFile: ts.SourceFile): Omit<FileIndex, "imports"> {
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  return { names, fns, instanceTypes };
+  return { names, fns, instanceTypes, memberTypes };
+}
+
+/**
+ * Resolve um NOME (plano ou qualificado "obj.metodo") num arquivo, atravessando
+ * BARRELS quando o arquivo não o declara: re-export nomeado segue a origem
+ * declarada; `export * from` tenta cada origem em ordem (1º acerto vence);
+ * `export * as ns` resolve `ns.metodo` como `metodo` na origem. Anti-ciclo por
+ * (arquivo,nome) + teto de profundidade — barrel circular não trava.
+ */
+function resolveNameInFile(
+  filePath: string,
+  name: string,
+  fileIndexes: Map<string, FileIndex>,
+  depth = 0,
+  seen?: Set<string>,
+): { filePath: string; canonical: string } | null {
+  if (depth > 8) return null;
+  const idx = fileIndexes.get(filePath);
+  if (!idx) return null;
+  const canonical = idx.names.get(name);
+  if (canonical) return { filePath, canonical };
+
+  const visitKey = `${filePath}::${name}`;
+  const guard = seen ?? new Set<string>();
+  if (guard.has(visitKey)) return null;
+  guard.add(visitKey);
+
+  const dot = name.indexOf(".");
+  const head = dot >= 0 ? name.slice(0, dot) : name;
+  const tail = dot >= 0 ? name.slice(dot + 1) : null;
+
+  const named = idx.reexportNamed.get(head);
+  if (named) {
+    const targetName =
+      named.originalName === "*"
+        ? tail // `export * as ns from` — ns.metodo vira metodo na origem
+        : tail
+          ? `${named.originalName}.${tail}`
+          : named.originalName;
+    if (targetName) {
+      const hit = resolveNameInFile(named.sourcePath, targetName, fileIndexes, depth + 1, guard);
+      if (hit) return hit;
+    }
+  }
+  for (const src of idx.reexportStars) {
+    const hit = resolveNameInFile(src, name, fileIndexes, depth + 1, guard);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 // ── Extração de toques Drizzle e callees do corpo de uma função ──
@@ -414,6 +756,27 @@ function walkFnBody(
         const obj = expr.expression;
         if (obj.kind === ts.SyntaxKind.ThisKeyword && currentOwner) {
           candidates.push({ filePath, names: [`${currentOwner}.${method}`, method] });
+        } else if (
+          ts.isPropertyAccessExpression(obj) &&
+          obj.expression.kind === ts.SyntaxKind.ThisKeyword &&
+          ts.isIdentifier(obj.name) &&
+          currentOwner
+        ) {
+          // `this.repo.save()` — DI por construtor: o TIPO declarado do membro
+          // (parameter property / propriedade tipada) diz a classe-alvo.
+          const memberType = fileIdx.memberTypes.get(`${currentOwner}.${obj.name.text}`);
+          if (memberType) {
+            const typeImport = fileIdx.imports.get(memberType);
+            candidates.push(
+              typeImport
+                ? {
+                    filePath: typeImport.sourcePath,
+                    names: [`${typeImport.originalName}.${method}`],
+                  }
+                : { filePath, names: [`${memberType}.${method}`] },
+            );
+          }
+          // membro sem tipo declarado ⇒ não liga (regra de ouro).
         } else if (ts.isIdentifier(obj)) {
           const objName = obj.text;
           const imported = fileIdx.imports.get(objName);
@@ -485,10 +848,12 @@ function buildInternal(
   const candidates = files.filter(isCandidateFile);
   const byPath = new Map(candidates.map((f) => [f.filePath, f.content]));
   const pathSet = new Set(byPath.keys());
+  // Aliases do tsconfig vêm do payload INTEIRO (tsconfig*.json não é candidato).
+  const aliases = buildTsconfigPathsIndex(files);
 
   let scope: string[];
   if (opts?.entryFiles && opts.entryFiles.length > 0) {
-    scope = Array.from(importClosure(opts.entryFiles, byPath, pathSet));
+    scope = Array.from(importClosure(opts.entryFiles, byPath, pathSet, aliases));
   } else {
     scope = Array.from(byPath.keys()).slice(0, MAX_FILES);
   }
@@ -506,9 +871,12 @@ function buildInternal(
     try {
       const sourceFile = parseTypeScript(content, path);
       const idx = indexFile(sourceFile);
+      const parsed = parseImports(sourceFile, path, pathSet, aliases);
       fileIndexes.set(path, {
         ...idx,
-        imports: parseImports(sourceFile, path, pathSet),
+        imports: parsed.bindings,
+        reexportNamed: parsed.reexportNamed,
+        reexportStars: parsed.reexportStars,
       });
     } catch {
       // Arquivo que não parseia não entra no grafo — degrade silencioso local.
@@ -542,16 +910,15 @@ function buildInternal(
     }
   }
 
-  // Passe 3: resolve candidatos → chaves canônicas existentes. Não achou ⇒ não liga.
+  // Passe 3: resolve candidatos → chaves canônicas existentes (atravessando
+  // barrels via resolveNameInFile). Não achou ⇒ não liga.
   for (const [key, cands] of Array.from(rawCallees.entries())) {
     const node = graph.get(key)!;
     for (const cand of cands) {
-      const targetIdx = fileIndexes.get(cand.filePath);
-      if (!targetIdx) continue;
       for (const name of cand.names) {
-        const canonical = targetIdx.names.get(name);
-        if (canonical) {
-          const targetKey = makeBackendKey(cand.filePath, canonical);
+        const hit = resolveNameInFile(cand.filePath, name, fileIndexes);
+        if (hit) {
+          const targetKey = makeBackendKey(hit.filePath, hit.canonical);
           if (targetKey !== key && graph.has(targetKey)) node.callees.add(targetKey);
           break;
         }
@@ -585,12 +952,10 @@ export function buildBackendCallChain(
     const seeds: string[] = [];
 
     const tryPush = (targetFile: string, names: string[]) => {
-      const idx = fileIndexes.get(targetFile);
-      if (!idx) return;
       for (const name of names) {
-        const canonical = idx.names.get(name);
-        if (canonical) {
-          const key = makeBackendKey(targetFile, canonical);
+        const hit = resolveNameInFile(targetFile, name, fileIndexes);
+        if (hit) {
+          const key = makeBackendKey(hit.filePath, hit.canonical);
           if (graph.has(key) && !seeds.includes(key)) seeds.push(key);
           return;
         }
@@ -633,9 +998,9 @@ export function buildBackendCallChain(
     const imported = fileIdx.imports.get(name);
     const targetFile = imported ? imported.sourcePath : filePath;
     const targetName = imported ? imported.originalName : name;
-    const canonical = fileIndexes.get(targetFile)?.names.get(targetName);
-    if (!canonical) return null;
-    const key = makeBackendKey(targetFile, canonical);
+    const hit = resolveNameInFile(targetFile, targetName, fileIndexes);
+    if (!hit) return null;
+    const key = makeBackendKey(hit.filePath, hit.canonical);
     return graph.has(key) ? key : null;
   };
 
