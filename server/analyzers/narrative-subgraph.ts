@@ -143,7 +143,8 @@ function edgeProvenance(e: ShapedEdge): string {
     return n ? `observada em ${n} traço(s) de runtime` : "observada em runtime (OTel/Jaeger)";
   }
   const r = e.resolution;
-  if (r === "compiler") return "resolvida pelo compilador (Engine A)";
+  if (r === "compiler") return "resolvida pelo compilador (scip)";
+  if (r === "syntactic-resolved") return "resolvida pelo SymbolSolver sobre a fonte do projeto (Engine A)";
   if (r === "interface-impl") return "resolvida por implementação de interface (compilador)";
   if (r === "type" || r === "import" || r === "exact" || r === "direct") return `resolvida estaticamente (${r})`;
   return "provada estaticamente pela fonte";

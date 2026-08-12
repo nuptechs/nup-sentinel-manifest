@@ -245,9 +245,12 @@ describe("shapeSystemGraph — T1 proveniência exposta nas arestas (ADR-0025)",
 // ─── ADR-0028 P0.1 — taxonomia epistêmica (método+confiança) + censo ───
 // Prova o CONTRATO: toda aresta/nó declara COMO sabemos que existe, e o grafo
 // carrega um censo. Os valores REAIS de `resolution` (grep server/analyzers|
-// pipeline): PRECISOS `compiler`/`interface-impl` (Engine A) → STATIC_PROVEN;
-// HEURÍSTICOS `syntactic-declared` (sempre synthetic:true) + `convention-name`
-// (full-stack-augment) → STATIC_UNRESOLVED.
+// pipeline|engine): PRECISOS `compiler` (scip/data-access-aggregate),
+// `interface-impl` + `syntactic-resolved` (Engine A — este último = SymbolSolver
+// resolveu de verdade, JLS sobre fonte do projeto; ver PRECISE_RESOLUTIONS)
+// → STATIC_PROVEN; HEURÍSTICOS `syntactic-declared` (fallback do engine SEM
+// synthetic; no full-stack-augment sempre synthetic:true) + `convention-name`
+// → STATIC_UNRESOLVED.
 describe("shapeSystemGraph — ADR-0028 P0.1 evidence por ARESTA (5 métodos)", () => {
   function oneEdge(metadata: Record<string, unknown> | undefined) {
     const raw = {
@@ -274,6 +277,19 @@ describe("shapeSystemGraph — ADR-0028 P0.1 evidence por ARESTA (5 métodos)", 
     assert.deepEqual(e.evidence, { method: "STATIC_PROVEN", confidence: 0.80 });
   });
 
+  it("resolution `syntactic-resolved` (Engine A, SymbolSolver ok) → STATIC_PROVEN (0.80)", () => {
+    // O nome tem prefixo "syntactic-" por razão histórica (ADR-0018/0025), mas a
+    // semântica é resolução JLS completa sobre a fonte — NÃO cai no startsWith.
+    const e = oneEdge({ resolution: "syntactic-resolved" });
+    assert.deepEqual(e.evidence, { method: "STATIC_PROVEN", confidence: 0.80 });
+  });
+
+  it("resolution `syntactic-declared` SEM synthetic (fallback Engine A) → STATIC_UNRESOLVED (0.40)", () => {
+    // O engine Java emite `syntactic-declared` sem synthetic:true — segue heurística.
+    const e = oneEdge({ resolution: "syntactic-declared" });
+    assert.deepEqual(e.evidence, { method: "STATIC_UNRESOLVED", confidence: 0.40 });
+  });
+
   it("synthetic:true + `syntactic-declared` → STATIC_UNRESOLVED (0.40)", () => {
     const e = oneEdge({ synthetic: true, resolution: "syntactic-declared" });
     assert.deepEqual(e.evidence, { method: "STATIC_UNRESOLVED", confidence: 0.40 });
@@ -298,6 +314,11 @@ describe("shapeSystemGraph — ADR-0028 P0.1 evidence por ARESTA (5 métodos)", 
     // `syntactic-declared` chega SEMPRE com synthetic:true no full-stack-augment;
     // aqui simulamos synthetic com uma resolution que seria precisa se sozinha.
     const e = oneEdge({ synthetic: true, resolution: "compiler" });
+    assert.equal(e.evidence.method, "STATIC_UNRESOLVED");
+  });
+
+  it("precedência: synthetic:true + `syntactic-resolved` → STATIC_UNRESOLVED (synthetic domina)", () => {
+    const e = oneEdge({ synthetic: true, resolution: "syntactic-resolved" });
     assert.equal(e.evidence.method, "STATIC_UNRESOLVED");
   });
 
