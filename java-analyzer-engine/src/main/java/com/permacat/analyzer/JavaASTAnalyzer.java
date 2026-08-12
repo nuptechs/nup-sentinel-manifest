@@ -333,6 +333,7 @@ public class JavaASTAnalyzer {
                                 if (entityInfo != null && entityInfo.isEntity) {
                                     info.resolvedEntitySymbol = entityDecl;
                                     info.resolvedEntityClassName = entityInfo.className;
+                                    info.entityResolvedBySolver = true;
                                     break;
                                 }
                             }
@@ -348,6 +349,7 @@ public class JavaASTAnalyzer {
                             if (entityByFqn != null && entityByFqn.isEntity) {
                                 info.resolvedEntitySymbol = entityByFqn.resolvedSymbol;
                                 info.resolvedEntityClassName = entityByFqn.className;
+                                info.entityResolvedBySolver = true;
                                 break;
                             }
                         }
@@ -912,8 +914,9 @@ public class JavaASTAnalyzer {
                     mi.methodCalls.add(mci);
                 } catch (Exception e) {
                     // Fallback sintático (ADR-0018): o resolve() falha para QUALQUER
-                    // chamada cujo tipo declarante/argumento não está no classpath —
-                    // ex.: repo.save()/findById() herdados do JpaRepository (externo).
+                    // chamada cujo tipo declarante/argumento não está no classpath do
+                    // engine (fonte do projeto + JDK + stack Spring embarcada no pom) —
+                    // ex.: tipos de libs do projeto-alvo que o engine não embarca.
                     // O catch vazio descartava a chamada e a cadeia morria sem a
                     // entidade. Agora gravamos os FATOS SINTÁTICOS (nome do método,
                     // nome simples do escopo, aridade) e o grafo liga depois pelo
@@ -1327,8 +1330,11 @@ public class JavaASTAnalyzer {
                 if (entityInfo != null) {
                     String entityNodeId = resolvedEntityNodeId(entityInfo);
                     if (nodeIds.contains(entityNodeId)) {
+                        // T1 (ADR-0025): `syntactic-resolved` SÓ quando o genérico
+                        // foi resolvido pelo solver; fallback ADR-0018 = declared.
                         addEdge(edges, edgeKeys, repoNode.id, entityNodeId, "READS_ENTITY",
-                            Map.of("operation", "read", "resolution", "syntactic-resolved"));
+                            Map.of("operation", "read", "resolution",
+                                cls.entityResolvedBySolver ? "syntactic-resolved" : "syntactic-declared"));
                     }
                 }
 
@@ -1680,6 +1686,10 @@ public class JavaASTAnalyzer {
         ResolvedReferenceTypeDeclaration resolvedSymbol;
         ResolvedReferenceTypeDeclaration resolvedEntitySymbol;
         String resolvedEntityClassName;
+        // T1 (ADR-0025): o genérico de JpaRepository<Entidade,·> foi resolvido
+        // pelo SymbolSolver (true) ou pelo fallback sintático ADR-0018 (false)?
+        // Decide a proveniência da aresta repo→entidade (resolved vs declared).
+        boolean entityResolvedBySolver;
         List<MethodInfo> methods = new ArrayList<>();
         List<EntityField> entityFields = new ArrayList<>();
         List<SecurityAnnotation> securityAnnotations = new ArrayList<>();

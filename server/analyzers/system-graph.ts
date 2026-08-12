@@ -295,14 +295,25 @@ function entryPointOf(node: RawSystemNode): string | undefined {
 }
 
 // ─── ADR-0028 P0.1 — classificação epistêmica (pura) ───
-// `resolution` REAIS observados no código (grep server/analyzers|pipeline):
-//   PRECISOS (Engine A, resolvidos por compilador/tipo): `compiler`, `interface-impl`
-//   HEURÍSTICOS (Node full-stack-augment): `syntactic-declared` (sempre com
-//   synthetic:true), `convention-name`. Os genéricos exact/type/import/direct/
-//   dynamic estão previstos no vocabulário T1 mesmo sem produtor atual — mapeados
-//   para não cair em UNKNOWN se um analisador novo os emitir.
-export const PRECISE_RESOLUTIONS = new Set(['compiler', 'interface-impl', 'exact', 'type', 'import', 'direct']);
+// `resolution` REAIS observados no código (grep server/analyzers|pipeline|engine):
+//   PRECISOS: `compiler` (scip → data-access-aggregate/ingest ADR-0031),
+//   `interface-impl` (Engine A, fan-out CHA interface→impls) e
+//   `syntactic-resolved` (Engine A: `callExpr.resolve()` do JavaParser
+//   SymbolSolver SUCEDEU — resolução JLS completa de nome+overload sobre fontes
+//   do projeto + JDK + stack Spring embarcada no pom do engine; SEM os demais
+//   JARs do projeto-alvo). O modo de falha desse solver parcial é NÃO-resolver
+//   (a chamada cai no fallback `syntactic-declared`), nunca mis-resolver — logo
+//   o SUCESSO mantém grau de prova estática, estritamente mais forte que
+//   `interface-impl` (CHA, 1-de-N) que já é preciso. O prefixo "syntactic-" no
+//   nome é histórico (onda ADR-0018/0025), não epistêmico.
+//   HEURÍSTICOS: `syntactic-declared` (liga pelo tipo DECLARADO do campo/var —
+//   fallback do engine quando o solver falha; no Node full-stack-augment sempre
+//   com synthetic:true), `convention-name`. Os genéricos exact/type/import/
+//   direct/dynamic estão previstos no vocabulário T1 mesmo sem produtor atual —
+//   mapeados para não cair em UNKNOWN se um analisador novo os emitir.
+export const PRECISE_RESOLUTIONS = new Set(['compiler', 'interface-impl', 'syntactic-resolved', 'exact', 'type', 'import', 'direct']);
 function isHeuristicResolution(r: string): boolean {
+  if (PRECISE_RESOLUTIONS.has(r)) return false; // `syntactic-resolved` NÃO cai no startsWith abaixo
   return r === 'convention-name' || r === 'dynamic' || r === 'heuristic' || r.startsWith('syntactic');
 }
 
