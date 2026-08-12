@@ -357,3 +357,91 @@ describe("augmentGraphWithFullStack — entidades Drizzle declaradas (Furo 2)", 
     assert.equal(r.drizzleDeclared, 0);
   });
 });
+
+// ── ADR-0026 CM2: REPOSITORY materializado com as PRÓPRIAS entidades Drizzle ──
+describe("nó REPOSITORY minta com entidades Drizzle do próprio arquivo", () => {
+  it("cadeia que alcança repositório vira nó REPOSITORY→ENTITY (resolveHandlerEntities reusada)", async () => {
+    const { augmentGraphWithFullStack } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    const fileData = [
+      {
+        filePath: "packages/core/src/db/schema.ts",
+        content: `import { pgTable, integer } from "drizzle-orm/pg-core";
+export const notifications = pgTable("notification", { id: integer("id").primaryKey() });
+export const auditLogs = pgTable("audit_log", { id: integer("id").primaryKey() });
+`,
+      },
+      {
+        filePath: "packages/core/src/repositories/notification.repository.ts",
+        content: `import { db } from "../db/client";
+import { notifications, auditLogs } from "../db/schema";
+export class NotificationRepository {
+  async create(p) { await db.insert(notifications).values(p); await db.insert(auditLogs).values({}); }
+}
+`,
+      },
+    ];
+    augmentGraphWithFullStack(g, [], [
+      route("POST", "/api/notifications/send", {
+        callChain: [
+          "services/gateway/src/routes/notifications.js::handler",
+          "packages/core/src/repositories/notification.repository.ts::NotificationRepository.create",
+        ],
+        entitiesTouched: ["notification"], persistenceOperations: ["write"],
+      } as never),
+    ], fileData);
+    const repoNode = g.getNode("node:packages/core/src/repositories/notification.repository.ts")!;
+    assert.ok(repoNode, "módulo de repositório materializado");
+    assert.equal(repoNode.type, "REPOSITORY", "tier de dados, não SERVICE genérico");
+    const out = g.getOutgoingEdges(repoNode.id).map((e) => e.toNode).sort();
+    assert.ok(out.includes("table:notification"), "entidade tocada pela rota ligada ao repo");
+    assert.ok(
+      out.includes("table:audit_log"),
+      "entidade PRÓPRIA do arquivo (fora do agregado da rota) também ligada — resolveHandlerEntities reusada",
+    );
+  });
+});
+
+// ── Meta mensurável (fixture do próprio repo): >0 repositórios materializados ──
+describe("mini-easynup: ROUTE→SERVICE→REPOSITORY→ENTITY navegável de ponta a ponta", () => {
+  it(">0 nós REPOSITORY e a cadeia completa do POST /webhooks/inbound chega em table:webhook_event", async () => {
+    const { augmentGraphWithFullStack } = await import("../../server/analyzers/full-stack-augment.ts");
+    const { extractExpressRoutes } = await import("../../server/analyzers/node-backend/express-routes.ts");
+    const { MINI_EASYNUP } = await import("../regression/mini-easynup.fixture.ts");
+    const nodeFiles = MINI_EASYNUP.filter((f) => !f.filePath.endsWith(".java"));
+
+    const g = new ApplicationGraph();
+    const routes = extractExpressRoutes(nodeFiles);
+    augmentGraphWithFullStack(g, [], routes, nodeFiles);
+
+    const repoNodes = g.getAllNodes().filter((n) => n.type === "REPOSITORY");
+    assert.ok(repoNodes.length > 0, "a nota de honestidade (0 repositórios) precisa estar obsoleta");
+    assert.ok(
+      repoNodes.some((n) => n.id === "node:services/gateway/src/repos/webhook-repo.ts"),
+      "o repo do fixture (src/repos/) é um deles",
+    );
+
+    // POST /webhooks/inbound: rota → app.ts → webhook-service → webhook-repo → tabela.
+    const start = "route:POST:/webhooks/inbound";
+    assert.ok(g.getNode(start), "rota do canário C4 existe");
+    let cursor = start;
+    const visited: string[] = [start];
+    let foundRepo = false;
+    for (let hop = 0; hop < 6; hop++) {
+      const edges = g.getOutgoingEdges(cursor);
+      if (edges.length === 0) break;
+      const next = edges[0].toNode;
+      visited.push(next);
+      const node = g.getNode(next);
+      if (node?.type === "REPOSITORY") foundRepo = true;
+      if (next.startsWith("table:")) break;
+      cursor = next;
+    }
+    assert.ok(foundRepo, `cadeia deveria passar por um REPOSITORY: ${visited.join(" → ")}`);
+    assert.equal(
+      visited[visited.length - 1],
+      "table:webhook_event",
+      `cadeia deveria terminar na entidade: ${visited.join(" → ")}`,
+    );
+  });
+});

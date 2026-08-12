@@ -246,3 +246,22 @@ describe("getFileType", () => {
     assert.equal(getFileType("App.JAVA"), "java");
   });
 });
+
+describe("extractAndScanZip — tsconfig por basename (aliases do call-chain Node)", () => {
+  it("aceita tsconfig.json e variantes tsconfig.*.json; .json genérico segue fora", () => {
+    const buf = buildZip([
+      { name: "x/tsconfig.json", content: `{"compilerOptions":{"paths":{"@core/*":["packages/core/src/*"]}}}` },
+      { name: "x/packages/core/tsconfig.build.json", content: `{}` },
+      { name: "x/package.json", content: `{"name":"nope"}` },
+      { name: "x/data/config.json", content: `{}` },
+      { name: "x/src/app.ts", content: "export const a = 1;" },
+    ]);
+    const files = extractAndScanZip(buf);
+    const paths = files.map((f) => f.filePath).sort();
+    assert.deepEqual(paths, [
+      "packages/core/tsconfig.build.json",
+      "src/app.ts",
+      "tsconfig.json",
+    ]);
+  });
+});
