@@ -7,8 +7,8 @@ import { ScriptSymbolTable } from "./frontend/symbol-table";
 import { buildComponentEventGraph, lookupEventGraph } from "./frontend/event-graph";
 import { extractVueScript, parseTypeScript, getLineNumber } from "./frontend/parsers";
 import { buildStateFlowGraph, lookupStateFlowGraph } from "./frontend/state-flow-graph";
-import { readMultistackFlags } from "../config/multistack";
-import { extractRestExpressInteractions } from "./frontend/rest-express-template";
+import { frontendHttpTemplateMode } from "../config/multistack";
+import { extractRestExpressInteractions, detectRestExpressTemplate } from "./frontend/rest-express-template";
 import {
   getComponentName,
   extractUrlFromNode,
@@ -415,13 +415,17 @@ export function analyzeFrontend(
   }
 
   // Multistack (ADR-0015 Onda 1 D6): captura HTTP do template rest-express
-  // (queryKey-como-URL + apiRequest). Atrás de MANIFEST_MULTISTACK_HTTP_TEMPLATE
-  // — OFF ⇒ nada muda (byte-a-byte, G2); ON ⇒ superset estrito de interações (G3).
-  if (readMultistackFlags().frontendHttpTemplate) {
+  // (queryKey-como-URL + apiRequest). ON ⇒ superset estrito de interações (G3).
+  // ADR-0028: env ausente = modo AUTO — liga por detecção do template React
+  // (client/src + wouter/react-query); env não-truthy setada força OFF.
+  const templateMode = frontendHttpTemplateMode();
+  const templateOn =
+    templateMode === "on" || (templateMode === "auto" && detectRestExpressTemplate(files));
+  if (templateOn) {
     const templateInteractions = extractRestExpressInteractions(files, graph);
     if (templateInteractions.length > 0) {
       interactions.push(...templateInteractions);
-      console.log(`[frontend-analyzer] rest-express template (D6): +${templateInteractions.length} interactions (queryKey/apiRequest)`);
+      console.log(`[frontend-analyzer] rest-express template (D6${templateMode === "auto" ? ", auto-detectado" : ""}): +${templateInteractions.length} interactions (queryKey/apiRequest)`);
     }
   }
 

@@ -7,7 +7,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { extractRestExpressInteractions } from "../../server/analyzers/frontend/rest-express-template.ts";
+import { extractRestExpressInteractions, detectRestExpressTemplate } from "../../server/analyzers/frontend/rest-express-template.ts";
+import { frontendHttpTemplateMode } from "../../server/config/multistack.ts";
 import { ApplicationGraph } from "../../server/analyzers/application-graph.ts";
 
 // Grafo mínimo com um CONTROLLER sintético em /easynup/findContracts.v1,
@@ -78,5 +79,53 @@ describe("extractRestExpressInteractions — apiRequest(method, url)", () => {
       extractRestExpressInteractions([{ filePath: "A.java", content: `useQuery({queryKey:["/x"]})` }], graphWithWsV1()),
       [],
     );
+  });
+});
+
+// ── ADR-0028: auto-detecção do template (modo "auto" da flag D6) ──
+// O NuPIdentify mapeou 1 peça de 12 com o extractor de queryKey/apiRequest
+// desligado (default OFF cego). Env ausente agora = AUTO: liga quando o payload
+// é o template rest-express/React (client/src + wouter/@tanstack/react-query).
+describe("detectRestExpressTemplate — assinatura do template React", () => {
+  const reactPage = {
+    filePath: "client/src/pages/dashboard.tsx",
+    content: 'import { useQuery } from "@tanstack/react-query";\nconst q = useQuery({ queryKey: ["/api/projects"] });',
+  };
+  const wouterApp = {
+    filePath: "client/src/App.tsx",
+    content: 'import { Switch, Route } from "wouter";',
+  };
+  const vueEasynup = {
+    filePath: "frontend/src/pages/Contracts.vue",
+    content: 'import { useQuery } from "@tanstack/vue-query";\nconst q = useQuery({ queryKey: ["/easynup/findContracts.v1"] });',
+  };
+
+  it("dispara com client/src + react-query OU wouter", () => {
+    assert.equal(detectRestExpressTemplate([reactPage]), true);
+    assert.equal(detectRestExpressTemplate([wouterApp]), true);
+  });
+
+  it("NÃO dispara no easynup Vue (frontend/src + vue-query) — G1/G2 intactos", () => {
+    assert.equal(detectRestExpressTemplate([vueEasynup]), false);
+  });
+
+  it("marker fora de client/src não dispara (payload precisa TER o layout do template)", () => {
+    assert.equal(
+      detectRestExpressTemplate([{ filePath: "frontend/src/App.tsx", content: 'import { Route } from "wouter";' }]),
+      false,
+    );
+  });
+});
+
+describe("frontendHttpTemplateMode — on/off/auto", () => {
+  it("env ausente ou vazia ⇒ auto; truthy ⇒ on; outro valor ⇒ off (opt-out)", () => {
+    assert.equal(frontendHttpTemplateMode({}), "auto");
+    assert.equal(frontendHttpTemplateMode({ MANIFEST_MULTISTACK_HTTP_TEMPLATE: "  " }), "auto");
+    for (const v of ["1", "true", "on", "YES"]) {
+      assert.equal(frontendHttpTemplateMode({ MANIFEST_MULTISTACK_HTTP_TEMPLATE: v }), "on", v);
+    }
+    for (const v of ["0", "false", "off", "no", "banana"]) {
+      assert.equal(frontendHttpTemplateMode({ MANIFEST_MULTISTACK_HTTP_TEMPLATE: v }), "off", v);
+    }
   });
 });
