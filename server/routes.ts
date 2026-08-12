@@ -74,6 +74,10 @@ const scipEdgesSchema = z.object({
     .array(z.object({ from: z.string().min(1).max(1024), to: z.string().min(1).max(1024) }))
     .max(1_000_000)
     .optional(),
+  // ENTRY-FILES provados por CONFIG (package.json scripts/bin/main + `<script src>` do
+  // index.html): raízes RODADAS DIRETO — eixo CONFIG_PROVEN do dead-code. Uma entrada
+  // declarada em config NÃO é morta. PRINCIPLED (não chuta por nome).
+  entryFiles: z.array(z.string().min(1).max(1024)).max(50_000).optional(),
 });
 
 // ADR-0035 §4 — payload do `POST /config-edges`: saída do resolvedor
@@ -527,6 +531,7 @@ export async function registerRoutes(
         edges: parsed.data.edges,
         ...(parsed.data.dataAccess ? { dataAccess: parsed.data.dataAccess } : {}),
         ...(parsed.data.imports ? { imports: parsed.data.imports } : {}),
+        ...(parsed.data.entryFiles ? { entryFiles: parsed.data.entryFiles } : {}),
         ingestedAt: new Date().toISOString(),
       };
       await storage.updateProjectScipEdges(projectId, payload);
@@ -1776,6 +1781,7 @@ export async function registerRoutes(
       const report = await triageDeadCode(loaded.shaped, resolveReasonerLLM(), {
         topN,
         importReachableFiles: loaded.importReachableFiles,
+        configEntryFiles: loaded.configEntryFiles,
       });
 
       res.json({

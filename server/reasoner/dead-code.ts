@@ -128,12 +128,14 @@ function isEntryPoint(n: ShapedNode): boolean {
 export function findDeadCodeCandidates(
   graph: ShapedGraph,
   importReachableFiles?: Set<string>,
+  configEntryFiles?: Set<string>,
 ): {
   candidates: RawCandidate[];
   excluded: DeadCodeExclusions;
 } {
   const excluded: DeadCodeExclusions = { entryPoints: 0, entrySurfaces: 0, runtimeObserved: 0, unreachableByRobot: 0, importReachable: 0 };
   const importReach = importReachableFiles ?? new Set<string>();
+  const configEntry = configEntryFiles ?? new Set<string>();
   const candidates: RawCandidate[] = [];
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph?.edges) ? graph.edges : [];
@@ -193,6 +195,12 @@ export function findDeadCodeCandidates(
       const sf = sourceFileOfNode(n);
       if (sf && importReach.has(sf)) {
         excluded.importReachable++;
+        continue;
+      }
+      // Eixo CONFIG_PROVEN (entry-files): arquivo RODADO DIRETO (package.json/index.html)
+      // é raiz legítima — não morto, mesmo sem chamador nem importador.
+      if (sf && configEntry.has(sf)) {
+        excluded.entryPoints++;
         continue;
       }
       // Eixo CONFIG/ROLE: root legítimo (gatilho @Scheduled/listener) NÃO é morto.
@@ -286,10 +294,10 @@ interface QuestionClaim extends GroundableClaim {
 export async function triageDeadCode(
   graph: ShapedGraph,
   llm: ReasonerLLM | null,
-  opts: { topN?: number; importReachableFiles?: Set<string> } = {},
+  opts: { topN?: number; importReachableFiles?: Set<string>; configEntryFiles?: Set<string> } = {},
 ): Promise<DeadCodeReport> {
   const topN = opts.topN ?? 20;
-  const { candidates: raw, excluded } = findDeadCodeCandidates(graph, opts.importReachableFiles);
+  const { candidates: raw, excluded } = findDeadCodeCandidates(graph, opts.importReachableFiles, opts.configEntryFiles);
   const top = raw.slice(0, topN);
 
   const provenAnchors = new Set(top.map((rc) => rc.node.id));

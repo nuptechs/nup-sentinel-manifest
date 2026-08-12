@@ -45,6 +45,9 @@ export interface LoadedReasonerGraph {
    *  arquivo do projeto — eixo dedicado de dead-code (modelo Knip). Vazio se não houver
    *  o campo `imports` no store scip (retrocompat). */
   importReachableFiles: Set<string>;
+  /** ENTRY-FILES por CONFIG: arquivos rodados direto (package.json/index.html) — raízes
+   *  legítimas do dead-code. Vazio se não houver o campo `entryFiles` (retrocompat). */
+  configEntryFiles: Set<string>;
 }
 
 export interface LoadFailure {
@@ -98,18 +101,25 @@ export async function loadReasonerGraph(
   const { shapeSystemGraph } = await import("../analyzers/system-graph");
   const shaped = shapeSystemGraph(overlays.graph, level);
 
-  // Conjunto de arquivos IMPORTADOS (o lado `to` dos pares) — fail-soft.
+  // Conjuntos de import-reachability e entry-files por config (o lado `to` dos pares /
+  // a lista `entryFiles`) — fail-soft.
   const importReachableFiles = new Set<string>();
+  const configEntryFiles = new Set<string>();
   try {
-    const imp = (project as { scipEdges?: { imports?: unknown } } | null)?.scipEdges?.imports;
+    const scipStore = (project as { scipEdges?: { imports?: unknown; entryFiles?: unknown } } | null)?.scipEdges;
+    const imp = scipStore?.imports;
     if (Array.isArray(imp)) {
       for (const e of imp) {
         const to = (e as { to?: unknown })?.to;
         if (typeof to === "string" && to) importReachableFiles.add(to);
       }
     }
+    const ef = scipStore?.entryFiles;
+    if (Array.isArray(ef)) {
+      for (const f of ef) if (typeof f === "string" && f) configEntryFiles.add(f);
+    }
   } catch (e) {
-    logger.error("[reasoner] import-reachability load failed (fail-soft):", e);
+    logger.error("[reasoner] import-reachability/entry-files load failed (fail-soft):", e);
   }
 
   return {
@@ -123,5 +133,6 @@ export async function loadReasonerGraph(
       ...(overlays.configStats ? { configStats: overlays.configStats } : {}),
     },
     importReachableFiles,
+    configEntryFiles,
   };
 }

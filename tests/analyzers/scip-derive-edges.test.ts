@@ -178,6 +178,32 @@ describe("derive-edges.mjs --json (F1) — fromFile/toFile agnósticos a linguag
     assert.equal(imports.length, 0);
   });
 
+  it("ENTRY-FILES por config: extrai package.json (scripts/bin/main) + index.html", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "scip-repo-"));
+    writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({
+        scripts: { seed: "tsx server/seed.ts", migrate: "tsx server/migrate.ts && echo ok" },
+        bin: { mycli: "dist/cli.js" },
+        main: "server/index.ts",
+      }),
+    );
+    const idxPath = path.join(dir, "idx.json");
+    writeFileSync(idxPath, JSON.stringify({ documents: [] }));
+    const out = JSON.parse(execFileSync("node", [DERIVER, "--json", idxPath, "--repo", dir], { encoding: "utf8" }));
+    const ef = out.entryFiles as string[];
+    assert.ok(ef.includes("server/seed.ts"), "script seed é entry");
+    assert.ok(ef.includes("server/migrate.ts"), "script encadeado é entry");
+    assert.ok(ef.includes("server/index.ts"), "main é entry");
+    assert.ok(!ef.some((f) => f.startsWith("dist/")), "dist/ (build output) NÃO é entry");
+  });
+
+  it("entry-files sem repo válido → lista vazia (fail-soft, retrocompat)", () => {
+    const idx = { documents: [] };
+    const { entryFiles } = runDeriver(idx); // sem --repo → cwd sem package.json aplicável / fail-soft
+    assert.ok(Array.isArray(entryFiles), "entryFiles é array mesmo sem config");
+  });
+
   it("órfão para callee EXTERNO (sem def no projeto) NÃO vira file-scoped (sem nó de sistema)", () => {
     const EXTERNAL = "scip-typescript npm drizzle-orm 0.39.3 sql/`conditions.d.ts`/eq().";
     const idx = {

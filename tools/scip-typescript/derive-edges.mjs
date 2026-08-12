@@ -160,6 +160,47 @@ for (const d of idx.documents) {
   }
 }
 
+// ENTRY-FILES provados por CONFIG (modelo Knip): arquivos RODADOS DIRETO (não
+// importados) — `package.json` scripts/bin/main + `<script src>` do index.html do
+// framework. É o eixo CONFIG_PROVEN do dead-code: uma raiz declarada em config NÃO é
+// morta, mesmo sem chamador nem importador. PRINCIPLED — não chuta por nome (chutar
+// esconderia script realmente morto); só promove o que a config prova ser entrada.
+// Fail-soft: sem repo/arquivo → lista vazia (retrocompat).
+function deriveEntryFiles(repoDir) {
+  const out = new Set();
+  const norm = (p) => String(p || '').replace(/^\.?\//, '').replace(/[?#].*$/, '').trim();
+  const FILE_RE = /[\w./@-]+\.(?:tsx?|jsx?|mjs|cjs|mts|cts)/g;
+  try {
+    const pkgRaw = fs.readFileSync(`${repoDir}/package.json`, 'utf8');
+    const pkg = JSON.parse(pkgRaw);
+    const blobs = [];
+    for (const v of Object.values(pkg.scripts || {})) blobs.push(String(v));
+    if (typeof pkg.bin === 'string') blobs.push(pkg.bin);
+    else for (const v of Object.values(pkg.bin || {})) blobs.push(String(v));
+    for (const k of ['main', 'module']) if (pkg[k]) blobs.push(String(pkg[k]));
+    for (const b of blobs) for (const m of b.match(FILE_RE) || []) {
+      const f = norm(m);
+      if (f && !f.startsWith('dist/') && !f.includes('node_modules/')) out.add(f);
+    }
+  } catch { /* sem package.json → fail-soft */ }
+  // index.html do framework (Vite/CRA): `<script src="/src/main.tsx">` resolve
+  // relativo ao DIRETÓRIO do html (Vite trata `/x` como raiz do html).
+  for (const rel of ['index.html', 'client/index.html', 'public/index.html', 'src/index.html', 'web/index.html']) {
+    try {
+      const html = fs.readFileSync(`${repoDir}/${rel}`, 'utf8');
+      const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/') + 1) : '';
+      for (const m of html.matchAll(/<script[^>]+src=["']([^"']+\.(?:tsx?|jsx?|mjs))["']/g)) {
+        const src = norm(m[1]);
+        if (src) out.add(src.startsWith('src/') || src.includes('/') ? dir + src : dir + src);
+      }
+    } catch { /* sem html → fail-soft */ }
+  }
+  return [...out];
+}
+const repoFlag = args.indexOf('--repo');
+const repoDir = repoFlag >= 0 ? args[repoFlag + 1] : process.cwd();
+const entryFiles = deriveEntryFiles(repoDir);
+
 // "A => B" → { from, to, fromFile, toFile } (dedup por chave, preserva o 1º visto).
 const proven = new Map(); // chamada direta resolvida pelo checker
 const ifaceImpl = new Map(); // via interface, K candidatos
@@ -280,15 +321,16 @@ process.stdout.write(
   JSON.stringify({
     tool: 'scip-typescript',
     schema: 'adr-0030.p2.2',
-    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size, fileScoped: fileScoped.size, dataAccess: dataAccess.length, imports: imports.length },
+    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size, fileScoped: fileScoped.size, dataAccess: dataAccess.length, imports: imports.length, entryFiles: entryFiles.length },
     edges,
     dataAccess,
     imports,
+    entryFiles,
   }) + '\n',
 );
 console.error(
   `[derive-edges] STATIC_PROVEN=${proven.size} interface-impl=${ifaceImpl.size} (de ${idx.documents.length} documentos)` +
     ` | diag: methodDefs=${nMethodDefs} methodRefs=${nMethodRefs} withEnclosing=${nWithEnclosing} attributed=${nAttributed} orphan=${nOrphan} fileScoped=${nFileScoped}` +
     ` | data-access: tables=${daStats.tables} verbSites=${daStats.verbSites} resolved=${daStats.resolved} unresolvedTable=${daStats.unresolvedTable}` +
-    ` | import-reach: pares=${imports.length}`,
+    ` | import-reach: pares=${imports.length} | entry-files: ${entryFiles.length}`,
 );
