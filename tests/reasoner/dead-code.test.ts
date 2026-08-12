@@ -114,6 +114,28 @@ describe("reasoner/dead-code — findDeadCodeCandidates (determinístico, tri-ei
     assert.ok(candidates.some((c) => c.node.id === "node:server/services/orphan.service.ts" && c.tier === "isolated"), "orphan continua isolado");
   });
 
+  it("IMPORT-REACHABILITY: arquivo IMPORTADO por outro (barril/tipos/DI) NÃO é morto", () => {
+    // Modelo Knip: um arquivo referenciado por outro arquivo do projeto está em uso,
+    // mesmo sem chamada de função resolvida (re-export puro, namespace-import, tipos).
+    const nodes: ShapedNode[] = [
+      node({ id: "node:server/services/permission.service.ts", type: "SERVICE", inDegree: 0, outDegree: 0, sourceFile: "server/services/permission.service.ts" }),
+      node({ id: "node:server/services/really-dead.service.ts", type: "SERVICE", inDegree: 0, outDegree: 0, sourceFile: "server/services/really-dead.service.ts" }),
+    ];
+    const importReach = new Set(["server/services/permission.service.ts"]); // barril importado
+    const { candidates, excluded } = findDeadCodeCandidates(graph(nodes, []), importReach);
+    assert.ok(!candidates.some((c) => c.node.id === "node:server/services/permission.service.ts"), "barril importado NÃO é candidato");
+    assert.equal(excluded.importReachable, 1);
+    // o que NÃO é importado segue morto (não mascara morto de verdade)
+    assert.ok(candidates.some((c) => c.node.id === "node:server/services/really-dead.service.ts" && c.tier === "isolated"), "arquivo não-importado continua isolado");
+  });
+
+  it("import-reachability sem o set (retrocompat) NÃO exclui nada", () => {
+    const nodes: ShapedNode[] = [node({ id: "node:x.service.ts", type: "SERVICE", inDegree: 0, outDegree: 0, sourceFile: "x.service.ts" })];
+    const { candidates, excluded } = findDeadCodeCandidates(graph(nodes, [])); // sem 2º arg
+    assert.equal(excluded.importReachable, 0);
+    assert.ok(candidates.some((c) => c.node.id === "node:x.service.ts"), "sem sinal de import, comportamento antigo");
+  });
+
   it("EXCLUI gatilho @Scheduled (root legítimo) e superfície CONTROLLER — nenhum é morto", () => {
     const { candidates, excluded } = findDeadCodeCandidates(scenario());
     assert.ok(!candidates.some((c) => c.node.id === "SERVICE:ScheduledJob"));

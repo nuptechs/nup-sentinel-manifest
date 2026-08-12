@@ -141,6 +141,43 @@ describe("derive-edges.mjs --json (F1) — fromFile/toFile agnósticos a linguag
     assert.match(fs.from, /^scip-typescript npm nupidentity 1\.0\.0 <module>$/); // from file-level parseável
   });
 
+  it("IMPORT-REACHABILITY: referência cross-file a símbolo de MÓDULO (barril) vira par de import", () => {
+    // scip-typescript NÃO emite role IMPORT (bit 2) — imports são referência role-0. O
+    // barril `export * from` não define símbolo próprio, mas o scip emite um símbolo de
+    // MÓDULO do arquivo que os importadores REFERENCIAM. É assim que o barril prova uso.
+    const BARREL_FILE = "server/services/permission.service.ts";
+    const CONSUMER_FILE = "server/container.ts";
+    const MODULE_SYM = "scip-typescript npm nupidentity 1.0.0 server/services/`permission.service.ts`/"; // símbolo de módulo (termina em /)
+    const idx = {
+      documents: [
+        { language: "typescript", relative_path: BARREL_FILE, occurrences: [{ symbol: MODULE_SYM, symbol_roles: 1, range: [0, 0, 0, 1] }] }, // DEF do módulo
+        { language: "typescript", relative_path: CONSUMER_FILE, occurrences: [{ symbol: MODULE_SYM, range: [4, 20, 4, 40] }] }, // REF role-0 (import)
+      ],
+    };
+    const { imports, counts } = runDeriver(idx);
+    assert.equal(counts.imports, 1);
+    assert.deepEqual(imports[0], { from: CONSUMER_FILE, to: BARREL_FILE });
+  });
+
+  it("import-reachability: referência a símbolo EXTERNO não gera par; auto-referência ignorada", () => {
+    const idx = {
+      documents: [
+        {
+          language: "typescript",
+          relative_path: "server/x.ts",
+          occurrences: [
+            { symbol: "scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Array#map().", range: [1, 1, 1, 4] }, // externo → ignora
+            { symbol: "scip-typescript npm nupidentity 1.0.0 server/`x.ts`/local().", symbol_roles: 1, range: [2, 1, 2, 4] }, // def local
+            { symbol: "scip-typescript npm nupidentity 1.0.0 server/`x.ts`/local().", range: [3, 1, 3, 4] }, // ref no MESMO arquivo → auto, ignora
+          ],
+        },
+      ],
+    };
+    const { imports, counts } = runDeriver(idx);
+    assert.equal(counts.imports, 0);
+    assert.equal(imports.length, 0);
+  });
+
   it("órfão para callee EXTERNO (sem def no projeto) NÃO vira file-scoped (sem nó de sistema)", () => {
     const EXTERNAL = "scip-typescript npm drizzle-orm 0.39.3 sql/`conditions.d.ts`/eq().";
     const idx = {

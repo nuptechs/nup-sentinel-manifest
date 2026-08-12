@@ -76,6 +76,10 @@ export interface DeadCodeExclusions {
   runtimeObserved: number;
   /** o MURO: "não alcançável pelo robô" = UNKNOWN honesto, NÃO morto. */
   unreachableByRobot: number;
+  /** IMPORT-REACHABLE: o arquivo é IMPORTADO por outro arquivo do projeto (barril de
+   *  re-export / namespace-import / tipos / wiring de DI). Modelo Knip: arquivo
+   *  importado NÃO é morto, mesmo sem chamada de função resolvida. */
+  importReachable: number;
 }
 
 export interface DeadCodeReport {
@@ -98,6 +102,12 @@ function labelOf(n: ShapedNode): string {
   return n.className || n.methodName || n.id.split(":").pop() || n.id;
 }
 
+/** arquivo-fonte do nó (top-level ou metadata) — chave da import-reachability. */
+function sourceFileOfNode(n: ShapedNode): string | undefined {
+  const sf = n.sourceFile ?? (n as { metadata?: { sourceFile?: unknown } }).metadata?.sourceFile;
+  return typeof sf === "string" && sf ? sf : undefined;
+}
+
 function isObserved(n: ShapedNode): boolean {
   return n.observed === true || n.runtimeHot === true || n.evidence?.method === "RUNTIME_OBSERVED";
 }
@@ -115,11 +125,15 @@ function isEntryPoint(n: ShapedNode): boolean {
  *           como likely-dead pelo laço ativo, ∧ ¬runtime. (estático diz que chamam,
  *           o robô dirigiu tráfego e nunca apareceu → provável falso-positivo estático.)
  */
-export function findDeadCodeCandidates(graph: ShapedGraph): {
+export function findDeadCodeCandidates(
+  graph: ShapedGraph,
+  importReachableFiles?: Set<string>,
+): {
   candidates: RawCandidate[];
   excluded: DeadCodeExclusions;
 } {
-  const excluded: DeadCodeExclusions = { entryPoints: 0, entrySurfaces: 0, runtimeObserved: 0, unreachableByRobot: 0 };
+  const excluded: DeadCodeExclusions = { entryPoints: 0, entrySurfaces: 0, runtimeObserved: 0, unreachableByRobot: 0, importReachable: 0 };
+  const importReach = importReachableFiles ?? new Set<string>();
   const candidates: RawCandidate[] = [];
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph?.edges) ? graph.edges : [];
@@ -171,6 +185,16 @@ export function findDeadCodeCandidates(graph: ShapedGraph): {
 
     // ── sem chamador provado (estático nem DI-config) ──
     if (inDeg === 0) {
+      // Eixo IMPORT-REACHABILITY (modelo Knip): o arquivo é IMPORTADO por outro arquivo
+      // do projeto → NÃO é morto, mesmo sem chamada de função resolvida. Cobre barril de
+      // re-export (`export * from`), namespace-import (`import * as`), arquivo só-de-tipos
+      // e wiring de DI — que o call-graph não captura como chamada. Honesto: importado =
+      // remover quebra a compilação. Conta pra transparência.
+      const sf = sourceFileOfNode(n);
+      if (sf && importReach.has(sf)) {
+        excluded.importReachable++;
+        continue;
+      }
       // Eixo CONFIG/ROLE: root legítimo (gatilho @Scheduled/listener) NÃO é morto.
       if (isEntryPoint(n)) {
         excluded.entryPoints++;
@@ -262,10 +286,10 @@ interface QuestionClaim extends GroundableClaim {
 export async function triageDeadCode(
   graph: ShapedGraph,
   llm: ReasonerLLM | null,
-  opts: { topN?: number } = {},
+  opts: { topN?: number; importReachableFiles?: Set<string> } = {},
 ): Promise<DeadCodeReport> {
   const topN = opts.topN ?? 20;
-  const { candidates: raw, excluded } = findDeadCodeCandidates(graph);
+  const { candidates: raw, excluded } = findDeadCodeCandidates(graph, opts.importReachableFiles);
   const top = raw.slice(0, topN);
 
   const provenAnchors = new Set(top.map((rc) => rc.node.id));
@@ -319,7 +343,7 @@ export async function triageDeadCode(
     raw.length === 0
       ? "Nenhum candidato a código morto: todo nó ou tem chamador, ou roda em runtime, ou é superfície/ponto de entrada legítimo."
       : `${raw.length} candidato(s) a código morto por convergência tri-eixo: ${isolated} isolado(s) (forte), ${refuted} refutado(s) por runtime, ${diSuspect} sem-chamador-provado (VERIFICAR — pode ser DI/reflexão)` +
-        ` — excluídos por honestidade: ${excluded.entrySurfaces} superfície(s) de entrada (controller/rota/tela), ${excluded.entryPoints} gatilho(s) (@Scheduled/listener), ${excluded.runtimeObserved} observado(s) em runtime, ${excluded.unreachableByRobot} não-alcançável(is) pelo robô (UNKNOWN, não morto).`;
+        ` — excluídos por honestidade: ${excluded.entrySurfaces} superfície(s) de entrada (controller/rota/tela), ${excluded.entryPoints} gatilho(s) (@Scheduled/listener), ${excluded.runtimeObserved} observado(s) em runtime, ${excluded.importReachable} importado(s) por outro arquivo (re-export/tipos/DI — não morto), ${excluded.unreachableByRobot} não-alcançável(is) pelo robô (UNKNOWN, não morto).`;
 
   return { candidates, excluded, mode, grounding: ledger, summary };
 }
