@@ -131,10 +131,18 @@ for (const d of idx.documents) {
 // "A => B" → { from, to, fromFile, toFile } (dedup por chave, preserva o 1º visto).
 const proven = new Map(); // chamada direta resolvida pelo checker
 const ifaceImpl = new Map(); // via interface, K candidatos
+// Call-site provado (callee resolvido pelo compilador) mas FORA de qualquer método
+// nomeado — handler de rota (arrow anônimo passado a router.get), top-level, IIFE.
+// O scip não emite `def` de método para o arrow, então não há caller de FUNÇÃO;
+// atribuímos ao ARQUIVO (`<module>`), preservando a aresta de ENTRADA do callee.
+// Sem isto, um serviço só chamado de dentro de handlers vira falso-positivo de
+// dead-code ("isolado, sem chamador"). A chamada É compiler-proven; só o chamador
+// é coarse (mesma granularidade de arquivo que a agregação já usa p/ módulos).
+const fileScoped = new Map();
 
 // Diagnóstico multi-linguagem: distingue 0-arestas por MATCHING (0 defs/refs)
 // vs por ATRIBUIÇÃO (refs achadas mas fora de qualquer corpo de método).
-let nMethodDefs = 0, nMethodRefs = 0, nWithEnclosing = 0, nAttributed = 0, nOrphan = 0;
+let nMethodDefs = 0, nMethodRefs = 0, nWithEnclosing = 0, nAttributed = 0, nOrphan = 0, nFileScoped = 0;
 
 for (const d of idx.documents) {
   const docRel = relPathOf(d); // arquivo de DEFINIÇÃO do chamador (mesmo doc)
@@ -171,7 +179,25 @@ for (const d of idx.documents) {
     const [p] = rng(rangeOf(o));
     let caller = null;
     for (const def of defs) if (p >= def.bodyStart && p < def.bodyEnd) caller = def; // o mais interno vence
-    if (!caller) { nOrphan++; continue; }
+    if (!caller) {
+      nOrphan++;
+      // FALLBACK file-scoped: chamada provada FORA de método nomeado (arrow handler,
+      // top-level). Só quando o callee é símbolo DO PROJETO (`defDoc` conhece o arquivo);
+      // chamadas a lib externa não têm nó de sistema e seriam descartadas de qualquer forma.
+      const toFile = defDoc.get(o.symbol);
+      if (toFile && docRel) {
+        // `from` = símbolo file-level parseável: prefixo de pacote do MESMO índice + `<module>`.
+        // `functionOfScipSymbol(from, fromFile=docRel)` → { file: docRel, fn: '<module>' }.
+        const pkg = o.symbol.split(' ').slice(0, 4).join(' '); // 'scip-<lang> <mgr> <pkg> <ver>'
+        const fromSym = pkg + ' <module>';
+        const key = docRel + ' => ' + o.symbol;
+        if (!fileScoped.has(key)) {
+          fileScoped.set(key, { from: fromSym, to: o.symbol, fromFile: docRel, toFile });
+          nFileScoped++;
+        }
+      }
+      continue;
+    }
     nAttributed++;
     if (caller.sym === o.symbol) continue;
     const key = caller.sym + ' => ' + o.symbol;
@@ -198,6 +224,9 @@ const toEdge = (rec, resolution) => {
 const edges = [
   ...[...proven.values()].map((e) => toEdge(e, 'compiler')),
   ...[...ifaceImpl.values()].map((e) => toEdge(e, 'interface-impl')),
+  // chamadas provadas atribuídas ao ARQUIVO (handler/top-level). Resolução 'compiler':
+  // o callee foi resolvido pelo compilador — só o chamador é coarse (file-level).
+  ...[...fileScoped.values()].map((e) => toEdge(e, 'compiler')),
 ];
 
 // ACESSO A DADOS (função→tabela READ/WRITE), compiler-accurate do MESMO índice —
@@ -219,13 +248,13 @@ process.stdout.write(
   JSON.stringify({
     tool: 'scip-typescript',
     schema: 'adr-0030.p2.2',
-    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size, dataAccess: dataAccess.length },
+    counts: { proven: proven.size, interfaceImpl: ifaceImpl.size, fileScoped: fileScoped.size, dataAccess: dataAccess.length },
     edges,
     dataAccess,
   }) + '\n',
 );
 console.error(
   `[derive-edges] STATIC_PROVEN=${proven.size} interface-impl=${ifaceImpl.size} (de ${idx.documents.length} documentos)` +
-    ` | diag: methodDefs=${nMethodDefs} methodRefs=${nMethodRefs} withEnclosing=${nWithEnclosing} attributed=${nAttributed} orphan=${nOrphan}` +
+    ` | diag: methodDefs=${nMethodDefs} methodRefs=${nMethodRefs} withEnclosing=${nWithEnclosing} attributed=${nAttributed} orphan=${nOrphan} fileScoped=${nFileScoped}` +
     ` | data-access: tables=${daStats.tables} verbSites=${daStats.verbSites} resolved=${daStats.resolved} unresolvedTable=${daStats.unresolvedTable}`,
 );
