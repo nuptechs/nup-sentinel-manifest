@@ -125,7 +125,12 @@ export function mechanismToSequence(
     const from = ensure(s.fromLabel);
     const to = ensure(s.toLabel);
     if (from === to) continue; // auto-chamada no mesmo componente → ruído
-    messages.push({ from, to, label: clampLabel(s.toLabel), kind: kindOf(s.relationType), confidence: confidenceOf(s), order: order++ });
+    let kind = kindOf(s.relationType);
+    // alvo é uma TABELA/entidade (lifeline `db`) mas a aresta veio como CALL (overlay
+    // de runtime não tipa READS/WRITES) → trata como toque de leitura (direção
+    // desconhecida ⇒ leitura por padrão, honesto). Não rebaixa um WRITE já tipado.
+    if (kind === "call" && parts.get(to)?.kind === "db") kind = "db-read";
+    messages.push({ from, to, label: clampLabel(s.toLabel), kind, confidence: confidenceOf(s), order: order++ });
   }
 
   const runtimeConfirmed = report.runtimeConfirmed ?? messages.filter((m) => m.confidence === "observed").length;
