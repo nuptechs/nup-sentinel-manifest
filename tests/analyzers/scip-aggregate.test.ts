@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   fileOfScipSymbol,
   functionOfScipSymbol,
@@ -186,6 +189,86 @@ describe("aggregateScipEdges (A5) — símbolo→FUNÇÃO→aresta-de-sistema", 
     const derived: ScipDerivedEdge[] = [{ from: SYM.tenantMiddleware, to: SYM.jwtVerify, resolution: "interface-impl" }];
     const { edges } = aggregateScipEdges(nodes, derived);
     assert.equal(edges[0].resolution, "interface-impl");
+  });
+});
+
+describe("Leitura-Máxima — granularidade de ARQUIVO consistente no módulo materializado", () => {
+  const nodes = fixtureGraph().nodes;
+  // segunda função do MESMO arquivo órfão + um segundo arquivo órfão como ALVO
+  const utilTwMerge = "scip-typescript npm nupidentity 1.0.0 client/src/lib/`utils.ts`/twMerge().";
+  const fmtOrphan = "scip-typescript npm nupidentity 1.0.0 client/src/lib/`format.ts`/fmt().";
+  const multiTouch: ScipDerivedEdge[] = [
+    { from: SYM.utilCn, to: SYM.tenantService, resolution: "compiler" }, // 1ª aresta materializa utils.ts
+    { from: utilTwMerge, to: SYM.tenantService, resolution: "compiler" }, // 2ª aresta do MESMO arquivo órfão
+    { from: SYM.tenantMiddleware, to: fmtOrphan, resolution: "compiler" }, // órfão como alvo (1ª)
+    { from: SYM.jwtVerify, to: fmtOrphan, resolution: "compiler" }, // órfão como alvo (2ª)
+  ];
+
+  it("aresta SEGUINTE a tocar o arquivo órfão também resolve no nó de ARQUIVO — nunca `::fn` sob MODULE", () => {
+    // Regressão: a 1ª aresta registrava o módulo no fileIndex e as seguintes caíam
+    // no caminho arquitetural, fragmentando o MESMO endpoint em `node:<f>` E
+    // `node:<f>::<fn>` (ordem-dependente, parentModule pendurado em nó não-emitido).
+    const { edges, functionNodes, moduleNodes } = aggregateScipEdges(nodes, multiTouch);
+    for (const e of edges) {
+      assert.ok(!e.fromNode.includes("client/src/lib/utils.ts::"), `endpoint fn sob módulo materializado: ${e.fromNode}`);
+      assert.ok(!e.toNode.includes("client/src/lib/format.ts::"), `endpoint fn sob módulo materializado: ${e.toNode}`);
+    }
+    // as DUAS funções de utils.ts colapsam no mesmo endpoint de arquivo → dedup em 1 aresta
+    assert.equal(edges.filter((e) => e.fromNode === "node:client/src/lib/utils.ts").length, 1);
+    // format.ts como alvo de 2 chamadores distintos → 2 arestas, ambas no nó de arquivo
+    assert.equal(edges.filter((e) => e.toNode === "node:client/src/lib/format.ts").length, 2);
+    // nenhum sub-nó de função pendura em módulo materializado (o pai sempre existe no grafo)
+    const matIds = new Set(moduleNodes.map((m) => m.id));
+    for (const f of functionNodes) assert.ok(!matIds.has(f.parentModule), `parentModule materializado: ${f.id}`);
+  });
+
+  it("resultado IDÊNTICO com as arestas em ordem inversa (ordem-independência)", () => {
+    const a = aggregateScipEdges(nodes, multiTouch);
+    const b = aggregateScipEdges(nodes, multiTouch.slice().reverse());
+    const key = (e: { fromNode: string; toNode: string; resolution: string }) => `${e.fromNode}→${e.toNode}:${e.resolution}`;
+    assert.deepEqual(a.edges.map(key).sort(), b.edges.map(key).sort());
+  });
+
+  it("fn→fn DENTRO do mesmo arquivo órfão → intra (granularidade de arquivo), sem aresta torta", () => {
+    const derived: ScipDerivedEdge[] = [
+      { from: SYM.utilCn, to: SYM.tenantService, resolution: "compiler" }, // materializa utils.ts
+      { from: SYM.utilCn, to: utilTwMerge, resolution: "compiler" }, // chamada intra-arquivo órfão
+    ];
+    const { edges, stats } = aggregateScipEdges(nodes, derived);
+    assert.equal(stats.intraDropped, 1);
+    assert.equal(edges.length, 1); // só utils.ts → TenantService#resolve
+    assert.ok(!edges.some((e) => e.toNode.startsWith("node:client/src/lib/utils.ts")));
+  });
+});
+
+describe("fim-a-fim (fixture express-drizzle): a prova do compilador não é jogada fora", () => {
+  // Deriva as arestas do índice SCIP REAL do fixture (o mesmo caminho do CI) e
+  // agrega SEM nós arquiteturais — o pior caso: o extrator não modelou nada.
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+  const DERIVER = path.resolve(HERE, "../../tools/scip-typescript/derive-edges.mjs");
+  const FIXTURE = path.resolve(HERE, "../fixtures/scip/express-drizzle-index.json");
+  const out = JSON.parse(execFileSync("node", [DERIVER, "--json", FIXTURE], { encoding: "utf8" })) as {
+    edges: ScipDerivedEdge[];
+    dataAccess?: unknown[];
+  };
+
+  it("ANTES (materialização OFF — regra antiga): 9 arestas provadas, 0 retidas", () => {
+    const r = aggregateScipEdges([], out.edges, { materializeOrphanModules: false });
+    assert.equal(out.edges.length, 9);
+    assert.equal(r.edges.length, 0);
+    assert.equal(r.stats.orphanDropped, 9);
+  });
+
+  it("DEPOIS (Leitura-Máxima ON): routes→handlers capturada em nível de arquivo; só o externo fica fora", () => {
+    const r = aggregateScipEdges([], out.edges);
+    assert.deepEqual(r.edges, [
+      { fromNode: "node:src/routes.ts", toNode: "node:src/handlers.ts", relationType: "CALLS", resolution: "compiler" },
+    ]);
+    assert.equal(r.stats.moduleNodesAdded, 2);
+    // as 6 chamadas para os `.d.ts` do drizzle-orm são dependência EXTERNA (anti-ruído):
+    // ficam fora do call-graph, mas o eixo DB dessa prova sobrevive no `dataAccess`.
+    assert.equal(r.stats.orphanDropped, 6);
+    assert.equal((out.dataAccess ?? []).length, 3);
   });
 });
 
