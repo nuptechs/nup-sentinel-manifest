@@ -14,7 +14,7 @@ import { ApplicationGraph, GraphNode, GraphEdge } from "./application-graph";
 import type { FrontendInteraction } from "./frontend-analyzer";
 import type { ExpressRoute } from "./node-backend/express-routes";
 import { extractDrizzleEntities } from "./node-backend/drizzle-schema";
-import { toSnakeCase } from "./nuptechs-conventions";
+import { toSnakeCase, entityTableName } from "./nuptechs-conventions";
 import { nodeBackendType } from "./canonical-model";
 
 export interface FullStackAugmentResult {
@@ -74,7 +74,8 @@ export function augmentGraphWithFullStack(
   //   drizzleOnly. Relação READS/WRITES pelo persistenceOperations real.
   const entityByTable = new Map<string, string>();
   for (const n of graph.getNodesByType("ENTITY")) {
-    entityByTable.set(toSnakeCase(n.className), n.id);
+    // @Table(name=) explícito (metadata.tableName) vence a convenção snake_case
+    entityByTable.set(entityTableName(n), n.id);
   }
 
   // ENTIDADES DRIZZLE DECLARADAS (Furo 2 da auditoria 2026-08-10): materializa

@@ -164,6 +164,25 @@ export function toSnakeCase(name: string): string {
     .toLowerCase();
 }
 
+/**
+ * Nome FÍSICO da tabela de um nó ENTITY. Prioriza o `@Table(name=…)` explícito
+ * que o engine Java emite em `metadata.tableName` (javax/jakarta); sem ele, cai
+ * na convenção `toSnakeCase(className)`. Normaliza o explícito como o
+ * runtime-overlay normaliza o span (tira schema/aspas, minúsculas — Postgres
+ * dobra identificador não-citado pra minúscula) para o índice casar dos 2 lados.
+ */
+export function entityTableName(node: {
+  className?: string | null;
+  metadata?: Record<string, unknown> | null;
+}): string {
+  const raw = node.metadata?.tableName;
+  if (typeof raw === "string" && raw.trim()) {
+    const bare = raw.trim().replace(/[`"[\]]/g, "").split(".").pop() || "";
+    if (bare) return bare.toLowerCase();
+  }
+  return toSnakeCase(node.className || "");
+}
+
 const COLUMN_NAME_RE = /@(?:[\w.]*\.)?Column\b[^)]*\bname\s*=\s*"([^"]+)"/;
 
 /**

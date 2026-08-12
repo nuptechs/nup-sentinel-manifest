@@ -115,6 +115,20 @@ describe("ADR-0026 costura — applyRuntimeOverlay (merge no grafo)", () => {
     assert.equal((g.getNode("entity:WorkflowCallbackToken")!.metadata as Record<string, unknown>).runtimeHot, true);
   });
 
+  it("@Table(name=) divergente da convenção: tabela observada casa a ENTITY pelo metadata.tableName (não minta)", () => {
+    // Antes deste fix, LegacyUser só casaria "legacy_user" — "tb_usuario_legado"
+    // mintaria table:tb_usuario_legado (o falso ponto cego admitido no BIMR).
+    const g = new ApplicationGraph();
+    g.addNode(new GraphNode("ENTITY:legado.LegacyUser", "ENTITY", "LegacyUser", null, null, {
+      tableName: "TB_USUARIO_LEGADO", // como o engine Java emite (literal do fonte)
+    }));
+    const r = applyRuntimeOverlay(g, [pair({ method: "GET", path: "/api/u", tables: new Map([["tb_usuario_legado", "SELECT"]]) })]);
+    assert.equal(r.tablesResolved, 1, "casou pelo tableName explícito");
+    assert.equal(r.tablesMinted, 0, "NÃO mintou table:tb_usuario_legado");
+    assert.equal((g.getNode("ENTITY:legado.LegacyUser")!.metadata as Record<string, unknown>).runtimeHot, true);
+    assert.equal(g.getNode("table:tb_usuario_legado"), undefined);
+  });
+
   it("rota observada AUSENTE do estático → minta route:runtime (miss honesto), tabela sem ENTITY → minta table:<n>", () => {
     const g = graphWith([]); // sem rotas nem entidades
     const r = applyRuntimeOverlay(g, [pair({ method: "GET", path: "/api/orphan", tables: new Map([["some_table", ""]]) })]);

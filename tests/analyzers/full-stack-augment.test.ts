@@ -245,6 +245,25 @@ describe("BACKEND NODE materializado + composables indiretos (além-fronteira)",
     assert.equal(mod.metadata.runtime, "node", "camada SERVICE, runtime node");
   });
 
+  it("@Table(name=) divergente: toque na tabela física casa a ENTIDADE Java pelo metadata.tableName", async () => {
+    const { augmentGraphWithFullStack } = await import("../../server/analyzers/full-stack-augment.ts");
+    const g = new ApplicationGraph();
+    // convenção diria "legacy_user"; o banco real é TB_USUARIO_LEGADO (@Table name=)
+    g.addNode(new GraphNode("ENTITY:legado.LegacyUser", "ENTITY", "LegacyUser", null, null, {
+      tableName: "TB_USUARIO_LEGADO",
+    }));
+    augmentGraphWithFullStack(g, [], [
+      route("GET", "/api/users/list", {
+        callChain: ["services/gateway/src/routes/users.js::handler"],
+        entitiesTouched: ["tb_usuario_legado"], persistenceOperations: ["read"],
+      } as never),
+    ]);
+    const hop = g.getOutgoingEdges("route:GET:/api/users/list")[0];
+    const data = g.getOutgoingEdges(hop.toNode)[0];
+    assert.equal(data.toNode, "ENTITY:legado.LegacyUser", "casou pelo tableName explícito, não pela convenção");
+    assert.equal(g.getNode("table:tb_usuario_legado"), undefined, "não mintou nó drizzleOnly duplicado");
+  });
+
   it("tabela sem entidade Java vira nó ENTITY drizzleOnly (gateway-only não é invisível)", async () => {
     const { augmentGraphWithFullStack } = await import("../../server/analyzers/full-stack-augment.ts");
     const g = new ApplicationGraph();

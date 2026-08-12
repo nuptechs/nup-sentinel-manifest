@@ -477,6 +477,15 @@ public class JavaASTAnalyzer {
             info.isRepository = annotations.stream().anyMatch(REPOSITORY_ANNOTATIONS::contains);
             info.isEntity = annotations.stream().anyMatch(ENTITY_ANNOTATIONS::contains);
 
+            // @Table(name="...") explícito (javax/jakarta, simples ou qualificado):
+            // nome FÍSICO da tabela quando diverge da convenção snake_case(classe).
+            // Só literal string — name via constante/expressão fica na convenção.
+            for (AnnotationExpr ann : cls.getAnnotations()) {
+                if (!isTableAnnotation(ann.getNameAsString())) continue;
+                String tn = extractTableNameFromAnnotation(ann);
+                if (tn != null && !tn.isBlank()) info.tableName = tn.trim();
+            }
+
             if (!info.isRepository && cls.isInterface()) {
                 for (ClassOrInterfaceType ext : cls.getExtendedTypes()) {
                     if (REPO_INTERFACES.contains(ext.getNameAsString())) {
@@ -556,6 +565,22 @@ public class JavaASTAnalyzer {
 
             fqnIndex.put(info.fqn, info);
         }
+    }
+
+    private static boolean isTableAnnotation(String name) {
+        return name.equals("Table")
+            || name.equals("javax.persistence.Table")
+            || name.equals("jakarta.persistence.Table");
+    }
+
+    private static String extractTableNameFromAnnotation(AnnotationExpr ann) {
+        if (!(ann instanceof NormalAnnotationExpr)) return null;
+        for (MemberValuePair pair : ((NormalAnnotationExpr) ann).getPairs()) {
+            if (!pair.getNameAsString().equals("name")) continue;
+            Expression v = pair.getValue();
+            return v.isStringLiteralExpr() ? v.asStringLiteralExpr().getValue() : null;
+        }
+        return null;
     }
 
     private void resolveSuperclassBasePaths() {
@@ -1232,6 +1257,9 @@ public class JavaASTAnalyzer {
                 GraphNodeDTO entityNode = new GraphNodeDTO(
                     "ENTITY", cls.className, null, entityQualifiedName);
                 entityNode.metadata.put("sourceFile", cls.sourceFile);
+                if (cls.tableName != null) {
+                    entityNode.metadata.put("tableName", cls.tableName);
+                }
                 entityNode.metadata.put("fields", cls.entityFields.stream()
                     .map(f -> f.name + ":" + f.type)
                     .collect(Collectors.toList()));
@@ -1645,6 +1673,8 @@ public class JavaASTAnalyzer {
         boolean isService;
         boolean isRepository;
         boolean isEntity;
+        // @Table(name="...") explícito (literal) — null quando ausente/dinâmico.
+        String tableName;
         String basePath = "";
         String superClassName;
         ResolvedReferenceTypeDeclaration resolvedSymbol;

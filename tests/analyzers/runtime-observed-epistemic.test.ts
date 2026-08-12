@@ -190,6 +190,21 @@ describe("traço FRAGMENTO (só span de DB, sem rota) → RUNTIME_OBSERVED na en
     assert.equal(auditNode!.evidence.method, "RUNTIME_OBSERVED");
   });
 
+  it("@Table(name=) divergente: hit de tabela casa a ENTITY pelo metadata.tableName (mata o falso ponto cego)", () => {
+    const hits = extractRuntimeTableHits([
+      trace("t-frag-tn", [{ svc: "easynup-backend", id: "j", tags: { "db.sql.table": "railway.tb_usuario_legado", "db.operation": "SELECT" } }]),
+    ]);
+    const g = entityGraph();
+    g.addNode(new GraphNode("ENTITY:easynup.persistence.entities.LegacyUser", "ENTITY", "LegacyUser", null, null, {
+      tableName: "TB_USUARIO_LEGADO", // emitido pelo engine Java a partir do literal @Table(name=)
+    }));
+    const res = applyRuntimeTableObservations(g, hits);
+    assert.equal(res.entitiesResolved, 1, "tb_usuario_legado→LegacyUser casou pelo tableName explícito");
+    assert.equal(res.tablesMinted, 0, "não mintou table:tb_usuario_legado (antes era o falso ponto cego)");
+    const md = g.getNode("ENTITY:easynup.persistence.entities.LegacyUser")!.metadata as Record<string, unknown>;
+    assert.equal(md.runtimeHot, true);
+  });
+
   it("tabela sem ENTITY correspondente → minta table:<n> observada (nunca some em silêncio)", () => {
     const hits = extractRuntimeTableHits([
       trace("t-frag-2", [{ svc: "easynup-backend", id: "j", tags: { "db.sql.table": "orphan_table", "db.operation": "INSERT" } }]),
