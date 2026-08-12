@@ -40,12 +40,17 @@
 // (runtime-overlay.ts:193-236): mescla evidência EXTERNA no grafo persistido,
 // GATED + fail-soft (sem `scipEdges`, o `/graph` é byte-a-byte ao de hoje).
 //
-// A régua de honestidade (ADR-0031 §5) permanece: NUNCA inventar nó para
-// símbolo cujo arquivo não sustenta um nó de sistema (util puro sem
-// rota/entidade → aresta descartada — só se refina o que JÁ é arquitetura);
-// nunca colapsar `interface-impl` (K adapters → K arestas); auto-chamada
-// (mesma função nas duas pontas) descartada. O muro de Rice permanece: DI
-// concreta / dispatch dinâmico / reflexão NÃO aparecem aqui — ficam com o
+// A régua de RETENÇÃO (ADR-0031 §5, recalibrada pela Leitura-Máxima): a prova
+// do compilador NÃO é descartada por o arquivo não ser nó arquitetural — arquivo
+// do PROJETO provado numa chamada vira nó de MÓDULO materializado (fato, não
+// arquitetura inventada), em granularidade de ARQUIVO (nunca `::fn` — bounded
+// p/ monólito), independente da ordem das arestas. O que AINDA se descarta, e
+// por quê: dependência externa (.d.ts / node_modules/ / dist/ — ruído, não
+// arquitetura do projeto; o eixo DB desse recorte sobrevive via `dataAccess`);
+// auto-chamada (mesmo endpoint nas duas pontas); e o excedente dos tetos
+// (moduleCap/edgeBudget), sempre CONTADO em stats — nunca silêncio. Nunca
+// colapsar `interface-impl` (K adapters → K arestas). O muro de Rice permanece:
+// DI concreta / dispatch dinâmico / reflexão NÃO aparecem aqui — ficam com o
 // RUNTIME_OBSERVED (ADR-0029).
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -336,6 +341,14 @@ function resolveEndpoint(
   mat: MaterializeCtx,
 ): string | null {
   let nodeId = fileIndex.get(parsed.file);
+  // Módulo MATERIALIZADO (arquivo órfão provado): o endpoint é SEMPRE o nó de
+  // arquivo, NUNCA um sub-nó `::fn` — independente da ORDEM das arestas. Sem este
+  // curto-circuito, a 1ª aresta a tocar o arquivo o registrava no `fileIndex` e as
+  // seguintes caíam no caminho arquitetural abaixo, criando sub-nós de função sob o
+  // módulo materializado: o MESMO endpoint fragmentava em `node:<f>` E `node:<f>::<fn>`
+  // (ordem-dependente), com `parentModule` pendurado em nó não-emitido e furando o
+  // teto de granularidade que mantém o monólito servível (ver comentário abaixo).
+  if (nodeId && mat.moduleNodes.has(parsed.file)) return nodeId;
   if (!nodeId) {
     // Arquivo provado pelo compilador mas SEM nó no grafo (util/helper/lib). Em vez
     // de descartar a prova (§4.1 antigo), MATERIALIZA um nó de MÓDULO — bounded pelo
