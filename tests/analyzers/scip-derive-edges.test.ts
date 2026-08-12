@@ -108,4 +108,48 @@ describe("derive-edges.mjs --json (F1) — fromFile/toFile agnósticos a linguag
     assert.equal(edges[0].fromFile, CALLER_FILE);
     assert.equal("toFile" in edges[0], false); // desconhecido → omitido
   });
+
+  it("call-site FORA de método (handler/top-level) → aresta file-scoped (callee não fica isolado)", () => {
+    // Reproduz o FP de dead-code: um serviço só chamado de dentro de um handler de
+    // rota (arrow anônimo, sem `def` de método) parecia sem chamador. Agora a chamada
+    // é atribuída ao ARQUIVO — o callee ganha aresta de ENTRADA (não é dead-code).
+    const ROUTE_FILE = "server/routes/audit.routes.ts";
+    const SVC_FILE = "server/services/audit-verify.service.ts";
+    const VERIFY = "scip-typescript npm nupidentity 1.0.0 server/services/`audit-verify.service.ts`/verifyAuditChain().";
+    const idx = {
+      documents: [
+        {
+          language: "typescript",
+          relative_path: ROUTE_FILE,
+          // SEM def de método — só o call-site (como um arrow handler anônimo).
+          occurrences: [{ symbol: VERIFY, range: [55, 20, 55, 36] }],
+        },
+        {
+          language: "typescript",
+          relative_path: SVC_FILE,
+          occurrences: [{ symbol: VERIFY, symbol_roles: 1, range: [8, 22, 8, 38] }], // def
+        },
+      ],
+    };
+    const { edges, counts } = runDeriver(idx);
+    assert.equal(counts.fileScoped, 1, "esperado 1 aresta file-scoped");
+    const fs = edges.find((e) => e.toFile === SVC_FILE);
+    assert.ok(fs, "callee deve ter aresta de entrada");
+    assert.equal(fs.resolution, "compiler"); // callee resolvido pelo compilador
+    assert.equal(fs.fromFile, ROUTE_FILE); // chamador atribuído ao ARQUIVO
+    assert.equal(fs.to, VERIFY);
+    assert.match(fs.from, /^scip-typescript npm nupidentity 1\.0\.0 <module>$/); // from file-level parseável
+  });
+
+  it("órfão para callee EXTERNO (sem def no projeto) NÃO vira file-scoped (sem nó de sistema)", () => {
+    const EXTERNAL = "scip-typescript npm drizzle-orm 0.39.3 sql/`conditions.d.ts`/eq().";
+    const idx = {
+      documents: [
+        { language: "typescript", relative_path: "server/routes/x.routes.ts", occurrences: [{ symbol: EXTERNAL, range: [3, 5, 3, 7] }] },
+      ],
+    };
+    const { edges, counts } = runDeriver(idx);
+    assert.equal(counts.fileScoped, 0); // callee externo → sem def indexada → não materializa
+    assert.equal(edges.length, 0);
+  });
 });
