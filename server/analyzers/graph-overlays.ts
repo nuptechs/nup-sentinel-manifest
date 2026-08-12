@@ -22,6 +22,8 @@ export interface OverlayApplyResult {
   scipStats?: unknown;
   /** estatística do merge config (ausente quando não houve merge). */
   configStats?: unknown;
+  /** estatística do merge data-access (Opção A; ausente quando não houve merge). */
+  dataAccessStats?: unknown;
 }
 
 /** Só o que interessa do projeto persistido (evita acoplar ao tipo do Drizzle). */
@@ -43,6 +45,7 @@ export async function applyPersistedOverlays(
   let graph = systemGraph;
   let scipStats: unknown;
   let configStats: unknown;
+  let dataAccessStats: unknown;
 
   try {
     const scip = project?.scipEdges;
@@ -51,6 +54,15 @@ export async function applyPersistedOverlays(
       const merged = mergeScipEdges(graph, scip as never);
       graph = merged.graph;
       scipStats = merged.stats;
+    }
+    // Opção A — data-access compiler-proven (dentro do mesmo store scipEdges).
+    // Fail-soft SEPARADO: erro aqui não derruba o merge scip acima.
+    const da = (scip as { dataAccess?: unknown } | null | undefined)?.dataAccess;
+    if (Array.isArray(da) && da.length) {
+      const { mergeDataAccessEdges } = await import("./data-access-aggregate");
+      const merged = mergeDataAccessEdges(graph as never, da as never);
+      graph = merged.graph as never;
+      dataAccessStats = merged.stats;
     }
   } catch (e) {
     logger.error("scip-edges merge failed (fail-soft, serving raw graph):", e);
@@ -72,5 +84,6 @@ export async function applyPersistedOverlays(
     graph,
     ...(scipStats ? { scipStats } : {}),
     ...(configStats ? { configStats } : {}),
+    ...(dataAccessStats ? { dataAccessStats } : {}),
   };
 }

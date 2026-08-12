@@ -49,6 +49,23 @@ const scipEdgesSchema = z.object({
       }),
     )
     .max(500_000),
+  // Opção A — acesso a dados PROVADO pelo compilador (função→tabela READ/WRITE).
+  // O deriver já produz; antes era DESCARTADO no ingest. Aceito e persistido junto
+  // (store lateral do próprio scipEdges); agregado read-time em READS/WRITES_ENTITY
+  // STATIC_PROVEN. Opcional (retrocompat com payloads sem o campo).
+  dataAccess: z
+    .array(
+      z.object({
+        from: z.string().min(1),
+        to: z.string().min(1),
+        access: z.enum(["read", "write"]),
+        resolution: z.string().max(60).optional(),
+        fromFile: z.string().max(1024).optional(),
+        toFile: z.string().max(1024).optional(),
+      }),
+    )
+    .max(500_000)
+    .optional(),
 });
 
 // ADR-0035 §4 — payload do `POST /config-edges`: saída do resolvedor
@@ -500,6 +517,7 @@ export async function registerRoutes(
         tool: parsed.data.tool ?? "scip-typescript",
         schema: parsed.data.schema ?? "adr-0031.p2",
         edges: parsed.data.edges,
+        ...(parsed.data.dataAccess ? { dataAccess: parsed.data.dataAccess } : {}),
         ingestedAt: new Date().toISOString(),
       };
       await storage.updateProjectScipEdges(projectId, payload);
