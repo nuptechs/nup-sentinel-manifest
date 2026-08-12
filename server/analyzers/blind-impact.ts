@@ -10,7 +10,8 @@
 // ─── §COMO SE MEDE ──────────────────────────────────────────────────────────
 // O overlay de runtime (`runtime-overlay.ts`) faz duas coisas com cada tabela
 // vista em span de DB:
-//   • ACHA a `ENTITY` correspondente no grafo estático (`toSnakeCase(className)`
+//   • ACHA a `ENTITY` correspondente no grafo estático (`@Table(name=…)`
+//     explícito via `metadata.tableName`, senão `toSnakeCase(className)` —
 //     casa `sla_indicator` ↔ `SlaIndicator`) → marca `runtimeHot` nela; OU
 //   • NÃO acha → MINTA um nó `table:<nome>` (`synthetic + runtimeOnly`).
 // O 2º caso é a evidência dura: a tabela existe, é escrita/lida em produção, e
@@ -167,6 +168,8 @@ function isRuntimeEdge(e: BimrEdge): boolean {
 
 function tableNameOf(n: BimrNode): string {
   if (n.id.startsWith("table:")) return n.id.slice("table:".length);
+  const explicit = meta(n).tableName;
+  if (typeof explicit === "string" && explicit) return explicit;
   return n.className || n.id;
 }
 
@@ -251,7 +254,7 @@ export function computeBimr(graph: BimrGraph | null | undefined): BimrResult {
       );
     }
     caveats.push(
-      "O casamento tabela↔entidade usa a convenção de nome (snake_case do nome da classe). Entidade mapeada com @Table(name=…) divergente da convenção aparece como mintada — falso ponto cego.",
+      "O casamento tabela↔entidade usa o @Table(name=…) explícito da entidade quando presente (literal), com fallback na convenção snake_case do nome da classe. Entidade cujo nome de tabela é definido dinamicamente (constante/expressão no name=) ainda pode aparecer como mintada — falso ponto cego residual.",
     );
   }
 

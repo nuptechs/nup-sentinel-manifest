@@ -25,6 +25,7 @@ import {
   isCoveredByGatewayPrefix,
   mapInteractionsToGatewayPrefixes,
   toSnakeCase,
+  entityTableName,
   parseEntityColumns,
   enrichEntityColumns,
 } from "../../server/analyzers/nuptechs-conventions.ts";
@@ -374,6 +375,26 @@ describe("toSnakeCase — fallback de nome de coluna", () => {
     assert.equal(toSnakeCase("maxDurationMonths"), "max_duration_months");
     assert.equal(toSnakeCase("pfValue"), "pf_value");
     assert.equal(toSnakeCase("name"), "name");
+  });
+});
+
+describe("entityTableName — @Table(name=) explícito ?? convenção snake_case", () => {
+  it("metadata.tableName (emitido pelo engine Java) vence a convenção", () => {
+    assert.equal(
+      entityTableName({ className: "LegacyUser", metadata: { tableName: "TB_USUARIO_LEGADO" } }),
+      "tb_usuario_legado",
+      "explícito normalizado pra minúscula (Postgres dobra identificador não-citado)",
+    );
+  });
+  it("normaliza schema/aspas do explícito como o normalizeTableName do span", () => {
+    assert.equal(entityTableName({ className: "X", metadata: { tableName: '"legado"."pedidos"' } }), "pedidos");
+    assert.equal(entityTableName({ className: "X", metadata: { tableName: "core.users" } }), "users");
+  });
+  it("sem tableName (ou vazio/não-string) → toSnakeCase(className)", () => {
+    assert.equal(entityTableName({ className: "SlaIndicator", metadata: {} }), "sla_indicator");
+    assert.equal(entityTableName({ className: "AuditLog", metadata: { tableName: "  " } }), "audit_log");
+    assert.equal(entityTableName({ className: "AuditLog", metadata: { tableName: 42 as unknown } }), "audit_log");
+    assert.equal(entityTableName({ className: "AuditLog" }), "audit_log");
   });
 });
 

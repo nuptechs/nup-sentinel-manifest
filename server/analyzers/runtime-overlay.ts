@@ -22,7 +22,7 @@
 // grafo byte-a-byte ao de hoje. Telemetria nunca quebra a análise.
 // ─────────────────────────────────────────────
 import { ApplicationGraph, GraphNode, GraphEdge } from "./application-graph";
-import { toSnakeCase } from "./nuptechs-conventions";
+import { toSnakeCase, entityTableName } from "./nuptechs-conventions";
 import { urlMatchesRoute } from "./full-stack-augment";
 
 // ─── Modelo de traço Jaeger (native query API) ───
@@ -248,7 +248,7 @@ export function applyRuntimeOverlay(
 
   // índices de merge (mesmas convenções do full-stack-augment)
   const entityByTable = new Map<string, string>();
-  for (const n of graph.getNodesByType("ENTITY")) entityByTable.set(toSnakeCase(n.className), n.id);
+  for (const n of graph.getNodesByType("ENTITY")) entityByTable.set(entityTableName(n), n.id);
   const wsv1ByPath = new Map<string, string>();
   const routeNodes: { id: string; method: string; path: string }[] = [];
   // Grafo PROFUNDO (scip/SCOPE): os WsV1 são nós `SERVICE:<fqn>` com id
@@ -459,9 +459,10 @@ export function extractRuntimeTableHits(
 
 /**
  * Mescla os hits de tabela como observação de runtime da ENTIDADE. PURO (muta o
- * grafo, sem rede). Reusa `toSnakeCase(className)` — a MESMA convenção do índice
- * de entidade do `applyRuntimeOverlay` — então `sla_indicator`→`SlaIndicator`,
- * `audit_log`→`AuditLog`, `snap_point_category`→`SnapPointCategory` casam.
+ * grafo, sem rede). Reusa `entityTableName` — a MESMA convenção do índice de
+ * entidade do `applyRuntimeOverlay`: `@Table(name=…)` explícito quando o engine
+ * o emitiu (`metadata.tableName`), senão `toSnakeCase(className)` — então
+ * `sla_indicator`→`SlaIndicator` e `tb_usuario`→`@Table(name="TB_USUARIO")` casam.
  */
 export function applyRuntimeTableObservations(
   graph: ApplicationGraph,
@@ -473,8 +474,7 @@ export function applyRuntimeTableObservations(
   // índice tabela(snake) → id de nó ENTITY (mesma convenção do overlay de rota).
   const entityByTable = new Map<string, string>();
   for (const n of graph.getNodesByType("ENTITY")) {
-    const cn = n.className || n.id.split(":").pop() || "";
-    const key = toSnakeCase(cn);
+    const key = entityTableName(n) || toSnakeCase(n.id.split(":").pop() || "");
     if (key && !entityByTable.has(key)) entityByTable.set(key, n.id);
   }
 
