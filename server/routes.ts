@@ -1980,6 +1980,105 @@ export async function registerRoutes(
     }
   });
 
+  // Reasoner — CATÁLOGO de funcionalidades (rotas do front + batch/agendados) que
+  // merecem diagrama de sequência. Enumera do grafo do snapshot; marca as que já
+  // têm tráfego observado (verde). É a lista que o robô da Fase 2 vai exercitar.
+  app.get("/api/projects/:projectId/reasoner/sequence/catalog", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
+      const { graphEntryCatalog } = await import("./reasoner/adapters/entry-catalog.adapter");
+      const catalog = graphEntryCatalog(loaded.shaped as never).list();
+      res.json({
+        projectId,
+        analysisRunId: loaded.analysisRunId,
+        total: catalog.length,
+        observed: catalog.filter((e) => e.observed).length,
+        entries: catalog,
+      });
+    } catch (error) {
+      console.error("Error building sequence catalog:", error);
+      res.status(500).json({ message: "Failed to build sequence catalog" });
+    }
+  });
+
+  // Reasoner — DIAGRAMA DE SEQUÊNCIA de UMA funcionalidade. REUSA o motor
+  // `traceMechanism` (BFS provado + gate + ordem REAL do OTel) SEM LLM, e mapeia
+  // os passos → modelo de sequência → Mermaid. Confiança POR SETA (observado/
+  // provado/inferido) — nunca finge certeza. ?entry=<rota|símbolo> [&staticOnly=1]
+  // [&format=json|mermaid]. Runtime-first, estático-fallback.
+  app.get("/api/projects/:projectId/reasoner/sequence", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const entryQuery = typeof req.query.entry === "string" ? req.query.entry.trim() : "";
+      if (!entryQuery) return res.status(400).json({ message: "query param 'entry' is required (ex: 'GET /api/users' ou 'authorize.routes')" });
+      const staticOnly = String(req.query.staticOnly || "") === "1" || String(req.query.staticOnly || "") === "true";
+      const format = String(req.query.format || "json").toLowerCase();
+      const maxSteps = Math.min(80, Math.max(4, parseInt(String(req.query.maxSteps)) || 40));
+
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
+      const shaped = loaded.shaped;
+
+      const { graphEntryCatalog } = await import("./reasoner/adapters/entry-catalog.adapter");
+      const catalog = graphEntryCatalog(shaped as never);
+      const ep = catalog.resolve(entryQuery); // rótulo humano quando casa uma funcionalidade
+      const entryLabel = ep?.label || entryQuery;
+      const entryForMech = ep?.id || entryQuery;
+
+      // ORDEM REAL (OTel/Jaeger), config por projeto — igual ao endpoint de mechanism.
+      const { jaegerRuntimeOrderPort } = await import("./reasoner/adapters/runtime-order.adapter");
+      const { resolveRuntimeOverlayConfig, projectOverlayConfig } = await import("./analyzers/runtime-overlay");
+      const rtCfg = staticOnly ? null : resolveRuntimeOverlayConfig(projectOverlayConfig(loaded.project), process.env);
+      const runtimeOrderPort = jaegerRuntimeOrderPort(
+        rtCfg
+          ? { jaegerUrl: rtCfg.jaegerUrl, services: rtCfg.services, gatewayServices: rtCfg.gatewayServices, opPathPattern: rtCfg.opPathPattern, lookbackMs: rtCfg.lookbackMs, limit: rtCfg.limit }
+          : {},
+      );
+
+      const { traceMechanism } = await import("./reasoner/mechanism");
+      const report = await traceMechanism(shaped, entryForMech, null, { maxSteps, runtimeOrderPort });
+
+      // rótulo→tipo para papel preciso do lifeline (repositório/serviço/rota/db).
+      const labelType = new Map<string, string>();
+      for (const n of shaped.nodes) {
+        const lbl = (n as { className?: string; methodName?: string }).className || (n as { methodName?: string }).methodName;
+        if (lbl && !labelType.has(lbl)) labelType.set(lbl, String((n as { type?: string }).type || ""));
+      }
+
+      const { mechanismToSequence } = await import("./reasoner/sequence/sequence-model");
+      const { toMermaid } = await import("./reasoner/sequence/sequence-render");
+      const model = mechanismToSequence(report as never, { entryLabel, labelType });
+      const mermaid = toMermaid(model);
+
+      if (format === "mermaid") {
+        res.type("text/plain").send(mermaid);
+        return;
+      }
+      res.json({
+        projectId,
+        analysisRunId: loaded.analysisRunId,
+        entry: { query: entryQuery, resolved: report.resolvedEntryId, label: entryLabel, kind: ep?.kind ?? "other", observed: ep?.observed ?? false },
+        model,
+        mermaid,
+      });
+    } catch (error) {
+      console.error("Error generating sequence diagram:", error);
+      res.status(500).json({ message: "Failed to generate sequence diagram" });
+    }
+  });
+
   // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
   // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
