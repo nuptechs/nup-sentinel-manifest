@@ -39,12 +39,20 @@ const normPath = (p: string) => String(p || "").replace(/\/+$/, "").toLowerCase(
  * rota). Escolhe o traço com mais spans DB (a requisição mais completa; empate →
  * menor traceID), ordena por `startTime`, tabelas na ordem de execução (1ª vence).
  */
-export function extractRuntimeOrder(traces: JaegerTrace[]): RuntimeOp[] {
+export function extractRuntimeOrder(traces: JaegerTrace[], opts: { services?: string[] } = {}): RuntimeOp[] {
   const list = Array.isArray(traces) ? traces : [];
+  // Isolamento de observação (fix do BLEED cross-service): num traço distribuído,
+  // spans JDBC de OUTRO sistema (mesmo trace-id) não pertencem à ordem DESTA rota.
+  // Allowlist fornecida ⇒ só spans desses serviços entram; ausente ⇒ compat.
+  const allow = opts.services && opts.services.length ? new Set(opts.services) : null;
   let best: { traceID: string; dbSpans: JaegerSpan[] } | null = null;
   for (const t of list) {
     const spans = Array.isArray(t?.spans) ? t.spans : [];
-    const dbSpans = spans.filter((s) => tablesFromDbSpan(spanTagMap(s)).length > 0);
+    const procs = t.processes || {};
+    const svcOf = (s: JaegerSpan) => procs[s?.processID || ""]?.serviceName || "";
+    const dbSpans = spans.filter(
+      (s) => (!allow || allow.has(svcOf(s))) && tablesFromDbSpan(spanTagMap(s)).length > 0,
+    );
     if (dbSpans.length === 0) continue;
     const traceID = String(t.traceID ?? "");
     if (!best || dbSpans.length > best.dbSpans.length || (dbSpans.length === best.dbSpans.length && traceID < best.traceID)) {
@@ -77,7 +85,7 @@ export function extractRuntimeOrder(traces: JaegerTrace[]): RuntimeOp[] {
 export function extractRuntimeOrderForRoute(
   traces: JaegerTrace[],
   targetPath: string,
-  opts: { gatewayServices?: string[]; opPathPattern?: RegExp } = {},
+  opts: { gatewayServices?: string[]; opPathPattern?: RegExp; services?: string[] } = {},
 ): RuntimeOp[] {
   const list = Array.isArray(traces) ? traces : [];
   const target = normPath(targetPath);
@@ -89,7 +97,7 @@ export function extractRuntimeOrderForRoute(
   if (!pair) return [];
   const ids = new Set(pair.traceIds);
   const matching = list.filter((t) => t.traceID && ids.has(t.traceID));
-  return extractRuntimeOrder(matching);
+  return extractRuntimeOrder(matching, { services: opts.services });
 }
 
 interface JaegerOrderDeps {
@@ -122,7 +130,7 @@ export function jaegerRuntimeOrderPort(deps: JaegerOrderDeps = {}): RuntimeOrder
           limit: deps.limit ?? 200,
           fetchFn: deps.fetchFn,
         });
-        return extractRuntimeOrderForRoute(traces, path, { gatewayServices: deps.gatewayServices, opPathPattern: deps.opPathPattern });
+        return extractRuntimeOrderForRoute(traces, path, { gatewayServices: deps.gatewayServices, opPathPattern: deps.opPathPattern, services: deps.services });
       } catch {
         return [];
       }

@@ -137,10 +137,21 @@ function stripQuery(p: string): string {
  */
 export function extractRuntimePairs(
   traces: JaegerTrace[],
-  opts: { gatewayServices?: string[]; opPathPattern?: RegExp } = {},
+  opts: { gatewayServices?: string[]; opPathPattern?: RegExp; services?: string[] } = {},
 ): RuntimePair[] {
   const gwSvcs = new Set(opts.gatewayServices && opts.gatewayServices.length ? opts.gatewayServices : ["easynup-gateway"]);
   const opRe = opts.opPathPattern || DEFAULT_OP_RE; // configurável por alvo (não mais cravado)
+  // ── Isolamento de observação (fix do BLEED cross-service) ──
+  // Um traço distribuído pode carregar spans de OUTRO sistema no MESMO trace-id
+  // (ex.: o authorize do identify carrega os spans JDBC do easynup que consulta
+  // contract/project ao redor de chamar o PDP). Sem filtro, essas tabelas eram
+  // atribuídas à rota DESTE projeto — atribuição errada, provada ao vivo. A
+  // allowlist de observação = `services` (config por-projeto) ∪ raízes; quando
+  // fornecida, só spans desses serviços contribuem tabela/endpoint/rota-refinada
+  // — a MESMA semântica fail-closed do `dbServices` do caminho fragmento.
+  // Ausente ⇒ comportamento anterior (compat de testes/single-tenant).
+  const obsAllow: Set<string> | null =
+    opts.services && opts.services.length ? new Set([...opts.services, ...Array.from(gwSvcs)]) : null;
   const byRoute = new Map<string, RuntimePair>();
 
   for (const t of traces || []) {
@@ -174,6 +185,7 @@ export function extractRuntimePairs(
     if (path) {
       let best = path;
       for (const s of spans) {
+        if (obsAllow && !obsAllow.has(svcOf(s))) continue; // rota refinada só de serviço do projeto
         const cand = stripQuery(tagsOf(s)["http.route"] || "");
         if (
           cand.length > best.length &&
@@ -192,6 +204,7 @@ export function extractRuntimePairs(
     const pageRoutes = new Set<string>();
     let lastSeenMs = 0;
     for (const s of spans) {
+      if (obsAllow && !obsAllow.has(svcOf(s))) continue; // span de OUTRO sistema no mesmo traço não conta aqui
       const tg = tagsOf(s);
       const op = dbOpOf(tg);
       for (const tbl of tablesFromDbSpan(tg)) tables.push({ table: normalizeTableName(tbl), op });
@@ -780,7 +793,7 @@ export async function runRuntimeOverlay(
   }
 
   // (1) par rota→tabela — traço COMPLETO (root HTTP + spans de DB).
-  const pairs = extractRuntimePairs(traces, { gatewayServices: cfg.gatewayServices, opPathPattern: cfg.opPathPattern });
+  const pairs = extractRuntimePairs(traces, { gatewayServices: cfg.gatewayServices, opPathPattern: cfg.opPathPattern, services: cfg.services });
   const ov = applyRuntimeOverlay(graph, pairs);
 
   // (2) tabela→ENTITY direto — traço FRAGMENTO (só span de DB, sem rota).
