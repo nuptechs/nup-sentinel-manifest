@@ -19,3 +19,6 @@ session_plan.md
 *.db-wal
 .env
 .env.*
+
+# Local test/measurement scripts
+_measure-depth.ts
