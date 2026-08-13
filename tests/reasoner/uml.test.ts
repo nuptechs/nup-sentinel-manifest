@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
-  buildClass, buildComponent, buildPackage, buildDeployment, buildUseCase, buildActivity, buildState,
+  buildClass, buildComponent, buildPackage, buildDeployment, buildUseCase, buildActivity, buildState, extractEnumStates,
 } from "../../server/reasoner/uml/uml-builders.ts";
 import { umlToMermaid } from "../../server/reasoner/uml/uml-render.ts";
 
@@ -74,6 +74,53 @@ describe("uml/builders — cada tipo usa dados reais", () => {
     assert.ok(m.nodes.some((n) => /ContractStatus/.test(n.label)));
     assert.match(umlToMermaid(m), /^stateDiagram-v2/);
   });
+  it("class: colaboradores aparecem MESMO com muitas entidades (fix do cap único)", () => {
+    // 40 entidades (> ENT_CAP) + um serviço que lê a top-1 → o serviço DEVE entrar.
+    const nodes: never[] = [];
+    const edges: never[] = [];
+    for (let i = 0; i < 40; i++) nodes.push({ id: `ENTITY:E${i}`, type: "ENTITY", className: `E${i}` } as never);
+    // dá grau à E0 (várias arestas de leitura) p/ ela ficar no topo
+    for (let i = 0; i < 5; i++) edges.push({ fromNode: `SVC${i}`, toNode: "ENTITY:E0", relationType: "READS_ENTITY", evidence: { method: "STATIC_PROVEN" } } as never);
+    for (let i = 0; i < 5; i++) nodes.push({ id: `SVC${i}`, type: "SERVICE", className: `Svc${i}`, sourceFile: `s${i}.ts` } as never);
+    const m = buildClass({ nodes, edges } as never);
+    assert.ok(m.nodes.some((n) => n.stereotype === "service"), "serviço colaborador entra apesar das 40 entidades");
+    assert.ok(m.rels.some((r) => r.kind === "dependency"), "relação de uso presente");
+  });
+  it("component: exclui diretórios de teste", () => {
+    const g = { nodes: [
+      { id: "A", type: "SERVICE", sourceFile: "services/gateway/src/a.ts" },
+      { id: "B", type: "SERVICE", sourceFile: "services/gateway/src/b.ts" },
+      { id: "T", type: "SERVICE", sourceFile: "src/test/foo/t.ts" },
+    ], edges: [] };
+    const m = buildComponent(g as never);
+    assert.ok(!m.nodes.some((n) => /test/i.test(n.label)), "nenhum bloco de teste");
+  });
+  it("activity: filtra getters/setters triviais", () => {
+    const report = { steps: [
+      { order: 1, fromLabel: "Svc", toLabel: "createContract", method: "STATIC_PROVEN" },
+      { order: 2, fromLabel: "Svc", toLabel: "Contract#getStatus", method: "STATIC_PROVEN" },
+      { order: 3, fromLabel: "Svc", toLabel: "audit", method: "STATIC_PROVEN" },
+    ] };
+    const m = buildActivity(report as never, { entryLabel: "x" });
+    assert.ok(!m.nodes.some((n) => /getStatus/.test(n.label)), "getter filtrado");
+    assert.ok(m.nodes.some((n) => n.label === "createContract"), "operação mantida");
+    assert.equal(m.stats.acessoresFiltrados, 1);
+  });
+  it("extractEnumStates: Java enum, TS union e const array", () => {
+    assert.deepEqual(extractEnumStates("public enum ContractStatus { DRAFT, ACTIVE, CLOSED }", "ContractStatus"), ["DRAFT", "ACTIVE", "CLOSED"]);
+    assert.deepEqual(extractEnumStates("export type OrderStatus = 'pending' | 'paid' | 'cancelled';", "OrderStatus"), ["pending", "paid", "cancelled"]);
+    assert.deepEqual(extractEnumStates("const Phase = ['a', 'b'] as const", "Phase"), ["a", "b"]);
+    assert.deepEqual(extractEnumStates("nada aqui", "X"), []);
+  });
+  it("state com enumValues: estados REAIS do enum", () => {
+    const g = { nodes: [{ id: "ENTITY:ContractStatus", type: "ENTITY", className: "ContractStatus" }], edges: [] };
+    const m = buildState(g as never, { focus: "ContractStatus", enumValues: new Map([["ENTITY:ContractStatus", ["DRAFT", "ACTIVE", "CLOSED"]]]) });
+    assert.equal(m.nodes.length, 3);
+    assert.ok(m.nodes.some((n) => n.label === "DRAFT"));
+    assert.ok(m.notes.some((n) => /vivem na lógica de validação|workflow/i.test(n)));
+    assert.match(umlToMermaid(m), /stateDiagram-v2/);
+  });
+
   it("vazio → modelo honesto (não lança, não finge)", () => {
     const m = buildClass({ nodes: [], edges: [] } as never);
     assert.equal(m.nodes.length, 0);

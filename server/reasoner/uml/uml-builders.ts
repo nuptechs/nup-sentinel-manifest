@@ -43,7 +43,11 @@ function degree(edges: GEdge[]): Map<string, number> {
 
 // ══ 1. CLASSES — entidades + herança + associações ═════════════════════════
 export function buildClass(graph: Graph, opts: { focus?: string; cap?: number } = {}): UmlModel {
-  const cap = opts.cap ?? CAP_NODES;
+  // Orçamento BALANCEADO: entidades E colaboradores têm cotas próprias — senão as
+  // entidades sozinhas estouram o teto e o diagrama fica sem "quem usa" (bug do cap
+  // único: num sistema com >N entidades, o loop de colaboradores nunca rodava).
+  const ENT_CAP = Math.min(opts.cap ?? 28, CAP_NODES);
+  const COLLAB_CAP = 30;
   const byId = nodeById(graph);
   const edges = graph.edges || [];
   const entities = (graph.nodes || []).filter((n) => n.type === "ENTITY" || n.type === "SUPERTYPE" || n.type === "INTERFACE");
@@ -61,10 +65,11 @@ export function buildClass(graph: Graph, opts: { focus?: string; cap?: number } 
     }
     chosen = [...near].map((id) => byId.get(id)).filter((n): n is GNode => !!n && (n.type === "ENTITY" || n.type === "SUPERTYPE" || n.type === "INTERFACE"));
   } else {
-    chosen = entities.slice().sort((a, b) => (deg.get(b.id) ?? 0) - (deg.get(a.id) ?? 0)).slice(0, cap);
+    chosen = entities.slice().sort((a, b) => (deg.get(b.id) ?? 0) - (deg.get(a.id) ?? 0)).slice(0, ENT_CAP);
   }
+  chosen = chosen.slice(0, ENT_CAP);
   const keep = new Set(chosen.map((n) => n.id));
-  const nodes: UmlNode[] = chosen.slice(0, cap).map((n) => ({
+  const nodes: UmlNode[] = chosen.map((n) => ({
     id: n.id,
     label: clamp(shortLabel(n, n.id)),
     kind: "class",
@@ -89,20 +94,26 @@ export function buildClass(graph: Graph, opts: { focus?: string; cap?: number } 
   // p/ stacks sem associação estrutural entre entidades (ex.: TS/Drizzle não emite
   // EXTENDS/ASSOCIATES como o Java JPA) — o diagrama de classes fica útil nos dois.
   // Só entra quando cabe no orçamento e sem estourar a legibilidade.
+  // arestas de uso (serviço/repo/rota → entidade mostrada), agregadas por fonte.
+  const usageEdges = edges.filter(
+    (e) => (e.relationType === "READS_ENTITY" || e.relationType === "WRITES_ENTITY") && nodeSet.has(e.toNode) && !nodeSet.has(e.fromNode) && byId.has(e.fromNode),
+  );
+  const srcFreq = new Map<string, number>();
+  for (const e of usageEdges) srcFreq.set(e.fromNode, (srcFreq.get(e.fromNode) ?? 0) + 1);
+  // os colaboradores mais relevantes primeiro (mais entidades tocadas)
+  const topSrc = new Set([...srcFreq.entries()].sort((a, b) => b[1] - a[1]).slice(0, COLLAB_CAP).map(([id]) => id));
   const collaborators = new Map<string, GNode>();
   const collabRels: UmlRel[] = [];
   const seenCollab = new Set<string>();
-  for (const e of edges) {
-    if (rels.length + collabRels.length >= CAP_RELS || nodes.length + collaborators.size >= cap) break;
-    if (!nodeSet.has(e.toNode)) continue; // alvo é uma das entidades mostradas
-    if (e.relationType !== "READS_ENTITY" && e.relationType !== "WRITES_ENTITY") continue;
-    const src = byId.get(e.fromNode);
-    if (!src || nodeSet.has(e.fromNode)) continue; // ignora se já é entidade no diagrama
-    const k = `${e.fromNode}|${e.toNode}|${e.relationType}`;
-    if (seenCollab.has(k)) continue;
+  for (const e of usageEdges) {
+    if (!topSrc.has(e.fromNode)) continue;
+    if (rels.length + collabRels.length >= CAP_RELS) break;
+    const src = byId.get(e.fromNode)!;
+    const k = `${e.fromNode}|${e.toNode}`;
+    if (seenCollab.has(k)) continue; // 1 aresta por par (lê OU grava, o 1º visto)
     seenCollab.add(k);
     if (!collaborators.has(e.fromNode)) {
-      const st = src.type === "REPOSITORY" ? "repository" : src.type === "CONTROLLER" ? "controller" : "service";
+      const st = src.type === "REPOSITORY" ? "repository" : src.type === "CONTROLLER" ? "controller" : src.type === "ROUTE" ? "route" : "service";
       collaborators.set(e.fromNode, { id: e.fromNode, label: clamp(shortLabel(src, e.fromNode)), kind: "class", stereotype: st, confidence: "proven" });
     }
     collabRels.push({ from: e.fromNode, to: e.toNode, kind: "dependency", label: e.relationType === "WRITES_ENTITY" ? "grava" : "lê", confidence: edgeConfidence(e) });
@@ -119,16 +130,18 @@ function pkgKey(sf: string, depth: number): string {
   const parts = String(sf || "").split("/").filter(Boolean);
   parts.pop(); // tira o arquivo
   if (!parts.length) return "(raiz)";
-  // pula prefixos genéricos p/ o grupo ficar significativo
+  // EXCLUI diretórios de teste/mock — não são partes do sistema (ruído no diagrama).
+  if (parts.some((p) => /^(tests?|__tests__|spec|specs|mocks?|__mocks__|fixtures?)$/i.test(p))) return "";
+  // pula prefixos genéricos p/ o grupo ficar significativo (arquitetura, não boilerplate)
   let i = 0;
-  const skip = new Set(["src", "main", "java", "com", "org"]);
+  const skip = new Set(["src", "main", "java", "com", "org", "app"]);
   while (i < parts.length - 1 && skip.has(parts[i])) i++;
   return parts.slice(i, i + depth).join("/") || parts.slice(0, depth).join("/");
 }
 
 // ══ 2. COMPONENTES — grandes blocos + dependências ═════════════════════════
 export function buildComponent(graph: Graph): UmlModel {
-  return buildGrouped(graph, "component", 1, "Diagrama de Componentes", "os grandes blocos e como dependem uns dos outros");
+  return buildGrouped(graph, "component", 2, "Diagrama de Componentes", "os grandes blocos e como dependem uns dos outros");
 }
 // ══ 3. PACOTES — grupos por diretório + dependências ═══════════════════════
 export function buildPackage(graph: Graph): UmlModel {
@@ -143,6 +156,7 @@ function buildGrouped(graph: Graph, type: "component" | "package", depth: number
     const sf = sourceFileOf(n);
     if (!sf) continue;
     const g = pkgKey(sf, depth);
+    if (!g) continue; // teste/mock excluído
     groupOf.set(n.id, g);
     groupSize.set(g, (groupSize.get(g) ?? 0) + 1);
   }
@@ -285,8 +299,13 @@ export function buildActivity(
   let prev = "__start__";
   let order = 0;
   const confOf = (s: MechStep): UmlConfidence => (s.runtimeConfirmed || s.method === "RUNTIME_OBSERVED" ? "observed" : s.method === "STATIC_PROVEN" || s.resolution === "compiler" ? "proven" : "inferred");
+  // um passo do processo é uma OPERAÇÃO, não um acessor: getters/setters triviais
+  // (get*/set*/is*/has*) são ruído numa atividade — filtrados p/ o passo a passo ser legível.
+  const isAccessor = (lbl: string) => /(^|[#.])(get|set|is|has)[A-Z0-9]/.test(String(lbl || ""));
+  let filtered = 0;
   for (const s of [...steps].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))) {
     if (!s.toLabel) continue;
+    if (isAccessor(s.toLabel)) { filtered++; continue; }
     const id = "act_" + s.toLabel;
     if (!seen.has(id)) {
       seen.add(id);
@@ -297,15 +316,53 @@ export function buildActivity(
   }
   rels.push({ from: prev, to: "__end__", kind: "flow", confidence: "proven" });
   nodes.push({ id: "__end__", label: "fim", kind: "end", confidence: "proven" });
-  const notes = ["Passo a passo por alcance provado; losangos = pontos de decisão (fan-out). Ordem real quando houve tráfego."];
-  return { type: "activity", title, nodes, rels, groups: [], notes, stats: { atividades: nodes.length - 2, decisoes: branchAt.size } };
+  const notes = [`Passo a passo por alcance provado; losangos = pontos de decisão (fan-out). Ordem real quando houve tráfego.${filtered ? ` ${filtered} acessor(es) get/set filtrados.` : ""}`];
+  return { type: "activity", title, nodes, rels, groups: [], notes, stats: { atividades: nodes.length - 2, decisoes: branchAt.size, acessoresFiltrados: filtered } };
 }
 
 // ══ 7. ESTADOS — em que estado algo está e como muda ═══════════════════════
 // Fonte honesta: nós de status/estado (enum/máquina). Transições só quando o grafo
 // as prova (aresta entre estados); senão, mostra os estados e DECLARA que as
 // transições vivem na config de workflow, não no grafo estático.
-export function buildState(graph: Graph, opts: { focus?: string } = {}): UmlModel {
+/**
+ * PURO: extrai os VALORES de um enum/união de estados do código-fonte — os estados
+ * REAIS da máquina (Java `enum X{A,B}` · TS `enum`/`type X='a'|'b'`/`const X=[...]`).
+ * Transições NÃO são extraídas aqui (vivem na lógica de validação/workflow) — o
+ * diagrama declara isso, honesto. Nunca lança.
+ */
+export function extractEnumStates(sourceText: string, className: string): string[] {
+  const src = String(sourceText || "");
+  const name = String(className || "").replace(/[^A-Za-z0-9_]/g, "");
+  if (!name) return [];
+  const out: string[] = [];
+  const push = (v: string) => {
+    const t = v.trim().replace(/^['"]|['"]$/g, "");
+    if (t && /^[A-Za-z0-9_]+$/.test(t) && !out.includes(t) && out.length < 40) out.push(t);
+  };
+  // Java/TS: enum X { A, B(...), C }
+  let m = new RegExp(`enum\\s+${name}\\s*(?:implements[^\\{]+)?\\{([\\s\\S]*?)\\}`).exec(src);
+  if (m) for (const tok of m[1].split(/[,;\n]/)) { const id = tok.trim().match(/^([A-Z][A-Z0-9_]*)/); if (id) push(id[1]); }
+  // TS: type X = 'a' | 'b' | 'c'
+  if (!out.length) { m = new RegExp(`type\\s+${name}\\s*=\\s*([^;\\n]+)`).exec(src); if (m) for (const lit of m[1].match(/['"]([^'"]+)['"]/g) || []) push(lit); }
+  // TS: const X = ['a','b'] as const
+  if (!out.length) { m = new RegExp(`(?:const|enum)\\s+${name}\\s*=?\\s*\\[([^\\]]+)\\]`).exec(src); if (m) for (const lit of m[1].match(/['"]([^'"]+)['"]/g) || []) push(lit); }
+  return out;
+}
+
+export function buildState(graph: Graph, opts: { focus?: string; enumValues?: Map<string, string[]> } = {}): UmlModel {
+  // Se temos os VALORES reais de um enum (extraídos da fonte), o diagrama são os
+  // ESTADOS de verdade — não só o nome do tipo. Transições declaradas como "na config".
+  const ev = opts.enumValues;
+  if (ev && ev.size) {
+    const [entId, values] = [...ev.entries()].find(([, v]) => v.length) || [];
+    if (entId && values && values.length) {
+      const enNode = (graph.nodes || []).find((n) => n.id === entId);
+      const enName = enNode ? shortLabel(enNode, entId) : opts.focus || "Estado";
+      const nodes: UmlNode[] = values.slice(0, 40).map((v) => ({ id: `st_${v}`, label: clamp(v, 28), kind: "state", confidence: "proven" }));
+      const notes = [`${nodes.length} estado(s) REAIS do enum ${enName} (extraídos da fonte). As transições permitidas vivem na lógica de validação/workflow — não no grafo estático; por isso não são desenhadas (honesto).`];
+      return { type: "state", title: `Estados — ${enName}`, nodes, rels: [], groups: [], notes, stats: { estados: nodes.length, transicoes: 0 } };
+    }
+  }
   // PRECISÃO (anti falso-positivo): só ENUM DE ESTADO real — nó de DADO (ENTITY/
   // SUPERTYPE/ENUM) cujo NOME TERMINA em Status/State/Phase/Situacao. Isso exclui
   // serviços/controllers que só têm "Status" no meio do nome (ex.: FindConnector

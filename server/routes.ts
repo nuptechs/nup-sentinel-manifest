@@ -2164,7 +2164,27 @@ export async function registerRoutes(
       else if (type === "package") model = builders.buildPackage(graph);
       else if (type === "deployment") model = builders.buildDeployment(graph);
       else if (type === "usecase") model = builders.buildUseCase(graph);
-      else if (type === "state") model = builders.buildState(graph, { focus: focus || undefined });
+      else if (type === "state") {
+        // Estados REAIS: se há foco, acha o enum e extrai os VALORES da fonte.
+        let enumValues: Map<string, string[]> | undefined;
+        if (focus) {
+          const g2 = loaded.shaped as { nodes: Array<{ id: string; type?: string; className?: string; sourceFile?: string }> };
+          const enumNode = g2.nodes.find(
+            (n) => ["ENTITY", "SUPERTYPE", "ENUM", "INTERFACE"].includes(String(n.type || "").toUpperCase()) && /(status|state|phase|situacao|situa|stage)$/i.test(String(n.className || "")) && String(n.className || "").toLowerCase().includes(focus.toLowerCase()),
+          );
+          if (enumNode?.sourceFile) {
+            try {
+              const files = await storage.getSourceFiles(projectId);
+              const f = files.find((x: { filePath: string }) => x.filePath === enumNode.sourceFile);
+              if (f) {
+                const vals = builders.extractEnumStates(f.content, enumNode.className || "");
+                if (vals.length) enumValues = new Map([[enumNode.id, vals]]);
+              }
+            } catch { /* fail-soft: cai no diagrama de tipos de estado */ }
+          }
+        }
+        model = builders.buildState(graph, { focus: focus || undefined, enumValues });
+      }
 
       const mermaid = umlToMermaid(model as never);
       if (format === "mermaid") return res.type("text/plain").send(mermaid);
