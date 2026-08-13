@@ -2165,23 +2165,25 @@ export async function registerRoutes(
       else if (type === "deployment") model = builders.buildDeployment(graph);
       else if (type === "usecase") model = builders.buildUseCase(graph);
       else if (type === "state") {
-        // Estados REAIS: se há foco, acha o enum e extrai os VALORES da fonte.
+        // Estados REAIS: com foco, busca o ENUM direto na FONTE pelo nome (os enums
+        // de status nem sempre são nós do grafo — o grafo tem entidades/métodos, não
+        // os tipos enum). Prefere o arquivo cujo nome bate o foco; senão varre o
+        // conteúdo (bounded). Extrai os VALORES = os estados de verdade.
         let enumValues: Map<string, string[]> | undefined;
         if (focus) {
-          const g2 = loaded.shaped as { nodes: Array<{ id: string; type?: string; className?: string; sourceFile?: string }> };
-          const enumNode = g2.nodes.find(
-            (n) => ["ENTITY", "SUPERTYPE", "ENUM", "INTERFACE"].includes(String(n.type || "").toUpperCase()) && /(status|state|phase|situacao|situa|stage)$/i.test(String(n.className || "")) && String(n.className || "").toLowerCase().includes(focus.toLowerCase()),
-          );
-          if (enumNode?.sourceFile) {
-            try {
-              const files = await storage.getSourceFiles(projectId);
-              const f = files.find((x: { filePath: string }) => x.filePath === enumNode.sourceFile);
-              if (f) {
-                const vals = builders.extractEnumStates(f.content, enumNode.className || "");
-                if (vals.length) enumValues = new Map([[enumNode.id, vals]]);
-              }
-            } catch { /* fail-soft: cai no diagrama de tipos de estado */ }
-          }
+          try {
+            const files = await storage.getSourceFiles(projectId);
+            const flow = focus.toLowerCase();
+            // 1) arquivo nomeado como o enum (FinancialEntryStatus.java/.ts)
+            const byName = files
+              .filter((f: { filePath: string }) => f.filePath.toLowerCase().replace(/\.[a-z]+$/, "").endsWith("/" + flow) || f.filePath.toLowerCase().includes("/" + flow + "."))
+              .slice(0, 5);
+            const candidates = byName.length ? byName : files.slice(0, 4000);
+            for (const f of candidates) {
+              const vals = builders.extractEnumStates(f.content, focus);
+              if (vals.length >= 2) { enumValues = new Map([[`enum:${focus}`, vals]]); break; }
+            }
+          } catch { /* fail-soft: cai no diagrama de tipos de estado */ }
         }
         model = builders.buildState(graph, { focus: focus || undefined, enumValues });
       }
