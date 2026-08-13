@@ -369,9 +369,12 @@ export function buildState(graph: Graph, opts: { focus?: string; enumValues?: Ma
   // StatusServiceV1) — que NÃO são estados. A máquina de estado em si (valores +
   // transições) vive na config de workflow; aqui mostramos os TIPOS de estado.
   const DATA_TYPES = new Set(["ENTITY", "SUPERTYPE", "ENUM", "INTERFACE"]);
-  const isStateEnum = (n: GNode) =>
-    DATA_TYPES.has(String(n.type || "").toUpperCase()) &&
-    /(status|state|phase|situacao|situa|stage)$/i.test(String(n.className || "").trim());
+  const isStateEnum = (n: GNode) => {
+    const cn = String(n.className || "").trim();
+    // exclui MÉTODOS (getStatus, #getFromStatus) e membros — só o TIPO enum/estado.
+    if (/[#.(]/.test(cn) || String(n.id || "").includes("#")) return false;
+    return DATA_TYPES.has(String(n.type || "").toUpperCase()) && /(status|state|phase|situacao|situa|stage)$/i.test(cn);
+  };
   let states = (graph.nodes || []).filter(isStateEnum);
   if (opts.focus) {
     const f = opts.focus.toLowerCase();
