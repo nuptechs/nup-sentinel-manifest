@@ -2098,6 +2098,83 @@ export async function registerRoutes(
     }
   });
 
+  // Reasoner — SUÍTE UML: gera QUALQUER dos diagramas UML a partir do grafo PROVADO
+  // do snapshot, cada elemento com sua CONFIANÇA (observado/provado/inferido). Tipos:
+  // class · component · package · deployment · usecase · activity · state · sequence.
+  // GET /reasoner/uml (lista os tipos) · GET /reasoner/uml/:type?entry=&focus=&format=mermaid
+  app.get("/api/projects/:projectId/reasoner/uml", (req, res) => {
+    res.json({
+      projectId: parseInt(req.params.projectId),
+      types: [
+        { type: "usecase", label: "Caso de Uso", answers: "O usuário faz o quê?" },
+        { type: "activity", label: "Atividade", answers: "Como o processo acontece?", needsEntry: true },
+        { type: "sequence", label: "Sequência", answers: "Quem chama quem e em que ordem?", needsEntry: true },
+        { type: "class", label: "Classes", answers: "Quais são as coisas e como se relacionam?" },
+        { type: "component", label: "Componentes", answers: "Quais partes formam o sistema?" },
+        { type: "deployment", label: "Implantação", answers: "Onde cada parte está instalada?" },
+        { type: "state", label: "Estados", answers: "Em que estado isso está e como muda?" },
+        { type: "package", label: "Pacotes", answers: "Como organizar essas partes?" },
+      ],
+    });
+  });
+
+  app.get("/api/projects/:projectId/reasoner/uml/:type", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const type = String(req.params.type || "").toLowerCase();
+      const VALID = ["class", "component", "package", "deployment", "usecase", "activity", "state", "sequence"];
+      if (!VALID.includes(type)) return res.status(400).json({ message: `tipo inválido; use um de: ${VALID.join(", ")}` });
+      const entry = typeof req.query.entry === "string" ? req.query.entry.trim() : "";
+      const focus = typeof req.query.focus === "string" ? req.query.focus.trim() : "";
+      const format = String(req.query.format || "json").toLowerCase();
+
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
+      const graph = loaded.shaped as never;
+
+      const builders = await import("./reasoner/uml/uml-builders");
+      const { umlToMermaid } = await import("./reasoner/uml/uml-render");
+      let model;
+
+      if (type === "activity" || type === "sequence") {
+        if (!entry) return res.status(400).json({ message: `'${type}' precisa de ?entry=<rota|símbolo>` });
+        // reusa o motor de mecanismo (BFS provado + gate + ordem real do OTel)
+        const { jaegerRuntimeOrderPort } = await import("./reasoner/adapters/runtime-order.adapter");
+        const { resolveRuntimeOverlayConfig, projectOverlayConfig } = await import("./analyzers/runtime-overlay");
+        const rtCfg = resolveRuntimeOverlayConfig(projectOverlayConfig(loaded.project), process.env);
+        const runtimeOrderPort = jaegerRuntimeOrderPort(rtCfg ? { jaegerUrl: rtCfg.jaegerUrl, services: rtCfg.services, gatewayServices: rtCfg.gatewayServices, opPathPattern: rtCfg.opPathPattern, lookbackMs: rtCfg.lookbackMs, limit: rtCfg.limit } : {});
+        const { traceMechanism } = await import("./reasoner/mechanism");
+        const report = await traceMechanism(loaded.shaped, entry, null, { maxSteps: 40, runtimeOrderPort });
+        if (type === "activity") {
+          model = builders.buildActivity(report as never, { entryLabel: entry });
+        } else {
+          const { mechanismToSequence } = await import("./reasoner/sequence/sequence-model");
+          const { toMermaid } = await import("./reasoner/sequence/sequence-render");
+          const seq = mechanismToSequence(report as never, { entryLabel: entry });
+          if (format === "mermaid") return res.type("text/plain").send(toMermaid(seq));
+          return res.json({ projectId, type, model: seq, mermaid: toMermaid(seq) });
+        }
+      } else if (type === "class") model = builders.buildClass(graph, { focus: focus || undefined });
+      else if (type === "component") model = builders.buildComponent(graph);
+      else if (type === "package") model = builders.buildPackage(graph);
+      else if (type === "deployment") model = builders.buildDeployment(graph);
+      else if (type === "usecase") model = builders.buildUseCase(graph);
+      else if (type === "state") model = builders.buildState(graph, { focus: focus || undefined });
+
+      const mermaid = umlToMermaid(model as never);
+      if (format === "mermaid") return res.type("text/plain").send(mermaid);
+      res.json({ projectId, analysisRunId: loaded.analysisRunId, type, model, mermaid });
+    } catch (error) {
+      console.error("Error generating UML diagram:", error);
+      res.status(500).json({ message: "Failed to generate UML diagram" });
+    }
+  });
+
   // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
   // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson
