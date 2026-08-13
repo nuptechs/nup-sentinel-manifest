@@ -1,4 +1,4 @@
-import { LayoutDashboard, FolderUp, FileSearch, Map, Network, GitCompare, GitBranch, ShieldAlert, Settings, Ruler, Target } from "lucide-react";
+import { LayoutDashboard, FolderUp, FileSearch, Map, Network, GitCompare, GitBranch, ShieldAlert, Settings, Ruler, Target, Workflow } from "lucide-react";
 import { useLocation, Link } from "wouter";
 import {
   Sidebar,
@@ -22,6 +22,7 @@ const navItems = [
   { title: "Catalog", url: "/catalog", icon: FileSearch },
   { title: "System Explorer", url: "/insights", icon: Map },
   { title: "System Map", url: "/system-map", icon: Network },
+  { title: "Diagramas", url: "/diagrams", icon: Workflow },
   { title: "Diff Viewer", url: "/diff", icon: GitCompare },
   { title: "Git Integration", url: "/git", icon: GitBranch },
   { title: "Security Audit", url: "/security", icon: ShieldAlert },

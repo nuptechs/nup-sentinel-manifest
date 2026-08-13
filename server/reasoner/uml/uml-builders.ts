@@ -102,7 +102,7 @@ export function buildClass(graph: Graph, opts: { focus?: string; cap?: number } 
   for (const e of usageEdges) srcFreq.set(e.fromNode, (srcFreq.get(e.fromNode) ?? 0) + 1);
   // os colaboradores mais relevantes primeiro (mais entidades tocadas)
   const topSrc = new Set([...srcFreq.entries()].sort((a, b) => b[1] - a[1]).slice(0, COLLAB_CAP).map(([id]) => id));
-  const collaborators = new Map<string, GNode>();
+  const collaborators = new Map<string, UmlNode>();
   const collabRels: UmlRel[] = [];
   const seenCollab = new Set<string>();
   for (const e of usageEdges) {
