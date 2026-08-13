@@ -29,11 +29,14 @@ const G = {
 };
 
 describe("uml/builders — cada tipo usa dados reais", () => {
-  it("class: entidades + herança + associação", () => {
+  it("class: entidades + herança + associação + quem usa (colaborador)", () => {
     const m = buildClass(G as never);
     assert.ok(m.nodes.some((n) => n.label === "Contract"));
     assert.ok(m.rels.some((r) => r.kind === "inheritance"));
     assert.ok(m.rels.some((r) => r.kind === "association" && r.confidence === "proven"));
+    // enriquecimento: o serviço que LÊ a entidade entra como colaborador (útil p/ TS)
+    assert.ok(m.nodes.some((n) => n.stereotype === "service" && n.label === "ContractService"));
+    assert.ok(m.rels.some((r) => r.kind === "dependency" && (r.label === "lê" || r.label === "grava")));
     assert.match(umlToMermaid(m), /^classDiagram/);
   });
   it("component/package: agrupa por diretório + dependências", () => {

@@ -85,8 +85,33 @@ export function buildClass(graph: Graph, opts: { focus?: string; cap?: number } 
     if (rels.length >= CAP_RELS) break;
     rels.push({ from: e.fromNode, to: e.toNode, kind, confidence: edgeConfidence(e) });
   }
-  const notes = [`${entities.length} classes de domínio no total; mostrando ${nodes.length}${focus ? ` (vizinhança de ${shortLabel(focus, focus.id)})` : " (as mais conectadas)"}.`];
-  return { type: "class", title: focus ? `Classes — ${shortLabel(focus, focus.id)}` : "Diagrama de Classes", nodes, rels, groups: [], notes, stats: { classes: nodes.length, relacoes: rels.length, totalEntidades: entities.length } };
+  // ENRIQUECIMENTO: quem USA cada entidade (serviço/repo que lê/grava). Essencial
+  // p/ stacks sem associação estrutural entre entidades (ex.: TS/Drizzle não emite
+  // EXTENDS/ASSOCIATES como o Java JPA) — o diagrama de classes fica útil nos dois.
+  // Só entra quando cabe no orçamento e sem estourar a legibilidade.
+  const collaborators = new Map<string, GNode>();
+  const collabRels: UmlRel[] = [];
+  const seenCollab = new Set<string>();
+  for (const e of edges) {
+    if (rels.length + collabRels.length >= CAP_RELS || nodes.length + collaborators.size >= cap) break;
+    if (!nodeSet.has(e.toNode)) continue; // alvo é uma das entidades mostradas
+    if (e.relationType !== "READS_ENTITY" && e.relationType !== "WRITES_ENTITY") continue;
+    const src = byId.get(e.fromNode);
+    if (!src || nodeSet.has(e.fromNode)) continue; // ignora se já é entidade no diagrama
+    const k = `${e.fromNode}|${e.toNode}|${e.relationType}`;
+    if (seenCollab.has(k)) continue;
+    seenCollab.add(k);
+    if (!collaborators.has(e.fromNode)) {
+      const st = src.type === "REPOSITORY" ? "repository" : src.type === "CONTROLLER" ? "controller" : "service";
+      collaborators.set(e.fromNode, { id: e.fromNode, label: clamp(shortLabel(src, e.fromNode)), kind: "class", stereotype: st, confidence: "proven" });
+    }
+    collabRels.push({ from: e.fromNode, to: e.toNode, kind: "dependency", label: e.relationType === "WRITES_ENTITY" ? "grava" : "lê", confidence: edgeConfidence(e) });
+  }
+  for (const c of collaborators.values()) nodes.push(c);
+  rels.push(...collabRels);
+
+  const notes = [`${entities.length} classes de domínio no total; mostrando ${chosen.length}${focus ? ` (vizinhança de ${shortLabel(focus, focus.id)})` : " (as mais conectadas)"}${collaborators.size ? ` + ${collaborators.size} que as usam (serviço/repo)` : ""}.`];
+  return { type: "class", title: focus ? `Classes — ${shortLabel(focus, focus.id)}` : "Diagrama de Classes", nodes, rels, groups: [], notes, stats: { classes: nodes.length, relacoes: rels.length, totalEntidades: entities.length, colaboradores: collaborators.size } };
 }
 
 // ══ agrupamento por diretório (pacotes/componentes) ════════════════════════
