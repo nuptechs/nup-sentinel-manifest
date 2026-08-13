@@ -306,8 +306,16 @@ export function buildActivity(
 // as prova (aresta entre estados); senão, mostra os estados e DECLARA que as
 // transições vivem na config de workflow, não no grafo estático.
 export function buildState(graph: Graph, opts: { focus?: string } = {}): UmlModel {
-  const isStateNode = (n: GNode) => /status|state|phase|situacao|situa|stage/i.test(String(n.className || n.id));
-  let states = (graph.nodes || []).filter(isStateNode);
+  // PRECISÃO (anti falso-positivo): só ENUM DE ESTADO real — nó de DADO (ENTITY/
+  // SUPERTYPE/ENUM) cujo NOME TERMINA em Status/State/Phase/Situacao. Isso exclui
+  // serviços/controllers que só têm "Status" no meio do nome (ex.: FindConnector
+  // StatusServiceV1) — que NÃO são estados. A máquina de estado em si (valores +
+  // transições) vive na config de workflow; aqui mostramos os TIPOS de estado.
+  const DATA_TYPES = new Set(["ENTITY", "SUPERTYPE", "ENUM", "INTERFACE"]);
+  const isStateEnum = (n: GNode) =>
+    DATA_TYPES.has(String(n.type || "").toUpperCase()) &&
+    /(status|state|phase|situacao|situa|stage)$/i.test(String(n.className || "").trim());
+  let states = (graph.nodes || []).filter(isStateEnum);
   if (opts.focus) {
     const f = opts.focus.toLowerCase();
     states = states.filter((n) => String(n.className || n.id).toLowerCase().includes(f));
