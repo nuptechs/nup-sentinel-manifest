@@ -101,3 +101,36 @@ describe("buildSankeyModel", () => {
     expect(model.nodes).toHaveLength(0);
   });
 });
+
+describe("normalização AUTHENTICATED (guarda ≠ permissão)", () => {
+  it("endpoint cuja única 'permissão' é AUTHENTICATED vira guarda auth-only, sem permissão específica", () => {
+    const gov: GovernanceReport = {
+      byPermission: [{ permission: "AUTHENTICATED", endpoints: [{ path: "/api/me", method: "GET" }] }],
+    };
+    const units = buildFlowUnits(gov, null, null, null);
+    const me = units.find((u) => u.route === "GET /api/me")!;
+    expect(me.guard).toBe("auth-only"); // NÃO "permission" — não super-credita a coluna Permissão
+    expect(me.permission).toBe("(sem permissão)"); // AUTHENTICATED some da coluna Permissão
+  });
+
+  it("permissão real continua guarda permission (não é rebaixada)", () => {
+    const gov: GovernanceReport = {
+      byPermission: [{ permission: "UPDATE_CONTRACT", endpoints: [{ path: "/api/c", method: "PUT" }] }],
+    };
+    const u = buildFlowUnits(gov, null, null, null)[0];
+    expect(u.guard).toBe("permission");
+    expect(u.permission).toBe("UPDATE_CONTRACT");
+  });
+
+  it("mesmo endpoint com AUTHENTICATED + permissão real → mantém a permissão real (guarda mais forte)", () => {
+    const gov: GovernanceReport = {
+      byPermission: [
+        { permission: "AUTHENTICATED", endpoints: [{ path: "/api/x", method: "GET" }] },
+        { permission: "READ_X", endpoints: [{ path: "/api/x", method: "GET" }] },
+      ],
+    };
+    const u = buildFlowUnits(gov, null, null, null)[0];
+    expect(u.guard).toBe("permission");
+    expect(u.permission).toBe("READ_X");
+  });
+});

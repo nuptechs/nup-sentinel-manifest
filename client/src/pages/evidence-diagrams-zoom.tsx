@@ -10,9 +10,10 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Boxes } from "lucide-react";
+import { AlertTriangle, Boxes } from "lucide-react";
 import type { EvidenceGraphPayload } from "./evidence-diagrams";
 import { EVIDENCE } from "./system-map-evidence";
+import { humanLabel } from "./evidence-label";
 import {
   computeDomainEvidence,
   computeSeamEvidence,
@@ -34,31 +35,52 @@ const VIEW_H = 560;
 export default function ZoomView({ payload, projectId }: { payload: EvidenceGraphPayload; projectId?: number | null }) {
   const [level, setLevel] = useState(1);
   const en = projectId != null;
+  // minSize=6 corta o long-tail de domínios minúsculos (tamanho 4-5) que
+  // entopem o anel; ainda assim capamos a top-K por tamanho abaixo.
   const domainsQuery = useQuery<DomainsReport>({
-    queryKey: en ? [`/api/projects/${projectId}/reasoner/domains?minSize=4`] : ["noop-zoom-dom"],
+    queryKey: en ? [`/api/projects/${projectId}/reasoner/domains?minSize=6`] : ["noop-zoom-dom"],
     enabled: en && level >= 1,
     retry: false,
   });
 
   const edges: EdgeLite[] = payload.edges;
-  const domainEv = useMemo(() => computeDomainEvidence(domainsQuery.data, edges), [domainsQuery.data, edges]);
-  const seamEv = useMemo(() => computeSeamEvidence(domainsQuery.data, edges), [domainsQuery.data, edges]);
+  const allDomainEv = useMemo(() => computeDomainEvidence(domainsQuery.data, edges), [domainsQuery.data, edges]);
+  // top-K por tamanho — o anel só respira até ~24 domínios; o resto é anunciado.
+  const DOMAIN_CAP = 24;
+  const domainEv = useMemo(
+    () => [...allDomainEv].sort((a, b) => b.size - a.size).slice(0, DOMAIN_CAP),
+    [allDomainEv],
+  );
+  const domainTruncated = allDomainEv.length > DOMAIN_CAP;
+  const shownIds = useMemo(() => new Set(domainEv.map((d) => d.id)), [domainEv]);
+  const seamEv = useMemo(
+    () => computeSeamEvidence(domainsQuery.data, edges).filter((s) => shownIds.has(s.from) && shownIds.has(s.to)),
+    [domainsQuery.data, edges, shownIds],
+  );
   const hubs = domainsQuery.data?.hubs ?? [];
 
-  // posiciona domínios num círculo (estável por índice).
+  // posiciona os domínios (top-K) num anel; o rótulo vai PRA FORA, radialmente,
+  // ancorado pelo hemisfério — nunca colide no centro.
   const placed = useMemo(() => {
     const n = domainEv.length || 1;
     const cx = VIEW_W / 2;
     const cy = VIEW_H / 2;
-    const R = Math.min(VIEW_W, VIEW_H) * 0.36;
+    const R = Math.min(VIEW_W, VIEW_H) * 0.34;
     const maxSize = Math.max(1, ...domainEv.map((d) => d.size));
     return domainEv.map((d, i) => {
       const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+      const r = 16 + (d.size / maxSize) * 30;
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
       return {
         d,
-        x: cx + Math.cos(a) * R,
-        y: cy + Math.sin(a) * R,
-        r: 18 + (d.size / maxSize) * 34,
+        x: cx + cos * R,
+        y: cy + sin * R,
+        r,
+        // rótulo empurrado radialmente pra fora do círculo
+        lx: cx + cos * (R + r + 10),
+        ly: cy + sin * (R + r + 10) + 3,
+        anchor: cos < -0.2 ? "end" : cos > 0.2 ? "start" : ("middle" as "start" | "end" | "middle"),
       };
     });
   }, [domainEv]);
@@ -94,6 +116,11 @@ export default function ZoomView({ payload, projectId }: { payload: EvidenceGrap
         <p className="text-xs text-muted-foreground">
           Ao afastar, cada bloco herda o <b>pior</b> tier dos membros — a cor denuncia o elo mais fraco.
         </p>
+        {level >= 1 && domainTruncated && (
+          <Badge variant="secondary" className="gap-1" data-testid="zoom-truncation">
+            <AlertTriangle className="h-3 w-3" /> mostrando os {DOMAIN_CAP} maiores de {allDomainEv.length} domínios
+          </Badge>
+        )}
       </div>
 
       {level === 0 ? (
@@ -156,8 +183,8 @@ export default function ZoomView({ payload, projectId }: { payload: EvidenceGrap
                       </title>
                     </circle>
                     {level === 1 && (
-                      <text x={p.x} y={p.y + p.r + 12} textAnchor="middle" fontSize={11} fontWeight={600} fill="hsl(var(--foreground))" style={HALO}>
-                        {p.d.name}
+                      <text x={p.lx} y={p.ly} textAnchor={p.anchor} fontSize={10.5} fontWeight={600} fill="hsl(var(--foreground))" style={HALO}>
+                        {domainName(p.d.name)}
                       </text>
                     )}
                     <text x={p.x} y={p.y + 4} textAnchor="middle" fontSize={11} fontWeight={700} fill="hsl(var(--card))" style={{ paintOrder: "stroke", stroke: meta.color, strokeWidth: 2.5 }}>
@@ -183,6 +210,12 @@ export default function ZoomView({ payload, projectId }: { payload: EvidenceGrap
   );
 }
 
+/** Nome de domínio enxuto (o /reasoner/domains às vezes nomeia pelo método cru). */
+function domainName(name: string): string {
+  const clean = (name || "").replace(/[()#]/g, " ").replace(/\s+/g, " ").trim();
+  return clean.length > 22 ? clean.slice(0, 21) + "…" : clean;
+}
+
 function MethodsLevel({ payload }: { payload: EvidenceGraphPayload }) {
   // amostra de nós por grau — o nível mais granular (sem agregação).
   const nodes = useMemo(() => [...payload.nodes].sort((a, b) => b.inDegree - a.inDegree).slice(0, 60), [payload.nodes]);
@@ -198,8 +231,9 @@ function MethodsLevel({ payload }: { payload: EvidenceGraphPayload }) {
             className="rounded border bg-muted/40 px-1.5 py-0.5 text-[11px]"
             style={{ borderColor: n.runtimeHot ? "#f43f5e" : undefined }}
             data-testid={`zoom-method-node-${n.id}`}
+            title={n.runtimeHot ? "quente em runtime" : undefined}
           >
-            {n.className || n.methodName || n.id.split(":").pop()}
+            {humanLabel(n)}
           </span>
         ))}
       </div>

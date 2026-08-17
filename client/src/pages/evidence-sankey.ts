@@ -46,6 +46,11 @@ function ep(method?: string, path?: string): string {
   return `${(method || "").toUpperCase()} ${path || ""}`.trim();
 }
 
+/** Força relativa da guarda — permission é a mais forte, none a mais fraca. */
+function guardRank(g: GuardClass): number {
+  return g === "permission" ? 3 : g === "auth-only" ? 2 : 1;
+}
+
 /** Junta os 4 relatórios num conjunto de endpoints-fluxo. Puro. */
 export function buildFlowUnits(
   gov: GovernanceReport | null | undefined,
@@ -74,11 +79,20 @@ export function buildFlowUnits(
   }
 
   const units = new Map<string, FlowUnit>();
-  const add = (method: string | undefined, path: string | undefined, permission: string) => {
+  const add = (method: string | undefined, path: string | undefined, permissionRaw: string) => {
     const key = ep(method, path);
     if (!key) return;
+    // AUTHENTICATED não é permissão — é NÍVEL DE GUARDA (auth-only). O
+    // permission-governance a lista como "role exigida", o que a colocaria na
+    // coluna Permissão E super-creditaria a guarda "permission". Normaliza:
+    // vira guarda auth-only, sem permissão específica (colunas ortogonais).
+    const isAuthOnly = /^authenticated$/i.test(permissionRaw.trim());
+    const permission = isAuthOnly ? NO_PERM : permissionRaw;
     const existing = units.get(key);
-    const guard = guardOf.get(key) ?? (permission === NO_PERM ? "none" : "permission");
+    // guarda: exposure manda; senão deriva (auth-only se só-autenticado; senão
+    // permission quando há permissão real; none quando nada).
+    const guard =
+      guardOf.get(key) ?? (isAuthOnly ? "auth-only" : permission === NO_PERM ? "none" : "permission");
     const unit: FlowUnit = existing || {
       key,
       guard,
@@ -89,7 +103,9 @@ export function buildFlowUnits(
     };
     // se veio de uma permissão real, promove sobre "(sem permissão)".
     if (permission !== NO_PERM) unit.permission = permission;
-    unit.guard = guard;
+    // não rebaixa uma guarda já resolvida (permission > auth-only > none).
+    if (guardRank(guard) > guardRank(unit.guard)) unit.guard = guard;
+    else if (!existing) unit.guard = guard;
     units.set(key, unit);
   };
 
