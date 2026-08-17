@@ -2197,6 +2197,54 @@ export async function registerRoutes(
     }
   });
 
+  // ── C4 / Structurizr (SOTA 2025-26): UM modelo → N views ──────────────────
+  // GET /reasoner/c4            → catálogo de views
+  // GET /reasoner/c4/model      → modelo C4 único (JSON) derivado do grafo provado
+  // GET /reasoner/c4/:view?focus=&format=mermaid|dsl|json
+  //   views: context | container | component | landscape
+  //   O DSL (Structurizr) é ÚNICO p/ o modelo inteiro — versionável em git.
+  app.get("/api/projects/:projectId/reasoner/c4", async (req, res) => {
+    const { c4Catalog } = await import("./reasoner/c4/c4-render");
+    res.json({ projectId: parseInt(req.params.projectId), views: c4Catalog(), formats: ["mermaid", "dsl", "json"] });
+  });
+
+  app.get("/api/projects/:projectId/reasoner/c4/:view", async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const view = String(req.params.view || "container").toLowerCase();
+      const VALID = ["context", "container", "component", "landscape", "model"];
+      if (!VALID.includes(view)) return res.status(400).json({ message: `view inválida; use: ${VALID.filter((v) => v !== "model").join(", ")}` });
+      const focus = typeof req.query.focus === "string" ? req.query.focus.trim() : "";
+      const format = String(req.query.format || "json").toLowerCase();
+
+      const { loadReasonerGraph } = await import("./reasoner/graph-load");
+      const loaded = await loadReasonerGraph(projectId, {
+        getSnapshots: (id) => storage.getAnalysisSnapshots(id),
+        getProject: (id) => storage.getProject(id),
+      });
+      if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
+
+      const { buildC4Model } = await import("./reasoner/c4/c4-model");
+      const { toStructurizrDsl, toMermaidC4 } = await import("./reasoner/c4/c4-render");
+      const model = buildC4Model(loaded.shaped as never, { systemName: (loaded.project as { name?: string })?.name || "Sistema" });
+
+      // o DSL é sempre do modelo inteiro (todas as views); mermaid é por-view.
+      const dsl = toStructurizrDsl(model);
+      if (view === "model") {
+        if (format === "dsl") return res.type("text/plain").send(dsl);
+        return res.json({ projectId, analysisRunId: loaded.analysisRunId, model, dsl, stats: model.stats });
+      }
+      if (format === "dsl") return res.type("text/plain").send(dsl);
+      const mermaid = toMermaidC4(model, view as never, focus || undefined);
+      if (format === "mermaid") return res.type("text/plain").send(mermaid);
+      res.json({ projectId, analysisRunId: loaded.analysisRunId, view, mermaid, dsl, stats: model.stats, notes: model.notes });
+    } catch (error) {
+      console.error("Error generating C4 diagram:", error);
+      res.status(500).json({ message: "Failed to generate C4 diagram" });
+    }
+  });
+
   // Mapa do Sistema (tela System Map) — devolve o grafo COMPLETO persistido no
   // snapshot (nós tipados CONTROLLER/SERVICE/REPOSITORY/ENTITY + arestas
   // CALLS/READS_ENTITY/WRITES_ENTITY). Fonte durável = snapshot.manifestJson

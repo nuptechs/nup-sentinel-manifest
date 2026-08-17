@@ -19,15 +19,36 @@ import { MermaidView } from "@/components/mermaid-view";
 
 interface Project { id: number; name: string }
 interface UmlModel { title?: string; notes?: string[]; stats?: Record<string, number>; source?: string }
-interface UmlResponse { type: string; model?: UmlModel; mermaid?: string; entry?: { label?: string } }
+// C4 responde no top-level (mermaid + dsl + stats + notes); UML aninha em model.
+interface UmlResponse { type?: string; view?: string; model?: UmlModel; mermaid?: string; dsl?: string; stats?: Record<string, number>; notes?: string[]; entry?: { label?: string } }
 
-interface TypeMeta { type: string; label: string; q: string; needsEntry?: boolean; needsFocus?: boolean }
-const TYPES: TypeMeta[] = [
+export interface TypeMeta { type: string; label: string; q: string; needsEntry?: boolean; needsFocus?: boolean; family?: "uml" | "c4" }
+// Regra PURA de endpoint (testável isolada): C4 vai p/ /reasoner/c4/:view; UML p/
+// /reasoner/uml/:type, com o rótulo interno "uml_component" mapeado p/ "component"
+// (evita colidir com a view C4 "component"). entry vira ?entry= ou ?focus=.
+export function buildDiagramUrl(projectId: number, meta: TypeMeta, entry: string): string {
+  const p = new URLSearchParams();
+  if (entry && meta.needsEntry) p.set("entry", entry);
+  if (entry && meta.needsFocus) p.set("focus", entry);
+  const qs = p.toString();
+  const suffix = qs ? `?${qs}` : "";
+  if (meta.family === "c4") return `/api/projects/${projectId}/reasoner/c4/${meta.type}${suffix}`;
+  const umlType = meta.type === "uml_component" ? "component" : meta.type;
+  return `/api/projects/${projectId}/reasoner/uml/${umlType}${suffix}`;
+}
+
+export const TYPES: TypeMeta[] = [
+  // ── C4 / Structurizr: UM modelo → N views (formato dominante 2025-26) ──
+  { type: "container", label: "C4 · Contêineres", q: "Quais peças rodam e como conversam?", family: "c4" },
+  { type: "context", label: "C4 · Contexto", q: "O sistema no mundo — quem usa?", family: "c4" },
+  { type: "component", label: "C4 · Componentes", q: "Que módulos formam um contêiner?", family: "c4", needsFocus: true },
+  { type: "landscape", label: "C4 · Paisagem", q: "Tudo junto — contêineres e módulos.", family: "c4" },
+  // ── UML clássico (8 tipos), gerado do mesmo grafo provado ──
   { type: "usecase", label: "Caso de Uso", q: "O usuário faz o quê?" },
   { type: "activity", label: "Atividade", q: "Como o processo acontece?", needsEntry: true },
   { type: "sequence", label: "Sequência", q: "Quem chama quem e em que ordem?", needsEntry: true },
   { type: "class", label: "Classes", q: "Quais são as coisas e como se relacionam?", needsFocus: true },
-  { type: "component", label: "Componentes", q: "Quais partes formam o sistema?" },
+  { type: "uml_component", label: "Componentes (UML)", q: "Quais partes formam o sistema?" },
   { type: "deployment", label: "Implantação", q: "Onde cada parte está instalada?" },
   { type: "state", label: "Estados", q: "Em que estado isso está e como muda?", needsFocus: true },
   { type: "package", label: "Pacotes", q: "Como organizar essas partes?" },
@@ -37,7 +58,7 @@ export default function DiagramsPage() {
   const projectsQuery = useQuery<Project[]>({ queryKey: ["/api/projects"] });
   const projects = projectsQuery.data;
   const [projectId, setProjectId] = useState<number | null>(null);
-  const [type, setType] = useState<string>("deployment");
+  const [type, setType] = useState<string>("container");
   const [entryDraft, setEntryDraft] = useState("");
   const [entry, setEntry] = useState("");
   const [copied, setCopied] = useState(false);
@@ -52,30 +73,26 @@ export default function DiagramsPage() {
   // troca de tipo limpa a entrada
   useEffect(() => { setEntryDraft(""); setEntry(""); }, [type]);
 
-  const url = useMemo(() => {
-    if (projectId == null) return null;
-    const p = new URLSearchParams();
-    if (entry && meta.needsEntry) p.set("entry", entry);
-    if (entry && meta.needsFocus) p.set("focus", entry);
-    const qs = p.toString();
-    return `/api/projects/${projectId}/reasoner/uml/${type}${qs ? `?${qs}` : ""}`;
-  }, [projectId, type, entry, meta]);
+  const url = useMemo(() => (projectId == null ? null : buildDiagramUrl(projectId, meta, entry)), [projectId, entry, meta]);
 
   // atividade/sequência EXIGEM entrada; classes/estados a entrada é opcional (foco)
   const enabled = projectId != null && url != null && !(meta.needsEntry && !entry);
 
   const diagram = useQuery<UmlResponse>({ queryKey: [url as string], enabled, retry: false });
 
-  const copyMermaid = async () => {
-    if (!diagram.data?.mermaid) return;
+  const [copiedDsl, setCopiedDsl] = useState(false);
+  const copyText = async (text: string | undefined, mark: (v: boolean) => void) => {
+    if (!text) return;
     try {
-      await navigator.clipboard.writeText(diagram.data.mermaid);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
+      await navigator.clipboard.writeText(text);
+      mark(true);
+      setTimeout(() => mark(false), 1600);
     } catch { /* clipboard indisponível */ }
   };
+  const copyMermaid = () => copyText(diagram.data?.mermaid, setCopied);
 
-  const stats = diagram.data?.model?.stats;
+  const stats = diagram.data?.model?.stats ?? diagram.data?.stats;
+  const notes = diagram.data?.model?.notes ?? diagram.data?.notes;
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 p-6">
@@ -83,7 +100,7 @@ export default function DiagramsPage() {
         <Workflow className="h-6 w-6 text-primary" />
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Diagramas</h1>
-          <p className="text-sm text-muted-foreground">Os 8 diagramas UML, gerados do código provado — confiança por elemento (seta cheia = provado/observado, tracejada = inferido).</p>
+          <p className="text-sm text-muted-foreground">C4/Structurizr (modelo único → N views) + os 8 UML, gerados do código provado — confiança por elemento (seta cheia = provado/observado, tracejada = inferido). O DSL do C4 é versionável em git.</p>
         </div>
       </div>
 
@@ -111,12 +128,12 @@ export default function DiagramsPage() {
           {needsInput && (
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-medium text-muted-foreground">
-                {meta.needsEntry ? "Funcionalidade (rota ou símbolo)" : "Foco (opcional — entidade/enum)"}
+                {meta.needsEntry ? "Funcionalidade (rota ou símbolo)" : meta.family === "c4" ? "Contêiner (foco do C4)" : "Foco (opcional — entidade/enum)"}
               </label>
               <div className="flex gap-2">
                 <Input
                   className="w-64"
-                  placeholder={meta.needsEntry ? "ex.: GET /api/users  ·  ContractService" : "ex.: Contract  ·  FinancialEntryStatus"}
+                  placeholder={meta.needsEntry ? "ex.: GET /api/users  ·  ContractService" : meta.family === "c4" ? "ex.: backend  ·  gateway  ·  frontend" : "ex.: Contract  ·  FinancialEntryStatus"}
                   value={entryDraft}
                   onChange={(e) => setEntryDraft(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") setEntry(entryDraft.trim()); }}
@@ -133,6 +150,11 @@ export default function DiagramsPage() {
             <Button variant="outline" size="sm" onClick={copyMermaid} disabled={!diagram.data?.mermaid} data-testid="button-copy">
               {copied ? <Check className="mr-1.5 h-3.5 w-3.5" /> : <Copy className="mr-1.5 h-3.5 w-3.5" />} {copied ? "Copiado" : "Copiar Mermaid"}
             </Button>
+            {diagram.data?.dsl && (
+              <Button variant="outline" size="sm" onClick={() => copyText(diagram.data?.dsl, setCopiedDsl)} data-testid="button-copy-dsl">
+                {copiedDsl ? <Check className="mr-1.5 h-3.5 w-3.5" /> : <Copy className="mr-1.5 h-3.5 w-3.5" />} {copiedDsl ? "Copiado" : "Copiar DSL"}
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -165,15 +187,15 @@ export default function DiagramsPage() {
           ) : diagram.data?.mermaid ? (
             <div className="space-y-4">
               <MermaidView code={diagram.data.mermaid} />
-              {diagram.data.model?.notes?.length ? (
+              {notes?.length ? (
                 <ul className="space-y-1 border-t pt-3 text-xs text-muted-foreground">
-                  {diagram.data.model.notes.map((n, i) => (<li key={i}>• {n}</li>))}
+                  {notes.map((n, i) => (<li key={i}>• {n}</li>))}
                 </ul>
               ) : null}
             </div>
           ) : (
             <div className="p-8 text-center text-sm text-muted-foreground" data-testid="empty-diagram">
-              Sem dados para desenhar. {diagram.data?.model?.notes?.[0] || "Rode uma análise deste projeto."}
+              Sem dados para desenhar. {notes?.[0] || "Rode uma análise deste projeto."}
             </div>
           )}
         </CardContent>
