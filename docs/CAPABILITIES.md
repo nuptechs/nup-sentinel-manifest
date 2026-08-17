@@ -174,6 +174,23 @@ envia ao `nup-sentinel` (cria sessão em `/api/sessions`, ingere em `/api/findin
 | Registro OIDC no NuPIdentify (deploy SaaS) | ⚪ | manifesto de cliente em `nupidentity-client-manifest.json` (registro feito fora, no deploy) |
 | Extensão VS Code (`analyzeFile`/`analyzeWorkspace`/`analyzeWorkspaceFull`/`showCatalog`/`connectServer`) | ✅ | `vscode-extension/src/extension.ts:35`; analisadores local/remoto em `local-analyzer.ts`/`remote-analyzer.ts` |
 
+### 5.1 Diagramas de Evidência (`/evidence`) — 8 vistas sobre os endpoints reais
+
+Página-mãe (`client/src/pages/evidence-diagrams.tsx:EvidenceDiagramsPage`) no padrão System Map (`VizMode` union + barra segmentada + deep-link `?view=&project=`), consumindo os endpoints de evidência já existentes — **zero servidor novo**. A gramática de tiers/cores/legenda é REUSADA de `client/src/pages/system-map-evidence.tsx:EVIDENCE` (nunca redefinida). Regra: dado real ou nada (vazio ≠ falhou ≠ carregando).
+
+| Vista | Componente | Fonte (endpoints reais) |
+|---|---|---|
+| Metro Map de requisições | `client/src/pages/evidence-diagrams-metro.tsx:MetroView` (layout puro `client/src/pages/evidence-metro.ts:buildMetroLayout`) | `/reasoner/sequence/catalog` + `/reasoner/sequence` |
+| Sankey de autorização | `client/src/pages/evidence-diagrams-sankey.tsx:SankeyView` (modelo puro `client/src/pages/evidence-sankey.ts:buildSankeyModel`) | `/permission-governance` + `/sensitive-exposure` + `/entity-access` + catálogo |
+| Grafo + Prova (recibo por aresta) | `client/src/pages/evidence-diagrams-proof.tsx:ProofView` (ego puro `client/src/pages/evidence-proof.ts:buildEgoLayout`) | `/graph` |
+| Uma geometria, N lentes | `client/src/pages/evidence-diagrams-lenses.tsx:LensesView` (geometria fixa `client/src/pages/evidence-lenses.ts:buildLensGeometry`) | `/graph` + `/permission-governance` |
+| Conformidade desenhado × executado | `client/src/pages/evidence-diagrams-conformance.tsx:ConformanceView` | `coverage` do `/graph` + `/reasoner/runtime-gap` + `/bimr` |
+| Diff + Andon | `client/src/pages/evidence-diagrams-diff.tsx:DiffView` (diff/andon puros `client/src/pages/evidence-diff.ts:computeDiff`) | `/evidence-history` + `/evidence-health` + `/graph-drift` |
+| Zoom epistêmico (herda o pior tier) | `client/src/pages/evidence-diagrams-zoom.tsx:ZoomView` (`client/src/pages/evidence-domains.ts:computeDomainEvidence`) | `/graph` + `/reasoner/domains` |
+| Radar executivo | `client/src/pages/evidence-diagrams-radar.tsx:RadarView` (`client/src/pages/evidence-domains.ts:worstTier`) | `/reasoner/domains` + `/graph` + `/evidence-history` |
+
+Rota + nav: `client/src/App.tsx` (`/evidence`) e `client/src/components/app-sidebar.tsx`. Lógica de layout/agregação é PURA e testada com fixtures (`client/src/pages/evidence-metro.test.ts`, `evidence-sankey.test.ts`, `evidence-diff.test.ts`, `evidence-domains.test.ts`, `evidence-lenses.test.ts`, `evidence-proof.test.ts`, `evidence-diagrams.test.tsx`). Co-mudança git NÃO é oferecida (ausência declarada em `server/analyzers/delivery-risk.ts:NotComputedSignal`) — a lente "Recência" usa a última observação de runtime por nó.
+
 ---
 
 ## 6. Integração Git, webhooks e análise de branch/PR

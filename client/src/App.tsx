@@ -15,6 +15,7 @@ import CatalogPage from "@/pages/catalog";
 import InsightsPage from "@/pages/insights";
 import SystemMapPage from "@/pages/system-map";
 import DiagramsPage from "@/pages/diagrams";
+import EvidenceDiagramsPage from "@/pages/evidence-diagrams";
 import DecisionPage from "@/pages/decision";
 import DiffViewerPage from "@/pages/diff-viewer";
 import GitIntegrationPage from "@/pages/git-integration";
@@ -35,6 +36,7 @@ function Router() {
       <Route path="/insights" component={InsightsPage} />
       <Route path="/system-map" component={SystemMapPage} />
       <Route path="/diagrams" component={DiagramsPage} />
+      <Route path="/evidence" component={EvidenceDiagramsPage} />
       <Route path="/decisao" component={DecisionPage} />
       <Route path="/diff" component={DiffViewerPage} />
       <Route path="/git" component={GitIntegrationPage} />
