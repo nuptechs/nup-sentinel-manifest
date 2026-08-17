@@ -22,6 +22,7 @@ import {
   type LensGraph,
   type LensId,
 } from "./evidence-lenses";
+import { humanLabel } from "./evidence-label";
 
 const HALO: React.CSSProperties = {
   paintOrder: "stroke",
@@ -54,6 +55,22 @@ export default function LensesView({
     () => applyLens(lens, geometry, lens === "sensitive" ? governanceQuery.data : undefined),
     [lens, geometry, governanceQuery.data],
   );
+
+  // Hover-pra-isolar: com um nó sob o cursor, acende só ele + suas arestas
+  // incidentes e escurece o resto — é o que torna a geometria densa LEGÍVEL
+  // (sem isso, 400 nós × N arestas viram hairball). O System Map já faz isso.
+  const [hovered, setHovered] = useState<string | null>(null);
+  const neighbors = useMemo(() => {
+    if (!hovered) return null;
+    const set = new Set<string>([hovered]);
+    for (const le of geometry.edges) {
+      if (le.edge.fromNode === hovered) set.add(le.edge.toNode);
+      else if (le.edge.toNode === hovered) set.add(le.edge.fromNode);
+    }
+    return set;
+  }, [hovered, geometry.edges]);
+  const edgeLit = (le: (typeof geometry.edges)[number]) =>
+    !hovered || le.edge.fromNode === hovered || le.edge.toNode === hovered;
 
   if (geometry.nodes.length === 0) {
     return (
@@ -108,6 +125,17 @@ export default function LensesView({
         </div>
       </div>
 
+      <p className="text-xs text-muted-foreground" data-testid="lenses-hover-hint" aria-live="polite">
+        {hovered ? (
+          <>
+            Isolando <b>{humanLabel(geometry.nodes.find((n) => n.node.id === hovered)!.node)}</b> e suas conexões — tire o
+            mouse para ver tudo.
+          </>
+        ) : (
+          <>Passe o mouse sobre um nó para isolar suas conexões (sem isso, a densidade vira ruído).</>
+        )}
+      </p>
+
       {lens === "sensitive" && governanceQuery.isError && (
         <p className="text-xs text-muted-foreground" data-testid="lenses-governance-degraded">
           /permission-governance indisponível — mostrando só o que o grafo prova por si (nós sensíveis);
@@ -147,16 +175,17 @@ export default function LensesView({
 
           {geometry.edges.map((le, i) => {
             const s = styles.edges[i];
+            const lit = edgeLit(le);
             return (
               <path
                 key={i}
                 d={`M ${le.x1} ${le.y1} Q ${le.qx} ${le.qy} ${le.x2} ${le.y2}`}
                 fill="none"
-                className={s.pulse ? "runtime-pulse" : undefined}
+                className={s.pulse && lit ? "runtime-pulse" : undefined}
                 stroke={s.color}
-                strokeWidth={1.4}
-                strokeDasharray={s.pulse ? undefined : s.dash}
-                opacity={s.opacity}
+                strokeWidth={lit && hovered ? 2 : 1.4}
+                strokeDasharray={s.pulse && lit ? undefined : s.dash}
+                opacity={lit ? s.opacity : 0.04}
                 data-testid={`lenses-edge-${i}`}
               />
             );
@@ -164,12 +193,21 @@ export default function LensesView({
 
           {geometry.nodes.map((ln, i) => {
             const s = styles.nodes[i];
+            const dim = neighbors && !neighbors.has(ln.node.id) ? 0.12 : 1;
             return (
-              <g key={ln.node.id} data-testid={`lenses-node-${i}`}>
+              <g
+                key={ln.node.id}
+                data-testid={`lenses-node-${i}`}
+                onMouseEnter={() => setHovered(ln.node.id)}
+                onMouseLeave={() => setHovered((h) => (h === ln.node.id ? null : h))}
+                style={{ cursor: "pointer", opacity: dim }}
+              >
+                {/* alvo de hover generoso (o ponto tem r=4; sem isto é difícil pegar) */}
+                <circle cx={ln.x} cy={ln.y} r={9} fill="transparent" />
                 {s.halo != null && <circle cx={ln.x} cy={ln.y} r={4 + s.halo} fill={s.fill} opacity={0.22} />}
-                <circle cx={ln.x} cy={ln.y} r={4} fill={s.fill} opacity={s.opacity}>
+                <circle cx={ln.x} cy={ln.y} r={hovered === ln.node.id ? 6 : 4} fill={s.fill} opacity={s.opacity}>
                   <title>
-                    {(ln.node.className || ln.node.id) + (s.badge ? ` — ${s.badge}` : "")}
+                    {humanLabel(ln.node) + (s.badge ? ` — ${s.badge}` : "")}
                   </title>
                 </circle>
                 {s.ring && (

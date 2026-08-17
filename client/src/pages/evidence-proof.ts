@@ -15,6 +15,7 @@ import {
   evidenceMethodOf,
   evidenceConfidenceOf,
 } from "./system-map-evidence";
+import { humanLabel } from "./evidence-label";
 
 // ── Forma mínima do payload /graph que esta vista consome ─────────────
 export interface ProofNode {
@@ -46,20 +47,40 @@ export interface ProofGraph {
   edges: ProofEdge[];
 }
 
-/** Rótulo curto derivado (o shape NÃO traz `label`): className → methodName → fim do id. */
+/** Rótulo curto derivado (o shape NÃO traz `label`; nunca devolve "<module>"). */
 export function proofLabel(n: ProofNode): string {
-  return n.className || n.methodName || n.id.split(":").pop() || n.id;
+  return humanLabel(n);
+}
+
+/** Tipos que valem a pena centrar: mostram um CAMINHO (fan-out), não um sink. */
+const ENTRY_TYPES = new Set(["CONTROLLER", "ROUTE", "SERVICE", "VIEW", "COMPONENT"]);
+
+/**
+ * Score do candidato a centro do ego. Um bom centro FANA PRA FORA (mostra o que
+ * chama) e é um ponto de entrada — não um hub de infraestrutura (logger/util),
+ * que só recebe arestas e não ensina nada quando vira o meio do diagrama.
+ */
+export function centerScore(n: ProofNode): number {
+  let s = n.outDegree * 2 + n.inDegree;
+  if (ENTRY_TYPES.has(n.type)) s += 100;
+  if (n.runtimeHot) s += 60;
+  // hub de infra puro (muito dependido, quase não chama ninguém): péssimo centro.
+  if (n.outDegree <= 1 && n.inDegree >= 20) s -= 500;
+  return s;
 }
 
 /**
- * Centro default: o nó de maior inDegree (o mais "dependido" do sistema).
- * Empate desempatado por id (determinístico). Grafo vazio → null.
+ * Centro default: o nó de MAIOR score (ponto de entrada com fan-out, não o
+ * sink mais dependido). Empate desempatado por id (determinístico). Vazio → null.
  */
 export function defaultCenterId(nodes: readonly ProofNode[]): string | null {
   let best: ProofNode | null = null;
+  let bestScore = -Infinity;
   for (const n of nodes) {
-    if (!best || n.inDegree > best.inDegree || (n.inDegree === best.inDegree && n.id < best.id)) {
+    const s = centerScore(n);
+    if (s > bestScore || (s === bestScore && best !== null && n.id < best.id)) {
       best = n;
+      bestScore = s;
     }
   }
   return best ? best.id : null;
@@ -247,7 +268,7 @@ export interface EdgeReceipt {
 
 function endpointOf(id: string, byId: Map<string, ProofNode>): ReceiptEndpoint {
   const n = byId.get(id);
-  if (!n) return { id, label: id.split(":").pop() || id };
+  if (!n) return { id, label: humanLabel({ id }) };
   return {
     id,
     label: proofLabel(n),

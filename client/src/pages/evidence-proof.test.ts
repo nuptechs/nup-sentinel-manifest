@@ -34,9 +34,19 @@ function graph(): ProofGraph {
   };
 }
 
-describe("defaultCenterId — o nó mais 'dependido'", () => {
-  it("escolhe o maior inDegree", () => {
+describe("defaultCenterId — ponto de entrada com fan-out, não o sink de infra", () => {
+  it("escolhe um bom centro (entry com fan-out) em vez do sink mais dependido", () => {
     expect(defaultCenterId(graph().nodes)).toBe("SERVICE:app.Hub");
+  });
+
+  it("NÃO centra num hub de infra (muito inDegree, ~zero outDegree) — o defeito do logger.ts", () => {
+    const nodes: ProofNode[] = [
+      // logger: dependidíssimo, mas não chama ninguém e não é entry → péssimo centro
+      { id: "UTIL:logger", type: "UTIL", methodName: "log", inDegree: 103, outDegree: 0 },
+      // controller modesto, mas é um ponto de entrada que fana pra fora
+      { id: "CONTROLLER:app.Api", type: "CONTROLLER", className: "Api", inDegree: 2, outDegree: 5 },
+    ];
+    expect(defaultCenterId(nodes)).toBe("CONTROLLER:app.Api");
   });
 
   it("empate desempata por id (determinístico); vazio → null", () => {
