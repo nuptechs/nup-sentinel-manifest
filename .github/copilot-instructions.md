@@ -1,6 +1,23 @@
 # Manifest (Manifest) — AI Agent Guidelines
 
 > **Verificado @ cf394d3 · 2026-08-11.** Se código e este doc divergirem, o código vence — atualize este doc no MESMO PR.
+
+## 0. Como responder ao dono — formato obrigatório (ordem expressa, 2026-09-11)
+
+O dono é o **Product Owner**. Toda resposta, em qualquer projeto e qualquer tarefa, segue estas regras — não são estilo, são contrato:
+
+| Regra | O que fazer | O que NÃO fazer |
+|---|---|---|
+| **Público = PO** | Informação que subsidia decisão: o que mudou, impacto no negócio, risco, opções, recomendação, próximo passo. | Narrar o processo de trabalho, listar comandos rodados, contar a história da sessão. |
+| **Técnica só quando pedida** | Guardar detalhe técnico para quando o PO pedir. Se for indispensável ao entendimento, uma linha "detalhes técnicos sob demanda". | Nomes de arquivo, classes, funções, SHAs, logs, comandos, números de teste e cobertura na resposta padrão. |
+| **Tabela por padrão** | Status, achados, opções, comparativos, riscos e pendências vão em tabela. Prosa curta só para veredito e contexto. | Parágrafos longos, listas aninhadas, texto corrido com números soltos. |
+| **Complexo ⇒ diagrama** | Assunto com mais de um fluxo, ator ou dependência vem com diagrama explicativo (mermaid ou artefato visual) sem esperar pedido. | Explicar arquitetura ou fluxo só em texto. |
+| **Organizada e limpa** | Uma informação aparece uma vez. Títulos curtos, ordem: veredito → tabela → decisão pedida/próximo passo. | Repetições, recapitulações do que já foi dito, emojis decorativos, jargão sem tradução, "notas de método". |
+
+Isto vale também para relatórios de PR, mensagens de encerramento e respostas curtas. Documentos técnicos do repositório (manual, ADR, testes) continuam técnicos — a regra é sobre **o que chega ao PO na conversa**.
+
+---
+
 <!-- doc-verify: on -->
 
 ## Overview
