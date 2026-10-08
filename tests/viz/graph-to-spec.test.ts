@@ -14,6 +14,9 @@ import {
   graphNodesByType,
   graphNodesByLayer,
   graphTopHubs,
+  graphHotPaths,
+  telemetrySeriesSpec,
+  graphToFlowchartSpec,
   qualityByFamilySpec,
   adaptToValidation,
   type GraphPayloadLike,
@@ -21,10 +24,15 @@ import {
 
 const SAMPLE: GraphPayloadLike = {
   nodes: [
-    { id: "a", type: "CONTROLLER", inDegree: 2, layer: "web" },
-    { id: "b", type: "SERVICE", inDegree: 5, layer: "domain" },
+    { id: "a", type: "CONTROLLER", inDegree: 2, outDegree: 3, layer: "web" },
+    { id: "b", type: "SERVICE", inDegree: 5, outDegree: 1, layer: "domain" },
     { id: "c", type: "SERVICE", inDegree: 0, layer: "domain" },
     { id: "d", type: "REPOSITORY", inDegree: 3, layer: "data" },
+  ],
+  edges: [
+    { from: "a", to: "b", weight: 120, label: "chama" },
+    { from: "b", to: "d", weight: 40 },
+    { from: "a", to: "d", weight: 5 },
   ],
   counts: { byType: { CONTROLLER: 1, SERVICE: 2, REPOSITORY: 1 } },
   byLayer: { web: 1, domain: 2, data: 1 },
@@ -124,5 +132,53 @@ describe("graph-to-spec — adaptadores puros", () => {
     const res = adaptToValidation(() => graphTopHubs(SAMPLE, 3), "alt");
     assert.equal(res.outcome, "ok");
     assert.equal(res.spec?.title, "Top 3 hubs (grau de entrada)");
+  });
+});
+
+describe("graph-to-spec — novos tipos de entrada (robustez I02)", () => {
+  it("graphHotPaths ranqueia arestas por peso, rótulo origem→destino", () => {
+    const spec = graphHotPaths(SAMPLE, 2);
+    assert.equal(spec.source, "system-graph:edges.weight");
+    assert.equal(spec.data.length, 2);
+    assert.equal(spec.data[0].value, 120);
+    assert.match(String(spec.data[0].label), /a → b/);
+    assert.equal(validateVisualSpec("chart", spec, "x").outcome, "ok");
+  });
+
+  it("graphHotPaths sem arestas → placeholder válido", () => {
+    const spec = graphHotPaths({ nodes: [] });
+    assert.doesNotThrow(() => chartSpecSchema.parse(spec));
+    assert.equal(spec.data.length, 1);
+  });
+
+  it("telemetrySeriesSpec agrupa por série e ordena por instante", () => {
+    const spec = telemetrySeriesSpec([
+      { at: "2026-01-01T00:00:00Z", value: 10, series: "cpu" },
+      { at: "2026-01-01T00:00:00Z", value: 2, series: "err" },
+      { at: "2026-01-01T00:01:00Z", value: 20, series: "cpu" },
+    ]);
+    assert.equal(spec.type, "line");
+    assert.deepEqual(spec.dataKeys.sort(), ["cpu", "err"]);
+    assert.equal(spec.data.length, 2, "dois instantes distintos");
+    assert.equal((spec.data[1] as Record<string, number>).cpu, 20);
+    assert.equal(validateVisualSpec("chart", spec, "x").outcome, "ok");
+  });
+
+  it("telemetrySeriesSpec vazio → placeholder válido", () => {
+    const spec = telemetrySeriesSpec([]);
+    assert.doesNotThrow(() => chartSpecSchema.parse(spec));
+  });
+
+  it("graphToFlowchartSpec faz ponte grafo→diagrama (I02→I09), anti-hairball", () => {
+    const spec = graphToFlowchartSpec(SAMPLE, 3);
+    assert.equal(spec.kind, "flowchart");
+    assert.equal(spec.nodes.length, 3, "limita aos 3 maiores hubs");
+    // só mantém arestas entre nós mantidos
+    for (const e of spec.edges) {
+      assert.ok(spec.nodes.some((n) => n.id === e.from));
+      assert.ok(spec.nodes.some((n) => n.id === e.to));
+    }
+    // shape derivado do tipo
+    assert.equal(spec.nodes.find((n) => n.id === "a")?.shape, "stadium");
   });
 });

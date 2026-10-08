@@ -11,7 +11,14 @@
  * importamos aquele tipo (vive inline no componente); declaramos a FORMA mínima
  * que consumimos, para o adaptador não acoplar à UI.
  */
-import { chartSpecSchema, type ChartSpec, type VisualValidation, validateVisualSpec } from "./visual-spec";
+import {
+  chartSpecSchema,
+  flowchartSpecSchema,
+  type ChartSpec,
+  type FlowchartSpec,
+  type VisualValidation,
+  validateVisualSpec,
+} from "./visual-spec";
 
 /* Forma mínima consumida do grafo (subconjunto de GraphPayload). */
 export interface GraphNodeLike {
@@ -20,9 +27,18 @@ export interface GraphNodeLike {
   inDegree?: number;
   outDegree?: number;
   layer?: string;
+  label?: string;
+}
+export interface GraphEdgeLike {
+  from: string;
+  to: string;
+  /** peso/frequência da aresta (nº de chamadas, bytes, latência agregada…). */
+  weight?: number;
+  label?: string;
 }
 export interface GraphPayloadLike {
   nodes: GraphNodeLike[];
+  edges?: GraphEdgeLike[];
   counts?: { byType?: Record<string, number> };
   byLayer?: Record<string, number>;
 }
@@ -131,6 +147,99 @@ export function qualityByFamilySpec(rows: FamilyQualityRow[]): ChartSpec {
     source: "visual-telemetry:quality-by-family",
     format: "integer",
   });
+}
+
+/**
+ * Grafo → HOT PATHS: as arestas mais pesadas (mais chamadas/tráfego). Barra
+ * horizontal rotulada "origem → destino". Entrada é o conjunto de ARESTAS, não
+ * só o censo de nós — robustez de I02 (mais tipos de entrada).
+ */
+export function graphHotPaths(payload: GraphPayloadLike, topN = 10): ChartSpec {
+  const data = (payload.edges || [])
+    .map((e) => ({ label: `${e.label ? e.label + ": " : ""}${e.from} → ${e.to}`, value: Number(e.weight ?? 0) }))
+    .filter((d) => d.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, Math.max(1, topN));
+  return chartSpecSchema.parse({
+    type: "horizontalBar",
+    title: `Top ${Math.max(1, topN)} caminhos quentes`,
+    dataKeys: ["value"],
+    data: data.length > 0 ? data : [{ label: "(sem arestas com peso)", value: 0 }],
+    source: "system-graph:edges.weight",
+    format: "integer",
+  });
+}
+
+/** Um ponto de série temporal: instante ISO + valor (+ nome de série opcional). */
+export interface SeriesPoint {
+  at: string;
+  value: number;
+  series?: string;
+}
+
+/**
+ * Telemetria → SÉRIE TEMPORAL (linha). Agrupa pontos por `series` e usa o
+ * instante como rótulo do eixo. Robustez de I02: aceita métrica ao vivo do
+ * modelo, não só o censo do grafo. (Dashboards vivos = OBS-I07, bloqueado por
+ * infra; aqui entregamos a transformação pura `pontos → spec`.)
+ */
+export function telemetrySeriesSpec(points: SeriesPoint[], title = "Série temporal"): ChartSpec {
+  const seriesNames = Array.from(new Set((points || []).map((p) => p.series || "valor")));
+  const byInstant = new Map<string, Record<string, number>>();
+  for (const p of points || []) {
+    if (!Number.isFinite(p.value)) continue;
+    const row = byInstant.get(p.at) || {};
+    row[p.series || "valor"] = p.value;
+    byInstant.set(p.at, row);
+  }
+  const data = Array.from(byInstant.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([at, vals]) => {
+      const row: Record<string, number | string> = { label: at };
+      for (const name of seriesNames) row[name] = Number(vals[name] ?? 0);
+      return row;
+    });
+  return chartSpecSchema.parse({
+    type: "line",
+    title,
+    dataKeys: seriesNames.length > 0 ? seriesNames : ["valor"],
+    data: data.length > 0 ? data : [{ label: "(sem pontos)", valor: 0 }],
+    source: "telemetry:series",
+    format: "number",
+  });
+}
+
+/**
+ * Grafo → FLOWCHART declarativo (ponte I02 → I09): converte nós/arestas do grafo
+ * de sistema numa `FlowchartSpec` que o `diagram-compiler` transforma em Mermaid.
+ * Limita o tamanho (anti-hairball) usando os `maxNodes` hubs de maior grau.
+ */
+export function graphToFlowchartSpec(payload: GraphPayloadLike, maxNodes = 40): FlowchartSpec {
+  const ranked = [...(payload.nodes || [])].sort(
+    (a, b) => Number(b.inDegree ?? 0) + Number(b.outDegree ?? 0) - (Number(a.inDegree ?? 0) + Number(a.outDegree ?? 0)),
+  );
+  const kept = ranked.slice(0, Math.max(1, maxNodes));
+  const keptIds = new Set(kept.map((n) => n.id));
+  const nodes = kept.map((n) => ({ id: n.id, label: n.label || n.id, shape: shapeForType(n.type) }));
+  const edges = (payload.edges || [])
+    .filter((e) => keptIds.has(e.from) && keptIds.has(e.to))
+    .map((e) => ({ from: e.from, to: e.to, ...(e.label ? { label: e.label } : {}) }));
+  return flowchartSpecSchema.parse({
+    kind: "flowchart",
+    title: "Grafo de sistema",
+    direction: "LR",
+    nodes,
+    edges,
+    source: "system-graph:nodes+edges",
+  });
+}
+
+function shapeForType(type: string): "box" | "round" | "stadium" | "cylinder" | "diamond" {
+  const t = (type || "").toUpperCase();
+  if (t.includes("CONTROLLER") || t.includes("ENTRY") || t.includes("ROUTE")) return "stadium";
+  if (t.includes("REPOSITORY") || t.includes("DB") || t.includes("TABLE") || t.includes("ENTITY")) return "cylinder";
+  if (t.includes("SERVICE") || t.includes("USECASE")) return "round";
+  return "box";
 }
 
 /**
