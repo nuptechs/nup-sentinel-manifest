@@ -40,6 +40,51 @@ describe("applyPersistedOverlays — gated", () => {
   });
 });
 
+// OBS-D01 — o produtor dataAccess (função→tabela física) LIGADO ponta-a-ponta
+// pela porta de leitura. O merge já existe (data-access-aggregate); o que faltava
+// era a PROVA de que o overlay compartilhado o aciona a partir de
+// `scipEdges.dataAccess` — o caminho que /graph, /bimr e o reasoner usam.
+describe("applyPersistedOverlays — data-access liga função→tabela física (OBS-D01)", () => {
+  const fnSym = "scip-typescript npm . . `server/services/contract.service.ts`/ContractService#create().";
+  const tableSym = "scip-typescript npm . . `shared/schema/contract.ts`/contract.";
+  const withModule: RawSystemGraph = {
+    nodes: [
+      { id: "node:server/services/contract.service.ts", type: "MODULE", className: "contract.service", metadata: { sourceFile: "server/services/contract.service.ts" } },
+    ],
+    edges: [],
+  };
+
+  it("materializa table:<físico> e expõe dataAccessStats pela porta de leitura", async () => {
+    const r = await applyPersistedOverlays(
+      withModule,
+      {
+        scipEdges: {
+          dataAccess: [
+            { from: fnSym, to: tableSym, access: "write", fromFile: "server/services/contract.service.ts", toFile: "shared/schema/contract.ts" },
+          ],
+        },
+      } as never,
+      silent,
+    );
+    assert.ok(r.dataAccessStats, "estatística do merge data-access presente");
+    assert.equal((r.dataAccessStats as any).edgesAdded, 1);
+    assert.equal((r.dataAccessStats as any).tableNodesMinted, 1);
+    // o nó de tabela FÍSICA foi materializado no grafo servido
+    assert.ok(r.graph.nodes.some((n) => n.id === "table:contract"), "table:contract materializada");
+    // e vira STATIC_PROVEN no censo epistêmico (resolution:compiler)
+    const shaped = shapeSystemGraph(r.graph);
+    assert.ok(
+      (shaped.coverage.edges.byMethod.STATIC_PROVEN || 0) >= 1,
+      `esperava ≥1 STATIC_PROVEN, veio ${JSON.stringify(shaped.coverage.edges.byMethod)}`,
+    );
+  });
+
+  it("dataAccess ausente → nenhuma estatística (byte-a-byte)", async () => {
+    const r = await applyPersistedOverlays(withModule, { scipEdges: { edges: [] } } as never, silent);
+    assert.equal(r.dataAccessStats, undefined);
+  });
+});
+
 describe("applyPersistedOverlays — merge de config vira CONFIG_PROVEN no censo", () => {
   it("aresta de DI provada entra classificada", async () => {
     const r = await applyPersistedOverlays(
