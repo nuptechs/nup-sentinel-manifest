@@ -91,3 +91,70 @@ describe("Opção A — mergeDataAccessEdges", () => {
     assert.equal(stats.edgesAdded, 1);
   });
 });
+
+// ── OBS-D01 — granularidade de FUNÇÃO (função→tabela física) ──
+describe("OBS-D01 — granularity:'function' (função→tabela física)", () => {
+  it("origem é o sub-nó `<módulo>::<fn>` materializado, não o módulo cru", () => {
+    const g = graphWithModule();
+    const { graph, stats } = mergeDataAccessEdges(
+      g,
+      [{ from: fnSym, to: tableSym, access: "write", fromFile: "server/services/contract.service.ts", toFile: "shared/schema/contract.ts" }],
+      { granularity: "function" },
+    );
+    const subId = "node:server/services/contract.service.ts::ContractService#create";
+    assert.equal(stats.functionNodesMinted, 1, "sub-nó de função materializado");
+    assert.ok(graph.nodes.some((n) => n.id === subId), "sub-nó existe no grafo");
+    const sub = graph.nodes.find((n) => n.id === subId)!;
+    assert.equal((sub.metadata as any).parentModule, "node:server/services/contract.service.ts");
+    assert.equal((sub.metadata as any).dataProven, true);
+    // a aresta WRITES parte da FUNÇÃO, não do módulo
+    const e = graph.edges.find((x) => x.relationType === "WRITES_ENTITY")!;
+    assert.equal(e.fromNode, subId);
+    assert.equal(e.toNode, "table:contract");
+    assert.equal((e.metadata as any).resolution, "compiler");
+    // o nó table:<físico> provado materializa (critério de aceite do OBS-D01)
+    assert.ok(graph.nodes.some((n) => n.id === "table:contract"));
+  });
+
+  it("default (file) permanece byte-a-byte: origem é o módulo, zero sub-nós", () => {
+    const g = graphWithModule();
+    const { graph, stats } = mergeDataAccessEdges(g, [
+      { from: fnSym, to: tableSym, access: "write", fromFile: "server/services/contract.service.ts", toFile: "shared/schema/contract.ts" },
+    ]);
+    assert.equal(stats.functionNodesMinted, 0);
+    const e = graph.edges.find((x) => x.relationType === "WRITES_ENTITY")!;
+    assert.equal(e.fromNode, "node:server/services/contract.service.ts");
+  });
+
+  it("função não-resolvível (símbolo só-módulo) cai p/ granularidade de arquivo (honesto)", () => {
+    const moduleSym = "scip-typescript npm . . `server/services/contract.service.ts`/"; // sem função
+    const g = graphWithModule();
+    const { graph, stats } = mergeDataAccessEdges(
+      g,
+      [{ from: moduleSym, to: tableSym, access: "read", fromFile: "server/services/contract.service.ts", toFile: "shared/schema/contract.ts" }],
+      { granularity: "function" },
+    );
+    assert.equal(stats.functionNodesMinted, 0, "sem função → não materializa sub-nó");
+    const e = graph.edges.find((x) => x.relationType === "READS_ENTITY")!;
+    assert.equal(e.fromNode, "node:server/services/contract.service.ts");
+  });
+
+  it("duas funções do MESMO módulo tocando a tabela → 2 sub-nós, 2 arestas", () => {
+    const create = "scip-typescript npm . . `server/services/contract.service.ts`/ContractService#create().";
+    const update = "scip-typescript npm . . `server/services/contract.service.ts`/ContractService#update().";
+    const g = graphWithModule();
+    const { graph, stats } = mergeDataAccessEdges(
+      g,
+      [
+        { from: create, to: tableSym, access: "write", fromFile: "server/services/contract.service.ts", toFile: "shared/schema/contract.ts" },
+        { from: update, to: tableSym, access: "write", fromFile: "server/services/contract.service.ts", toFile: "shared/schema/contract.ts" },
+      ],
+      { granularity: "function" },
+    );
+    assert.equal(stats.functionNodesMinted, 2);
+    assert.equal(stats.edgesAdded, 2);
+    // o módulo pai é creditável pelo rollup `::` do reasoner (uma função com dado = módulo vivo)
+    assert.ok(graph.nodes.some((n) => n.id === "node:server/services/contract.service.ts::ContractService#create"));
+    assert.ok(graph.nodes.some((n) => n.id === "node:server/services/contract.service.ts::ContractService#update"));
+  });
+});
