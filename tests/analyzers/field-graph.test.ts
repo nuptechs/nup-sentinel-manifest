@@ -9,6 +9,7 @@ import {
   makeFieldNode,
   hasFieldEdge,
   mapsToColumnEdge,
+  mergeFieldGraph,
 } from "../../server/analyzers/field-graph";
 import { shapeSystemGraph, type RawSystemGraph } from "../../server/analyzers/system-graph";
 
@@ -83,5 +84,71 @@ describe("field-graph — convive com o shape existente (não quebra o censo)", 
     const fieldShaped = shaped.nodes.find((n) => n.id === field.id);
     assert.ok(fieldShaped, "nó FIELD presente no shape");
     assert.ok(fieldShaped!.evidence?.method, "nó FIELD tem evidence.method");
+  });
+});
+
+// ── OBS-D05 — produtor de campo (compõe o modelo num subgrafo mesclável) ──
+describe("mergeFieldGraph — produtor puro, honesto e inerte", () => {
+  const baseGraph = (): RawSystemGraph => ({
+    nodes: [
+      { id: "VIEW:Form", type: "VIEW", className: "Form", metadata: {} },
+      { id: "table:contract", type: "ENTITY", className: "contract", metadata: {} },
+    ],
+    edges: [],
+  });
+
+  it("emite FIELD + HAS_FIELD; MAPS_TO_COLUMN quando a coluna é dada", () => {
+    const { graph, stats } = mergeFieldGraph(baseGraph(), [
+      { owner: "VIEW:Form", name: "cnpj", kind: "view", mapsToColumn: "table:contract" },
+    ]);
+    assert.equal(stats.fieldNodesAdded, 1);
+    assert.equal(stats.hasFieldEdges, 1);
+    assert.equal(stats.mapsToColumnEdges, 1);
+    const fid = fieldNodeId("VIEW:Form", "cnpj", "view");
+    assert.ok(graph.nodes.some((n) => n.id === fid));
+    assert.ok(graph.edges.some((e) => e.relationType === FIELD_REL.HAS_FIELD && e.fromNode === "VIEW:Form" && e.toNode === fid));
+    assert.ok(graph.edges.some((e) => e.relationType === FIELD_REL.MAPS_TO_COLUMN && e.fromNode === fid && e.toNode === "table:contract"));
+  });
+
+  it("owner inexistente no grafo → NÃO cria campo flutuante (honesto, contado)", () => {
+    const { graph, stats } = mergeFieldGraph(baseGraph(), [
+      { owner: "VIEW:Fantasma", name: "x", kind: "view" },
+    ]);
+    assert.equal(stats.fieldOwnerUnresolved, 1);
+    assert.equal(stats.fieldNodesAdded, 0);
+    assert.equal(graph.nodes.filter((n) => n.type === FIELD_NODE_TYPE).length, 0);
+  });
+
+  it("allowMintTableOwner minta `table:<x>` ausente p/ coluna física", () => {
+    const g: RawSystemGraph = { nodes: [], edges: [] };
+    const { graph, stats } = mergeFieldGraph(g, [{ owner: "table:person", name: "cpf", kind: "column" }], { allowMintTableOwner: true });
+    assert.equal(stats.fieldNodesAdded, 1);
+    assert.ok(graph.nodes.some((n) => n.id === "table:person" && n.type === "ENTITY"));
+  });
+
+  it("dedup: campo repetido não duplica nó nem aresta", () => {
+    const decls = [
+      { owner: "VIEW:Form", name: "cnpj", kind: "view" as const },
+      { owner: "VIEW:Form", name: "cnpj", kind: "view" as const },
+    ];
+    const { stats } = mergeFieldGraph(baseGraph(), decls);
+    assert.equal(stats.fieldNodesAdded, 1);
+    assert.equal(stats.hasFieldEdges, 1);
+  });
+
+  it("payload vazio/ausente → no-op byte-a-byte", () => {
+    const g = baseGraph();
+    const r1 = mergeFieldGraph(g, []);
+    assert.equal(r1.graph.nodes.length, g.nodes.length);
+    assert.equal(r1.graph.edges.length, 0);
+    const r2 = mergeFieldGraph(g, null);
+    assert.equal(r2.graph.nodes.length, g.nodes.length);
+  });
+
+  it("não muta o snapshot de entrada (puro)", () => {
+    const g = baseGraph();
+    const nodesBefore = g.nodes.length;
+    mergeFieldGraph(g, [{ owner: "VIEW:Form", name: "cnpj", kind: "view" }]);
+    assert.equal(g.nodes.length, nodesBefore, "grafo de entrada intacto");
   });
 });

@@ -137,3 +137,106 @@ export function mapsToColumnEdge(
 ): RawSystemEdge {
   return { fromNode: fieldId, toNode: columnId, relationType: FIELD_REL.MAPS_TO_COLUMN, metadata: { resolution } };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// PRODUTOR de campo (OBS-D05) — compõe o modelo acima num subgrafo mesclável.
+//
+// Dado um conjunto de DECLARAÇÕES de campo (owner + nome + kind, opcionalmente a
+// coluna física que o campo materializa), emite os nós FIELD e as arestas
+// HAS_FIELD/MAPS_TO_COLUMN, deduplicados, com estatística HONESTA:
+//   • owner que NÃO existe no grafo → NÃO cria campo flutuante (fieldOwnerUnresolved);
+//     o campo só entra ligado a um dono real (mesma regra do data-access: sem nó, não
+//     atribui). A exceção são colunas físicas cujo owner é `table:<x>`, que pode ser
+//     mintado pelo próprio eixo de dado — por isso `allowMintTableOwner` (default off).
+//   • dedup por id de nó e por tripla de aresta.
+//
+// INERTE por construção: nenhum pipeline chama isto ainda (F03/F05 vão), então o
+// grafo servido continua byte-a-byte. PURO: clona, nunca muta o snapshot, nunca lança.
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface FieldDecl extends FieldNodeSpec {
+  /** se o campo materializa uma coluna física, o id do nó-coluna/tabela destino. */
+  mapsToColumn?: string;
+  /** método de resolução p/ as arestas (default `convention-name`). */
+  resolution?: string;
+}
+
+export interface FieldGraphStats {
+  received: number;
+  fieldNodesAdded: number;
+  hasFieldEdges: number;
+  mapsToColumnEdges: number;
+  /** owner declarado sem nó no grafo → campo não atribuído (honesto). */
+  fieldOwnerUnresolved: number;
+}
+
+interface MinimalGraph {
+  nodes: RawSystemNode[];
+  edges: RawSystemEdge[];
+}
+
+export interface MergeFieldGraphOptions {
+  /** permite mintar o owner `table:<x>` quando ausente (eixo de coluna física). */
+  allowMintTableOwner?: boolean;
+}
+
+/**
+ * Mescla declarações de campo como nós FIELD + arestas. PURO: clona o grafo (não
+ * muta o snapshot). Fail-soft por declaração. Owner inexistente → não atribui.
+ */
+export function mergeFieldGraph<G extends MinimalGraph>(
+  rawGraph: G | null | undefined,
+  decls: FieldDecl[] | null | undefined,
+  opts: MergeFieldGraphOptions = {},
+): { graph: G; stats: FieldGraphStats } {
+  const zero: FieldGraphStats = { received: 0, fieldNodesAdded: 0, hasFieldEdges: 0, mapsToColumnEdges: 0, fieldOwnerUnresolved: 0 };
+  if (!rawGraph || !Array.isArray(rawGraph.nodes) || !Array.isArray(rawGraph.edges)) return { graph: rawGraph as G, stats: zero };
+  if (!Array.isArray(decls) || decls.length === 0) return { graph: rawGraph, stats: { ...zero } };
+
+  const graph = { ...rawGraph, nodes: rawGraph.nodes.slice(), edges: rawGraph.edges.slice() } as G;
+  const existingIds = new Set(graph.nodes.map((n) => n.id));
+  const seenEdge = new Set<string>();
+  for (const e of graph.edges) seenEdge.add(`${e.fromNode}|${e.toNode}|${e.relationType}`);
+
+  const stats: FieldGraphStats = { received: decls.length, fieldNodesAdded: 0, hasFieldEdges: 0, mapsToColumnEdges: 0, fieldOwnerUnresolved: 0 };
+
+  const addEdge = (e: RawSystemEdge): boolean => {
+    const key = `${e.fromNode}|${e.toNode}|${e.relationType}`;
+    if (seenEdge.has(key)) return false;
+    seenEdge.add(key);
+    graph.edges.push(e);
+    return true;
+  };
+
+  for (const d of decls) {
+    if (!d || typeof d.owner !== "string" || !d.owner || typeof d.name !== "string" || !d.name) continue;
+    if (d.kind !== "view" && d.kind !== "dto" && d.kind !== "column") continue;
+
+    // HONESTO: só liga o campo a um dono que EXISTE no grafo (sem nó → não atribui).
+    // Exceção opt-in: coluna física cujo owner `table:<x>` pode ser mintado aqui.
+    if (!existingIds.has(d.owner)) {
+      if (opts.allowMintTableOwner && d.owner.startsWith("table:")) {
+        const ownerNode: RawSystemNode = { id: d.owner, type: "ENTITY", className: d.owner.slice("table:".length), metadata: { materializedFrom: "field-graph" } };
+        graph.nodes.push(ownerNode);
+        existingIds.add(d.owner);
+      } else {
+        stats.fieldOwnerUnresolved++;
+        continue;
+      }
+    }
+
+    const fieldId = fieldNodeId(d.owner, d.name, d.kind);
+    if (!existingIds.has(fieldId)) {
+      graph.nodes.push(makeFieldNode(d));
+      existingIds.add(fieldId);
+      stats.fieldNodesAdded++;
+    }
+    if (addEdge(hasFieldEdge(d.owner, d, d.resolution))) stats.hasFieldEdges++;
+
+    if (typeof d.mapsToColumn === "string" && d.mapsToColumn) {
+      if (addEdge(mapsToColumnEdge(fieldId, d.mapsToColumn, d.resolution))) stats.mapsToColumnEdges++;
+    }
+  }
+
+  return { graph, stats };
+}

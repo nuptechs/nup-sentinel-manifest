@@ -82,5 +82,69 @@ describe("findOrphanSurfaces — com wiring presente, acusa só a sem montagem",
 
   it("DEFAULT_WIRING_RELATIONS exporta as relações esperadas", () => {
     assert.ok(DEFAULT_WIRING_RELATIONS.has("HANDLES_ROUTE"));
+    assert.ok(DEFAULT_WIRING_RELATIONS.has("ROUTES_TO"));
+    assert.ok(DEFAULT_WIRING_RELATIONS.has("MOUNTS"));
+    assert.ok(DEFAULT_WIRING_RELATIONS.has("RENDERS_VIEW"));
+  });
+});
+
+// ── OBS-E01 — pronto para acender quando D03 existir (contrato travado) ──
+describe("findOrphanSurfaces — pronto p/ D03: cobre VIEW, runtime-por-evidência e ordenação", () => {
+  it("VIEW órfã (RENDERS_VIEW monta uma, outra não) → só a sem montagem é candidata", () => {
+    const raw: RawSystemGraph = {
+      nodes: [
+        { id: "ROUTER:fe", type: "SERVICE", className: "feRouter", metadata: {} },
+        { id: "VIEW:Dashboard", type: "VIEW", className: "Dashboard", metadata: {} }, // montada
+        { id: "VIEW:Legacy", type: "VIEW", className: "Legacy", metadata: {} }, // ÓRFÃ
+      ],
+      edges: [{ fromNode: "ROUTER:fe", toNode: "VIEW:Dashboard", relationType: "RENDERS_VIEW", metadata: {} }],
+    };
+    const r = findOrphanSurfaces(shaped(raw));
+    assert.deepEqual(r.candidates.map((c) => c.nodeId), ["VIEW:Legacy"]);
+    assert.equal(r.excluded.wired, 1);
+  });
+
+  it("ROUTE exercitada em runtime (runtimeHot) é excluída mesmo sem wiring", () => {
+    const raw: RawSystemGraph = {
+      nodes: [
+        { id: "ROUTER:app", type: "SERVICE", className: "appRouter", metadata: {} },
+        { id: "ROUTE:/a", type: "ROUTE", className: "a", metadata: {} }, // montada p/ marcar wiringPresent
+        { id: "ROUTE:/hot", type: "ROUTE", className: "hot", metadata: { runtimeHot: true } },
+      ],
+      edges: [{ fromNode: "ROUTER:app", toNode: "ROUTE:/a", relationType: "HANDLES_ROUTE", metadata: {} }],
+    };
+    const r = findOrphanSurfaces(shaped(raw));
+    assert.equal(r.candidates.length, 0, "a quente não é órfã; a montada tem wiring");
+    assert.equal(r.excluded.runtimeObserved, 1);
+  });
+
+  it("múltiplas órfãs vêm ordenadas de forma estável (tipo, depois label)", () => {
+    const raw: RawSystemGraph = {
+      nodes: [
+        { id: "ROUTER:app", type: "SERVICE", className: "appRouter", metadata: {} },
+        { id: "ROUTE:/mounted", type: "ROUTE", className: "mounted", metadata: {} },
+        { id: "ROUTE:/zeta", type: "ROUTE", className: "zeta", metadata: {} },
+        { id: "CONTROLLER:Beta", type: "CONTROLLER", className: "Beta", metadata: {} },
+      ],
+      edges: [{ fromNode: "ROUTER:app", toNode: "ROUTE:/mounted", relationType: "HANDLES_ROUTE", metadata: {} }],
+    };
+    const r = findOrphanSurfaces(shaped(raw));
+    // CONTROLLER antes de ROUTE (localeCompare de tipo); confiança igual (0.6)
+    assert.deepEqual(r.candidates.map((c) => c.nodeId), ["CONTROLLER:Beta", "ROUTE:/zeta"]);
+    assert.ok(r.candidates.every((c) => c.confidence < 1));
+  });
+
+  it("wiringRelations VAZIO cai de volta ao default (não zera a detecção)", () => {
+    const raw: RawSystemGraph = {
+      nodes: [
+        { id: "ROUTER:app", type: "SERVICE", className: "appRouter", metadata: {} },
+        { id: "ROUTE:/a", type: "ROUTE", className: "a", metadata: {} },
+        { id: "ROUTE:/b", type: "ROUTE", className: "b", metadata: {} },
+      ],
+      edges: [{ fromNode: "ROUTER:app", toNode: "ROUTE:/a", relationType: "HANDLES_ROUTE", metadata: {} }],
+    };
+    const r = findOrphanSurfaces(shaped(raw), { wiringRelations: new Set<string>() });
+    assert.equal(r.wiringPresent, true, "default aplicado pois o custom veio vazio");
+    assert.deepEqual(r.candidates.map((c) => c.nodeId), ["ROUTE:/b"]);
   });
 });
