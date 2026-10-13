@@ -598,7 +598,7 @@ Régua: nenhuma stack vira ✅ sem goldset medido em CI.
 | Variantes Node (pg cru / Fastify / NODE_API) | Onda 2 | ADR-0015 (governança no `nup-sentinel`) | ⚪ |
 | Next.js · Python (Flask/FastAPI) | Onda 3 — decisão pendente | ADR-0015 | ⚪ |
 | React Native · Kotlin Android · JS fora de convenção | Declarado fora de escopo | ADR-0015 | ⚪ |
-| Python (.py) / C# (.cs) | Aceitos pelo scanner, sem analisador dedicado | `server/analyzers/repository-scanner.ts:6` | ⚪ ingest-only |
+| Python (.py) / C# (.cs) | AST real **inerte** (OBS-D08): parse estrutural → símbolos + call-chain intra-arquivo; não fiado ao pipeline, sem goldset | `server/analyzers/backend-ast-python.ts:analyzePythonBackend` · `server/analyzers/backend-ast-dotnet.ts:analyzeDotnetBackend` | ◐ analyzer inerte |
 | Harness anti-regressão (G1/G2/G3) | Golden byte-a-byte + sensibilidade + canários Onda 1 | `tests/regression/mini-easynup.fixture.ts:1` | ✅ |
 | Flags multistack | `MANIFEST_MULTISTACK_NODE` (OFF) · `MANIFEST_MULTISTACK_HTTP_TEMPLATE` (AUTO) | `server/config/multistack.ts:readMultistackFlags` | ✅ |
 
@@ -658,6 +658,7 @@ Régua: nenhuma stack vira ✅ sem goldset medido em CI.
 | Node backend (domínio 5) | 🟦 atrás de `MANIFEST_MULTISTACK_NODE` (OFF); rest-express-template 🟦 AUTO |
 | Webhook GitHub sem secret | **não verifica assinatura** (HMAC só valida com `webhookSecret`) |
 | Diff/snapshots | só runs que têm snapshot (runs antigos → 404) |
-| Python/C# | aceitos pelo scanner, **sem analisador** (ingest-only) |
+| Python/C# | AST real **inerte** (OBS-D08): `server/analyzers/backend-ast-python.ts:analyzePythonBackend` / `server/analyzers/backend-ast-dotnet.ts:analyzeDotnetBackend` emitem símbolo+call-chain intra-arquivo (resolução `STATIC_UNRESOLVED`, não compiler-accurate); **não fiados** ao pipeline vivo (ingest-only no fluxo), provados por fixture |
+| Dead-code cross-language / Java-órfão | **inerte** (OBS-E03/E05): `server/analyzers/dead-code-cross-language.ts:findCrossLanguageDead` (morto front↔back; cego sem o produtor codelens/E04) e `server/analyzers/java-orphan.ts:findJavaOrphans` (órfão por call-graph do engine; cego sem arestas CALLS). Puros, compõem no tri-eixo (E06); codelens ausente em disco = lado JS/TS bloqueado |
 | Cron/agendamento | **não existe** — análise sempre sob demanda |
 | Cobertura de runtime | `observedRatio` não tende a 1.0 por construção (só fronteiras) — teto correto da técnica, não falha |
