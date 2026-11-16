@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "./db";
 import {
@@ -78,8 +78,49 @@ export async function ingestCodelensExtraction(
 
     if (!run) throw new Error("failed to create analysisRun for codelens-extraction");
 
-    const runId = run.id;
+    return await writeCodelensRows(tx, run.id, projectId, payload);
+  });
+}
 
+/**
+ * Persiste as 5 tabelas de lookup de um payload Codelens num analysisRun JÁ
+ * EXISTENTE (não cria run). É o caminho usado pela PIPELINE de análise, que
+ * escreve as rows de lookup no MESMO run do grafo/catálogo/segurança — assim o
+ * "último run" que o `/lookup` lê é coerente e NÃO há sombra entre leitores (o
+ * run do codelens não vira um run fantasma que esconde securityFindings, e o
+ * próximo /analyze não zera o /lookup). Ver ADR-044 + o produtor em
+ * `server/analyzers/frontend/codelens-extractor.ts`.
+ *
+ * Idempotente por-run: apaga as rows do run antes de reescrever.
+ */
+export async function persistCodelensForRun(
+  runId: number,
+  projectId: number,
+  payload: CodelensExtractionPayload,
+): Promise<IngestResult> {
+  assertSize(payload);
+  return await db.transaction(async (tx) => {
+    await tx.delete(manifestEntities).where(eq(manifestEntities.analysisRunId, runId));
+    await tx.delete(manifestPages).where(eq(manifestPages.analysisRunId, runId));
+    await tx.delete(manifestComposables).where(eq(manifestComposables.analysisRunId, runId));
+    await tx.delete(manifestRoutes).where(eq(manifestRoutes.analysisRunId, runId));
+    await tx.delete(manifestI18nKeys).where(eq(manifestI18nKeys.analysisRunId, runId));
+    return await writeCodelensRows(tx, runId, projectId, payload);
+  });
+}
+
+type CodelensTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Núcleo compartilhado: escreve as rows das 5 tabelas de lookup num `runId`
+ * dado, dentro de uma transação fornecida. Não cria run nem apaga rows.
+ */
+async function writeCodelensRows(
+  tx: CodelensTx,
+  runId: number,
+  projectId: number,
+  payload: CodelensExtractionPayload,
+): Promise<IngestResult> {
     let entityCount = 0;
     if (payload.entities.length) {
       await tx.insert(manifestEntities).values(
@@ -171,7 +212,6 @@ export async function ingestCodelensExtraction(
       routes: routeCount,
       i18nKeys: i18nCount,
     };
-  });
 }
 
 function assertSize(payload: CodelensExtractionPayload): void {
@@ -206,23 +246,33 @@ export interface LookupResult {
   matches: Array<ManifestEntity | ManifestPage | ManifestComposable | ManifestRoute | ManifestI18nKey>;
 }
 
+/**
+ * ID do ÚLTIMO run que REALMENTE tem rows deste tipo para o projeto. Keyar pelo
+ * dado (não pelo run "mais recente" cru) desacopla o lookup da ORDEM/STATUS dos
+ * runs: um /analyze em andamento, um run falho, ou um /analyze sem a extração
+ * Codelens NÃO zera mais o /lookup — ele devolve o último catálogo conhecido
+ * (o comportamento de "piso" que o próprio consumidor documenta). Também torna
+ * o caminho do curl (run próprio) robusto sem depender de same-run.
+ */
+async function latestRunIdWithRows(
+  table: typeof manifestEntities | typeof manifestPages | typeof manifestComposables | typeof manifestRoutes | typeof manifestI18nKeys,
+  projectId: number,
+): Promise<number | null> {
+  const [row] = await db
+    .select({ id: sql<number | null>`max(${table.analysisRunId})` })
+    .from(table)
+    .where(eq(table.projectId, projectId));
+  const id = row?.id;
+  return id === null || id === undefined ? null : Number(id);
+}
+
 export async function lookupManifest(query: LookupQuery): Promise<LookupResult> {
   const limit = Math.min(query.limit ?? 25, 100);
 
-  const latestRun = await db
-    .select({ id: analysisRuns.id })
-    .from(analysisRuns)
-    .where(eq(analysisRuns.projectId, query.projectId))
-    .orderBy(desc(analysisRuns.id))
-    .limit(1);
-
-  const runId = latestRun[0]?.id ?? null;
-  if (runId === null) {
-    return { type: query.type, analysisRunId: null, matches: [] };
-  }
-
   switch (query.type) {
     case "entity": {
+      const runId = await latestRunIdWithRows(manifestEntities, query.projectId);
+      if (runId === null) return { type: "entity", analysisRunId: null, matches: [] };
       const rows = await db
         .select()
         .from(manifestEntities)
@@ -236,6 +286,8 @@ export async function lookupManifest(query: LookupQuery): Promise<LookupResult> 
       return { type: "entity", analysisRunId: runId, matches: rows };
     }
     case "page": {
+      const runId = await latestRunIdWithRows(manifestPages, query.projectId);
+      if (runId === null) return { type: "page", analysisRunId: null, matches: [] };
       const rows = await db
         .select()
         .from(manifestPages)
@@ -249,6 +301,8 @@ export async function lookupManifest(query: LookupQuery): Promise<LookupResult> 
       return { type: "page", analysisRunId: runId, matches: rows };
     }
     case "composable": {
+      const runId = await latestRunIdWithRows(manifestComposables, query.projectId);
+      if (runId === null) return { type: "composable", analysisRunId: null, matches: [] };
       const rows = await db
         .select()
         .from(manifestComposables)
@@ -262,6 +316,8 @@ export async function lookupManifest(query: LookupQuery): Promise<LookupResult> 
       return { type: "composable", analysisRunId: runId, matches: rows };
     }
     case "route": {
+      const runId = await latestRunIdWithRows(manifestRoutes, query.projectId);
+      if (runId === null) return { type: "route", analysisRunId: null, matches: [] };
       const rows = await db
         .select()
         .from(manifestRoutes)
@@ -275,6 +331,8 @@ export async function lookupManifest(query: LookupQuery): Promise<LookupResult> 
       return { type: "route", analysisRunId: runId, matches: rows };
     }
     case "i18n": {
+      const runId = await latestRunIdWithRows(manifestI18nKeys, query.projectId);
+      if (runId === null) return { type: "i18n", analysisRunId: null, matches: [] };
       const rows = await db
         .select()
         .from(manifestI18nKeys)

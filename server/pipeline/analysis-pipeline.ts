@@ -24,6 +24,8 @@ import {
   extractGatewayPrefixes,
   mapInteractionsToGatewayPrefixes,
 } from "../analyzers/nuptechs-conventions";
+import { extractCodelens } from "../analyzers/frontend/codelens-extractor";
+import { persistCodelensForRun } from "../manifest-lookup";
 
 export interface FileData {
   filePath: string;
@@ -390,6 +392,14 @@ export class AnalysisPipeline {
       const graphSummary = appGraph.toJSON();
       diag.cacheStatus = backendReused && frontendReused ? "fully cached" : backendReused ? "backend cached" : frontendReused ? "frontend cached" : "full analysis";
       await this.finalize(analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length, appGraph, catalogEntryData, diag);
+      // ADR-044 — PRODUTOR do catálogo Codelens (rotas/páginas/composables/
+      // i18n/entidades) nas 5 tabelas de lookup, no MESMO run deste /analyze.
+      // Destrava a âncora tela→código do Sentinel (`/lookup?type=route`), que
+      // antes vinha 0 por falta de produtor. ADITIVO (só tabelas novas) e
+      // FAIL-SOFT: nunca derruba a análise. Gated por CODELENS_FRONTEND_EXTRACT
+      // (default ON; "false"/"off"/"0" desliga). Escrever no mesmo run evita a
+      // sombra entre leitores do "último run" (securityFindings/catálogo).
+      await this.extractCodelensCatalog(analysisRun.id, projectId, fileData);
       const savedGraph = await this.saveSnapshot(analysisRun.id, projectId, created, appGraph, endpointImpacts, fileData);
       // DIMENSÃO TEMPO — grava o censo epistêmico DESTE instante no próprio run.
       // Sem isto o histórico teria de ser recomputado do snapshot na leitura, e
@@ -892,6 +902,39 @@ export class AnalysisPipeline {
       ...(diagnostics ? { diagnostics } : {}),
     });
     await storage.updateProjectStatus(projectId, "completed");
+  }
+
+  /**
+   * ADR-044 — Produz o catálogo Codelens do FRONTEND (rotas vue-router,
+   * páginas .vue, composables, i18n) e o persiste nas 5 tabelas de lookup do
+   * MESMO analysisRun. Aditivo + fail-soft: nunca derruba a análise. Gated por
+   * CODELENS_FRONTEND_EXTRACT (default ON). No-op se não houver arquivos .vue
+   * (projeto só-backend).
+   */
+  private async extractCodelensCatalog(
+    analysisRunId: number,
+    projectId: number,
+    files: FileData[],
+  ): Promise<void> {
+    const flag = (process.env.CODELENS_FRONTEND_EXTRACT ?? "on").toLowerCase();
+    if (flag === "off" || flag === "false" || flag === "0") {
+      this.progress("Codelens", "extração de catálogo frontend DESLIGADA (CODELENS_FRONTEND_EXTRACT)");
+      return;
+    }
+    try {
+      const hasVue = files.some((f) => f.filePath.toLowerCase().endsWith(".vue"));
+      if (!hasVue) return; // projeto sem frontend Vue — nada a catalogar
+      const { payload, diagnostics } = extractCodelens(files);
+      const result = await persistCodelensForRun(analysisRunId, projectId, payload);
+      this.progress(
+        "Codelens",
+        `catálogo persistido (run ${analysisRunId}): ${result.routes} rotas (${diagnostics.routesWithComponentPath} c/ .vue), ${result.pages} páginas, ${result.composables} composables, ${result.i18nKeys} i18n`,
+      );
+    } catch (err) {
+      // fail-soft: a âncora ficar sem catálogo nunca pode derrubar o /analyze.
+      console.warn(`[codelens] fail-soft (análise segue sem catálogo de lookup): ${(err as Error).message}`);
+      this.progress("Codelens", `pulado (fail-soft): ${(err as Error).message}`);
+    }
   }
 
   private buildResult(
