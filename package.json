@@ -13,6 +13,7 @@
     "check": "tsc",
     "test": "tsx --test $(find tests -name '*.test.ts')",
     "test:schemathesis": "bash scripts/schemathesis-local.sh",
+    "codelens:extract": "tsx scripts/codelens-extract.ts",
     "db:push": "drizzle-kit push",
     "test:client": "vitest run",
     "doc:verify": "node scripts/doc-verify.mjs --root . --marked"
