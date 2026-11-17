@@ -122,6 +122,13 @@ const ROUTER_DECL_RE =
 const MOUNT_RE =
   /\b([A-Za-z_$][\w$]*)\s*\.\s*use\s*\(\s*['"`](\/[^'"`]*)['"`]\s*,\s*([A-Za-z_$][\w$]*)\s*\)/g;
 
+// `<var>.use(` — abre um middleware de router. Cobre tanto o MOUNT de um router
+// sob prefixo (tratado por MOUNT_RE) quanto o GUARD de mount `router.use(requireX)`
+// — este último aplica autorização às rotas SEGUINTES do mesmo router. Os args
+// são lidos por varredura balanceada; só vira guard de mount se extractPermission
+// reconhecer um guard neles (um mount de router não tem guard → é ignorado aqui).
+const USE_OPEN_RE = /\b([A-Za-z_$][\w$]*)\s*\.\s*use\s*\(/g;
+
 // `<var>.<verbo>('<path>'` — abre o callsite de uma rota. Os argumentos
 // (middleware + handler) são lidos por varredura balanceada a partir do `(`.
 const ROUTE_OPEN_RE =
@@ -394,6 +401,24 @@ export function extractExpressRoutes(
       if (!mountPrefix.has(mounted)) mountPrefix.set(mounted, prefix);
     }
 
+    // 2b) GUARDS de mount: `router.use(<guard>)` autoriza as rotas SEGUINTES do
+    //     mesmo router (padrão do gateway: um `router.use(requireDataScope(...))`
+    //     no topo cobre o arquivo todo). Diferente de MOUNT_RE (monta um ROUTER).
+    //     Só conta quando extractPermission reconhece um guard nos args.
+    const useGuards: Array<{ varName: string; index: number; roles: string[]; expression: string }> = [];
+    USE_OPEN_RE.lastIndex = 0;
+    let u: RegExpExecArray | null;
+    while ((u = USE_OPEN_RE.exec(content)) !== null) {
+      const uVar = u[1];
+      if (!routerVars.has(uVar)) continue;
+      const uOpen = content.indexOf("(", u.index);
+      const uArgs = uOpen >= 0 ? readCallArgs(content, uOpen) : "";
+      const g = extractPermission(uArgs);
+      if (g.roles.length > 0) {
+        useGuards.push({ varName: uVar, index: u.index, roles: g.roles, expression: `router.use:${g.expression ?? ""}` });
+      }
+    }
+
     // 3) rotas: <routerVar>.<verbo>('<path>', ...args).
     ROUTE_OPEN_RE.lastIndex = 0;
     let r: RegExpExecArray | null;
@@ -404,7 +429,16 @@ export function extractExpressRoutes(
 
       const openParenIdx = content.indexOf("(", r.index);
       const args = openParenIdx >= 0 ? readCallArgs(content, openParenIdx) : "";
-      const { roles, expression } = extractPermission(args);
+      let { roles, expression } = extractPermission(args);
+      // Herança do guard de mount: rota SEM guard próprio pega o `router.use(guard)`
+      // ANTERIOR do mesmo router (respeita a ordem — só vale pras rotas seguintes).
+      if (roles.length === 0) {
+        const inherited = useGuards.filter((g) => g.varName === varName && g.index < r.index).pop();
+        if (inherited) {
+          roles = inherited.roles;
+          expression = inherited.expression;
+        }
+      }
       const { entities, operations } = resolveHandlerEntities(args, drizzle);
 
       // Multi-hop (D8/D9): funções chamadas nos args E handlers passados por

@@ -548,3 +548,72 @@ export { router };
     assert.equal(r.requiredRoles.length, 0);
   });
 });
+
+describe("extractExpressRoutes — guard de MOUNT (router.use) herdado pelas rotas seguintes", () => {
+  it("router.use(requireDataScope) no topo cobre rotas seguintes sem guard próprio", () => {
+    const f = {
+      filePath: "services/gateway/src/contracts.routes.ts",
+      content: `import express from "express";
+const router = express.Router();
+router.use(requireDataScope(scope));
+router.delete("/:id", (req, res) => res.json({ ok: true }));
+router.post("/:id/sign", (req, res) => res.json({ ok: true }));
+export { router };
+`,
+    };
+    const routes = extractExpressRoutes([f]);
+    assert.equal(routes.length, 2);
+    for (const r of routes) {
+      assert.deepEqual(r.requiredRoles, ["data_scope"], `${r.method} herdou o guard de mount`);
+      assert.match(r.permissionExpression ?? "", /router\.use:/);
+    }
+  });
+
+  it("guard próprio na rota tem precedência sobre o de mount", () => {
+    const f = {
+      filePath: "services/gateway/src/x.routes.ts",
+      content: `import express from "express";
+const router = express.Router();
+router.use(requireInternalToken());
+router.get("/open", requirePermission("x.read"), (req, res) => res.json({}));
+export { router };
+`,
+    };
+    const [r] = extractExpressRoutes([f]);
+    assert.deepEqual(r.requiredRoles, ["x.read"], "guard próprio vence o de mount");
+  });
+
+  it("ordem respeitada: rota ANTES do router.use não herda", () => {
+    const f = {
+      filePath: "services/gateway/src/y.routes.ts",
+      content: `import express from "express";
+const router = express.Router();
+router.get("/before", (req, res) => res.json({}));
+router.use(requireDataScope(scope));
+router.get("/after", (req, res) => res.json({}));
+export { router };
+`,
+    };
+    const routes = extractExpressRoutes([f]);
+    const before = routes.find((r) => r.path.endsWith("/before"));
+    const after = routes.find((r) => r.path.endsWith("/after"));
+    assert.equal(before?.requiredRoles.length, 0, "rota antes do use NÃO herda");
+    assert.deepEqual(after?.requiredRoles, ["data_scope"], "rota depois do use herda");
+  });
+
+  it("mount de router (app.use('/p', router)) NÃO é confundido com guard de mount", () => {
+    const f = {
+      filePath: "services/gateway/src/app.ts",
+      content: `import express from "express";
+const app = express();
+const r = express.Router();
+r.get("/x", (req, res) => res.json({}));
+app.use("/api", r);
+export { app };
+`,
+    };
+    const [route] = extractExpressRoutes([f]);
+    assert.equal(route.path, "/api/x");
+    assert.equal(route.requiredRoles.length, 0, "mount não vira guard");
+  });
+});
