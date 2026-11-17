@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // ─────────────────────────────────────────────────────────────────────────
-// ADR-0021 (nup-sentinel) — Produtor POLIGLOTA baseado em tree-sitter · 1ª fatia.
+// ADR-0021 (nup-sentinel) — Produtor de imports `.vue` sobre tree-sitter (camada base).
+// Especializado em SFC Vue (não é um CLI poliglota: o split SFC roda por-arquivo);
+// o motor tree-sitter é a fundação que a ADR projeta p/ outras stacks.
 //
-// O QUE FAZ: varre um diretório de projeto (default: os `.vue`), extrai via
+// O QUE FAZ: varre um diretório de projeto (os `.vue`), extrai via
 // tree-sitter os IMPORTS do `<script>`/`<script setup>` que resolvem para um
 // ARQUIVO REAL do projeto, e emite o payload `imports[]` que o manifest já ingere
 // (`POST /api/projects/:id/scip-edges/vue`). Fecha o ponto-cego dos 521 `.vue` do
@@ -44,14 +46,14 @@ function arg(name, def = undefined) {
 
 const scanDir = process.argv.slice(2).find((a) => !a.startsWith("--"));
 if (!scanDir) {
-  console.error("uso: node derive-imports.mjs <scanDir> --root <repoRoot> --grammars <wasmDir> [--web-tree-sitter <path>] [--source vue] [--ext .vue]");
+  console.error("uso: node derive-imports.mjs <scanDir> --root <repoRoot> --grammars <wasmDir> [--web-tree-sitter <path>] [--source vue]");
   process.exit(2);
 }
 const repoRoot = path.resolve(arg("--root", process.cwd()));
 const grammarsDir = path.resolve(arg("--grammars", path.join(path.dirname(fileURLToPath(import.meta.url)), "grammars")));
 const wtsPath = arg("--web-tree-sitter", null); // caminho absoluto do pacote (opcional)
 const source = arg("--source", "vue");
-const srcExt = arg("--ext", ".vue");
+const srcExt = ".vue"; // esta fatia é especializada em SFC Vue (split SFC por-arquivo; ver README)
 const tsconfigPath = arg("--tsconfig", path.join(path.resolve(scanDir), "tsconfig.json"));
 
 const CODE_EXTS = new Set([".vue", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".d.ts"]);

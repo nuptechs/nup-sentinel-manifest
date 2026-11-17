@@ -1,8 +1,14 @@
-# `tools/tree-sitter` — Produtor poliglota (tree-sitter) · 1ª fatia: imports de `.vue`
+# `tools/tree-sitter` — Produtor de imports `.vue` sobre tree-sitter (ADR-0021 · camada base)
 
-Fundação da **ADR-0021** (nup-sentinel) — *análise poliglota via tree-sitter* —
-que até aqui tinha **zero código**. Esta é a **1ª fatia concreta**: um produtor
-que fecha um ponto-cego real do substrato SCIP do Manifest.
+Primeira implementação da **camada tree-sitter** da **ADR-0021** (nup-sentinel) —
+*fundação de análise poliglota*. Essa camada (a "base sintática universal via
+`web-tree-sitter`") **não tinha código** (as Ondas 1 e 4 da ADR — `emit-scip` e os
+consumidores — já estavam ENTREGUES; a base tree-sitter, não). Esta entrega é o
+**produtor `.vue` COMPLETO** (não um scaffold): fecha um ponto-cego real e medido
+do substrato SCIP do Manifest. O motor é a base que a ADR-0021 projeta para outras
+stacks (`parseable:false`: Python/Go/C#…), mas **este CLI é especializado em `.vue`**
+— estender a outra linguagem exige um passo de split por-linguagem (próximo alvo),
+não só trocar a gramática.
 
 ## O problema que fecha
 
@@ -39,11 +45,9 @@ tree-sitter é **sintático**, não semântico. Por isso o produtor:
    `^0.26.11`) parseia o script (gramática `typescript`/`javascript`) e extrai os
    especificadores de `import … from`, `export … from`, `import()` e `require()`.
 3. O especificador é resolvido para um arquivo repo-relativo real (alias lido do
-   `tsconfig.json`, não cravado).
-
-**O motor é genérico** — a mesma engine estende a outras stacks `parseable:false`
-(Python/Go/C#…) trocando a gramática `.wasm` e o passo de split por-linguagem. `.vue`
-é o piloto por ser o ponto-cego medido.
+   `compilerOptions.paths` do `tsconfig.json`, não cravado). **Aliases definidos SÓ no
+   `vite.config.ts`** (ex.: `@assets`, `@nuptechs/sentinel/sdk`) não estão no tsconfig
+   e cairiam no balde `barePackages` — medido **0 ocorrências em `.vue`** no easynup hoje.
 
 ### Arquivos
 
@@ -63,7 +67,8 @@ node tools/tree-sitter/derive-imports.mjs <scanDir> \
   [--tsconfig <scanDir/tsconfig.json>] [--source vue]
 ```
 
-Caminhos emitidos são relativos a `--root`. Rodar do **repo root** com
+Caminhos emitidos são relativos a `--root`. (`--source` só nomeia o balde no log;
+o balde real é escolhido pela ROTA do POST, `/scip-edges/vue`.) Rodar do **repo root** com
 `<scanDir>=frontend --root .` produz `frontend/src/...`, casando o `sourceFile`
 repo-relativo que o Manifest guarda (idêntico ao `scip-typescript-index.yml`).
 
@@ -129,33 +134,36 @@ jobs:
         with: { persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
-      - name: Fetch producer (commit imutável) + verificar wasm (SHA-256)
-        id: fetch
-        continue-on-error: true
-        run: |
-          mkdir -p tstool/grammars
-          for f in derive-imports.mjs vue-imports-lib.mjs grammars/SHA256SUMS \
-                   grammars/tree-sitter-typescript.wasm grammars/tree-sitter-javascript.wasm; do
-            curl -fsSL "$TOOL_BASE/$f" -o "tstool/$f"
-          done
-          ( cd tstool/grammars && sha256sum --check --strict SHA256SUMS )
+      # IMPORTANTE: a lib importa @vue/compiler-sfc por bare specifier, então o
+      # produtor TEM de ficar no MESMO dir do node_modules (o $TOOL/ abaixo) — senão
+      # dá ERR_MODULE_NOT_FOUND. web-tree-sitter é passado por caminho absoluto.
       - name: Install motor isolado (web-tree-sitter + @vue/compiler-sfc)
         id: deps
-        if: steps.fetch.outcome == 'success'
         continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/vtool" && cd "$RUNNER_TEMP/vtool"
           npm init -y >/dev/null 2>&1
           npm install --ignore-scripts web-tree-sitter@0.26.11 @vue/compiler-sfc@3.5.27
-      - name: Derivar imports .vue
-        id: derive
+      - name: Fetch producer p/ dentro do dir isolado (commit imutável) + verificar wasm
+        id: fetch
         if: steps.deps.outcome == 'success'
         continue-on-error: true
         run: |
-          WTS="$RUNNER_TEMP/vtool/node_modules/web-tree-sitter/web-tree-sitter.js"
-          node tstool/derive-imports.mjs frontend --root . \
-            --grammars tstool/grammars --web-tree-sitter "$WTS" \
-            --tsconfig frontend/tsconfig.json > vue-edges.json
+          cd "$RUNNER_TEMP/vtool" && mkdir -p grammars
+          for f in derive-imports.mjs vue-imports-lib.mjs grammars/SHA256SUMS \
+                   grammars/tree-sitter-typescript.wasm grammars/tree-sitter-javascript.wasm; do
+            curl -fsSL "$TOOL_BASE/$f" -o "$f"
+          done
+          ( cd grammars && sha256sum --check --strict SHA256SUMS )
+      - name: Derivar imports .vue
+        id: derive
+        if: steps.fetch.outcome == 'success'
+        continue-on-error: true
+        run: |
+          T="$RUNNER_TEMP/vtool"
+          node "$T/derive-imports.mjs" frontend --root "$GITHUB_WORKSPACE" \
+            --grammars "$T/grammars" --web-tree-sitter "$T/node_modules/web-tree-sitter/web-tree-sitter.js" \
+            --tsconfig "$GITHUB_WORKSPACE/frontend/tsconfig.json" > vue-edges.json
           node -e "const e=require('./vue-edges.json'); if(!Array.isArray(e.imports))process.exit(1); console.log('counts:', JSON.stringify(e.counts))"
       - name: POST /scip-edges/vue (pula sem secret; 404 = merge o PR do manifest antes)
         if: steps.derive.outcome == 'success'
@@ -172,11 +180,12 @@ jobs:
 
 ## Limitações conhecidas (honestas)
 
-- **Auto-imports**: o front usa `unplugin-vue-components` (resolver naive-ui) — isso
-  auto-registra **componentes no template**, que não têm `import` no `<script>`. Essa
-  fração do ponto-cego **continua aberta** (seria um sinal de *template*, não de
-  script). Não há `unplugin-auto-import` (composables/APIs) no `vite.config.ts`, então
-  imports de `.ts` no script são explícitos e **capturados**.
+- **Auto-imports**: o front usa `unplugin-vue-components` sem `dirs` explícito — nos
+  defaults ele auto-registra **componentes no template** do resolver naive-ui **e dos
+  locais em `src/components`**, que não têm `import` no `<script>`. Essa fração do
+  ponto-cego **continua aberta** (é um sinal de *template*, não de script). Não há
+  `unplugin-auto-import` (composables/APIs) no `vite.config.ts`, então imports de `.ts`
+  no script são explícitos e **capturados**.
 - **`<script lang="tsx">`**: usa a gramática `typescript` (não a `tsx`); imports no
   topo saem igual, JSX interno pode subparsear. Raro em Vue.
 - **Sintático**: imports provam *referência de módulo*, não chamada. É de propósito —
