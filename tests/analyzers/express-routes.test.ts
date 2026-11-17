@@ -507,3 +507,44 @@ export { app };
     );
   });
 });
+
+describe("extractExpressRoutes — vocabulário de guard ampliado (CLAIM/PDP/M2M por presença)", () => {
+  const mk = (guard: string) => ({
+    filePath: "services/gateway/src/x.routes.ts",
+    content: `import express from "express";
+const router = express.Router();
+router.delete("/item/:id", ${guard}, (req, res) => res.json({ ok: true }));
+export { router };
+`,
+  });
+
+  it("requireDataScope(scope) — claim por objeto (329× no gateway) → protegido", () => {
+    const [r] = extractExpressRoutes([mk("requireDataScope(scope)")]);
+    assert.equal(r.method, "DELETE");
+    assert.ok(r.requiredRoles.length > 0, "requiredRoles não-vazio (presença basta)");
+    assert.deepEqual(r.requiredRoles, ["data_scope"]);
+  });
+
+  it("protect(...) / protectAny(...) — PDP guard → protegido (pdp)", () => {
+    assert.deepEqual(extractExpressRoutes([mk("protect(res, act)")])[0].requiredRoles, ["pdp"]);
+    assert.deepEqual(extractExpressRoutes([mk("protectAny(a, b)")])[0].requiredRoles, ["pdp"]);
+  });
+
+  it("requireInternalToken() — M2M → classe system (não desprotegido)", () => {
+    assert.deepEqual(extractExpressRoutes([mk("requireInternalToken()")])[0].requiredRoles, ["system"]);
+  });
+
+  it("requireLicense / aiAccessGuard → protegido", () => {
+    assert.deepEqual(extractExpressRoutes([mk("requireLicense('pro')")])[0].requiredRoles, ["license"]);
+    assert.deepEqual(extractExpressRoutes([mk("aiAccessGuard()")])[0].requiredRoles, ["ai"]);
+  });
+
+  it("requireAnyPermission('a','b') — claim com strings → mantém os papéis", () => {
+    assert.deepEqual(extractExpressRoutes([mk("requireAnyPermission('a','b')")])[0].requiredRoles, ["a", "b"]);
+  });
+
+  it("rota SEM guard reconhecido segue desprotegida (sem falso-verde)", () => {
+    const [r] = extractExpressRoutes([mk("(req, res, next) => next()")]);
+    assert.equal(r.requiredRoles.length, 0);
+  });
+});
