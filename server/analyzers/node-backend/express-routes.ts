@@ -93,6 +93,7 @@ const HTTP_VERBS = new Set([
 const PERMISSION_FNS = [
   "requirePermission",
   "requirePermissions",
+  "requireAnyPermission",
   "requireRole",
   "requireRoles",
   "requireAnyRole",
@@ -278,6 +279,37 @@ const BARE_AUTHZ_MIDDLEWARE: Record<string, string> = {
   // são tratados via PERMISSION_FNS acima.
 };
 
+// Guards de AUTORIZAÇÃO cuja PRESENÇA (chamados `fn(...)`) já confere a anotação de
+// segurança, mesmo SEM role em string (o argumento é objeto/scope/decisão do PDP).
+// Espelha o classificador autoritativo do easynup (scripts/ci/authz-coverage.mjs):
+// CLAIM (requireDataScope/requireLicense/…), PDP (protect/protectAny/pdpAuthorizer/…)
+// e INTERNAL/M2M (requireInternalToken/…). O valor é a CLASSE do gate (não um papel
+// real) — basta ser não-vazio p/ o omission-engine contar como protegido. Sem isto,
+// uma rota guardada por `requireDataScope(scopeObj)` (329× no gateway do easynup)
+// saía com requiredRoles=[] e era falsamente marcada "desprotegida".
+const PRESENCE_AUTHZ_FNS: Record<string, string> = {
+  // CLAIM sem string-arg (scope/licença/permissão por objeto) — presença basta
+  requireDataScope: "data_scope",
+  requireLicense: "license",
+  aiGuards: "ai",
+  aiAccessGuard: "ai",
+  // PDP / ReBAC (ADR-112): decidem pela política do Identify
+  protect: "pdp",
+  protectAny: "pdp",
+  pdpAuthorizer: "pdp",
+  createPdpAuthorizer: "pdp",
+  rebacCheck: "pdp",
+  buildDocumentAuthorize: "pdp",
+  authorizeToolCall: "pdp",
+  identifyAuthorize: "pdp",
+  checkInstancia: "pdp",
+  // M2M / system (token de serviço) — classe própria, NÃO "desprotegido"
+  requireInternalToken: "system",
+  requireServiceToken: "system",
+  requireObservabilityToken: "system",
+  requireWebhookKey: "webhook",
+};
+
 /** Extrai (roles, expressão) do 1º middleware de permissão reconhecido nos args. */
 function extractPermission(args: string): { roles: string[]; expression: string | null } {
   for (const fn of PERMISSION_FNS) {
@@ -300,6 +332,13 @@ function extractPermission(args: string): { roles: string[]; expression: string 
   for (const fn of Object.keys(BARE_AUTHZ_MIDDLEWARE)) {
     if (new RegExp(`\\b${fn}\\b`).test(args)) {
       return { roles: [BARE_AUTHZ_MIDDLEWARE[fn]], expression: fn };
+    }
+  }
+  // Guards de autorização cuja PRESENÇA basta (PDP, claim-por-objeto, M2M): são
+  // CHAMADOS `fn(...)` mas podem não ter role em string. A classe vira o "role".
+  for (const fn of Object.keys(PRESENCE_AUTHZ_FNS)) {
+    if (new RegExp(`\\b${fn}\\s*\\(`).test(args)) {
+      return { roles: [PRESENCE_AUTHZ_FNS[fn]], expression: `${fn}(...)` };
     }
   }
   return { roles: [], expression: null };
