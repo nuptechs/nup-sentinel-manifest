@@ -511,9 +511,23 @@ export async function registerRoutes(
   // ACCURATE símbolo→símbolo) e POSTa o resultado aqui. É um OVERLAY out-of-band
   // sobre o `systemGraph` já persistido (como os traços Jaeger, runtime-overlay),
   // NÃO uma re-extração (por isso endpoint próprio, não `codelens-extraction`).
-  // O store lateral (`projects.scipEdges`) é idempotente por projeto; o `/graph`
-  // agrega/mescla na leitura como STATIC_PROVEN. Sem POST, `/graph` é byte-a-byte.
-  app.post("/api/projects/:projectId/scip-edges", async (req, res) => {
+  // O store lateral (`projects.scipEdges`) agrega/mescla na leitura como
+  // STATIC_PROVEN. Sem POST, `/graph` é byte-a-byte.
+  //
+  // MULTI-FONTE (scip-edges-store.ts): um projeto pode ter >1 emissor compiler-
+  // accurate — o easynup (27) tem Java (`scip-java-index.yml`) E TS do front
+  // (`scip-typescript-index.yml`). A rota FLAT (`/scip-edges`) grava na fonte
+  // `default` (retrocompat: Java e identify já POSTam aqui); a rota por FONTE
+  // (`/scip-edges/:source`) grava num balde nomeado (ex.: `typescript`). O
+  // handler MESCLA por fonte — nunca sobrescreve o balde de outra — e o top-level
+  // flat (lido por graph-overlays/graph-load/evidence-health) é a UNIÃO de todos.
+  // IMPORTANTE p/ o CI: um servidor ANTIGO (sem esta rota) retorna 404 em
+  // `/scip-edges/:source` → o emissor TS pula em vez de sobrescrever o Java.
+  const handleScipEdges = async (
+    req: import("express").Request<{ projectId: string; source?: string }>,
+    res: import("express").Response,
+    source: string | undefined,
+  ) => {
     try {
       const projectId = parseInt(req.params.projectId);
       if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
@@ -525,26 +539,33 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Invalid payload", issues: parsed.error.format() });
       }
 
-      const payload = {
+      const { mergeScipEdgesStore, SOURCE_RE, DEFAULT_SOURCE } = await import("./analyzers/scip-edges-store");
+      const src = source ?? DEFAULT_SOURCE;
+      if (!SOURCE_RE.test(src)) {
+        return res.status(400).json({ message: `Invalid source '${src}' (expected [a-z0-9][a-z0-9_-]{0,39})` });
+      }
+
+      const incoming = {
         tool: parsed.data.tool ?? "scip-typescript",
         schema: parsed.data.schema ?? "adr-0031.p2",
+        ...(parsed.data.counts !== undefined ? { counts: parsed.data.counts } : {}),
         edges: parsed.data.edges,
         ...(parsed.data.dataAccess ? { dataAccess: parsed.data.dataAccess } : {}),
         ...(parsed.data.imports ? { imports: parsed.data.imports } : {}),
         ...(parsed.data.entryFiles ? { entryFiles: parsed.data.entryFiles } : {}),
-        ingestedAt: new Date().toISOString(),
       };
-      await storage.updateProjectScipEdges(projectId, payload);
+      const merged = mergeScipEdgesStore(project.scipEdges, incoming, src);
+      await storage.updateProjectScipEdges(projectId, merged);
 
-      // Prévia honesta: quantas arestas de SISTEMA proven a agregação produz
-      // contra o systemGraph mais recente (fail-soft; 0 se ainda não há análise).
+      // Prévia honesta: agrega a UNIÃO (todas as fontes) contra o systemGraph
+      // mais recente (fail-soft; 0 se ainda não há análise).
       let systemEdgesProven = 0;
       try {
         const snaps = await storage.getAnalysisSnapshots(projectId);
         const sg = ((snaps[0]?.manifestJson as any) || {}).systemGraph;
         if (sg && Array.isArray(sg.nodes)) {
           const { aggregateScipEdges } = await import("./analyzers/scip-aggregate");
-          systemEdgesProven = aggregateScipEdges(sg.nodes, payload.edges).edges.length;
+          systemEdgesProven = aggregateScipEdges(sg.nodes, merged.edges as any).edges.length;
         }
       } catch (e) {
         console.error("scip-edges preview aggregation failed (non-fatal):", e);
@@ -552,17 +573,24 @@ export async function registerRoutes(
 
       res.status(201).json({
         projectId,
-        received: payload.edges.length,
+        source: src,
+        received: parsed.data.edges.length,
+        total: merged.edges.length,
         systemEdgesProven,
-        schema: payload.schema,
-        ingestedAt: payload.ingestedAt,
+        schema: merged.schema,
+        ingestedAt: merged.ingestedAt,
+        bySource: merged.counts.bySource,
       });
     } catch (error) {
       console.error("Error ingesting scip edges:", error);
       const msg = error instanceof Error ? error.message : "Failed to ingest scip edges";
       res.status(500).json({ message: msg });
     }
-  });
+  };
+
+  // Rota FLAT (retrocompat): fonte `default`. Rota por FONTE: balde nomeado.
+  app.post("/api/projects/:projectId/scip-edges", (req, res) => handleScipEdges(req, res, undefined));
+  app.post("/api/projects/:projectId/scip-edges/:source", (req, res) => handleScipEdges(req, res, req.params.source));
 
   // ADR-0035 §4 — camada CONFIG_PROVEN (6º tier de proveniência). O resolvedor
   // `config-proven` do repo-alvo lê o WIRING do Spring (SEM runtime, SEM LLM) e

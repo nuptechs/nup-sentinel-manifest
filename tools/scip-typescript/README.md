@@ -102,13 +102,33 @@ curl -X POST "$MANIFEST_URL/api/projects/$PROJECT_ID/scip-edges" \
      --data-binary @edges.json
 ```
 O `POST /api/projects/:id/scip-edges` guarda as arestas no store lateral
-(`projects.scipEdges`, idempotente) e o `GET /graph` as agrega/mescla **na
+(`projects.scipEdges`) e o `GET /graph` as agrega/mescla **na
 leitura** (fail-soft: sem POST, byte-a-byte). A agregação é por **função** entre
 nós arquiteturais e por **arquivo** nos módulos materializados (Leitura-Máxima,
 § acima); `interface-impl` vira K arestas; auto-chamada (mesmo endpoint) é
 descartada. O muro de Rice permanece (§ acima): o dinâmico fica com o
 `RUNTIME_OBSERVED`. `materializeOrphanModules:false` restaura o comportamento
 antigo (órfão descartado), byte-a-byte.
+
+#### Store MULTI-FONTE (`server/analyzers/scip-edges-store.ts`)
+Um projeto pode ter **mais de um emissor** compiler-accurate — o **easynup (27)**
+tem Java (`scip-java-index.yml`) **e** TS do front (`scip-typescript-index.yml`).
+O store NÃO é mais um único payload sobrescrito: as arestas ficam em **baldes por
+FONTE** (`_bySource`), e o **top-level flat** (`edges`/`dataAccess`/`imports`/
+`entryFiles`/`ingestedAt`) é a **UNIÃO** — lido pelos consumidores (`graph-overlays`,
+`reasoner/graph-load`, `evidence-health`) sem mudança.
+- `POST …/scip-edges` (rota flat) grava na fonte **`default`** (retrocompat: Java e
+  identify seguem POSTando igual);
+- `POST …/scip-edges/:source` grava num balde **nomeado** (ex.: `typescript`).
+
+Re-POST de uma fonte substitui **só** o balde dela (as outras ficam intactas);
+store legado flat migra p/ `default` na 1ª escrita. Um servidor **antigo** responde
+**404** em `/scip-edges/:source` → o emissor pula em vez de sobrescrever outra fonte
+(fail-safe). ⚠️ O top-level `ingestedAt` é o **mais recente entre as fontes** — o
+`evidence-health` pode mostrar o eixo estático fresco mesmo com uma fonte defasada.
+A escrita é read-merge-write **não atômica**; dois emissores do MESMO projeto
+disparando no MESMO push podem perder uma atualização (last-writer-wins, auto-curado
+no próximo push — na prática Java dispara em `src/main/java/**` e o TS em `frontend/**`).
 
 **Provado ao vivo (NuPIdentify, projeto 38):** com a agregação por **arquivo**
 o `STATIC_PROVEN` saiu de **0 → 14**; com a granularidade de **função** (A5)
