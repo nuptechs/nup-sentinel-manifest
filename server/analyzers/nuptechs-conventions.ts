@@ -82,6 +82,14 @@ export function extractWsV1Endpoints(
   const out: SyntheticEndpoint[] = [];
   const seen = new Set<string>();
 
+  // Mapa constante→function key do P.java (quando enviado no SCOPE) — resolve
+  // @HasPermission(P.X) pro mesmo nome que o gateway Node usa, pro drift casar
+  // Java × Node. Sem o arquivo, constMap fica vazio e cai no nome da constante.
+  const pJava = fileData.find(
+    (f) => f.filePath.endsWith("/P.java") || f.filePath === "P.java",
+  );
+  const constMap = pJava ? loadPermissionConstants(pJava.content) : undefined;
+
   for (const file of fileData) {
     if (!file.filePath.endsWith(".java")) continue;
     if (!/Ws\d*\.java$|WsV\d+\.java$/.test(file.filePath)) continue;
@@ -111,7 +119,7 @@ export function extractWsV1Endpoints(
         .pop()
         ?.replace(/\.java$/, "") || fullPath;
     const lineNumber = lineOf(file.content, explicitMatch?.[0] ?? "@Ws");
-    const requiredRoles = extractWsV1Roles(file.content);
+    const requiredRoles = extractWsV1Roles(file.content, constMap);
 
     out.push({ fullPath, httpMethod: "POST", className, sourceFile: file.filePath, lineNumber, origin, requiredRoles });
   }
@@ -125,15 +133,43 @@ const PERMISSION_STRING_RE = /["']([^"']+)["']/g;
 const IS_AUTHENTICATED_RE = /@IsAuthenticated\b/;
 
 /**
- * Parse the security guards from a WsV1 file's content.
- * Recovers the permission constants inside `@HasPermission(P.X[, P.Y])`
- * (stored without the `P.` prefix → `X`, `Y`) and a string-literal form
- * `@HasPermission("custom.perm")`, plus `AUTHENTICATED` when `@IsAuthenticated`
- * is present. Returns a de-duplicated, stable-ordered list. Pure, no I/O.
- * These guards are the cloudsupport convention easynup uses instead of Spring's
- * `@PreAuthorize`, which is why the Java engine's standard extraction returns [].
+ * Mapa `CONSTANTE → function key` lido do `P.java` do easynup
+ * (`persistence/enums/P.java`): `public static final String X = "contracts.update"`,
+ * mais aliases `Y = X;`. Espelha o resolver autoritativo do easynup
+ * (scripts/ci/authz-coverage.mjs:loadPermissionConstants). Sem o arquivo → mapa
+ * vazio (o reconhecimento cai no nome da constante, como antes). Puro.
  */
-export function extractWsV1Roles(content: string): string[] {
+export function loadPermissionConstants(pJavaContent: string): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!pJavaContent) return map;
+  const re = /public\s+static\s+final\s+String\s+([A-Z0-9_]+)\s*=\s*"([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(pJavaContent)) !== null) map.set(m[1], m[2]);
+  // Aliases: `CONST = OUTRA_CONST;` (ou `= P.OUTRA;`). Resolve em rodadas.
+  const alias = /public\s+static\s+final\s+String\s+([A-Z0-9_]+)\s*=\s*(?:P\.)?([A-Z0-9_]+)\s*;/g;
+  const pending: [string, string][] = [];
+  while ((m = alias.exec(pJavaContent)) !== null) pending.push([m[1], m[2]]);
+  for (let round = 0; round < 5; round++) {
+    for (const [name, target] of pending) if (!map.has(name) && map.has(target)) map.set(name, map.get(target)!);
+  }
+  return map;
+}
+
+/**
+ * Parse the security guards from a WsV1 file's content.
+ * Recovers the permission constants inside `@HasPermission(P.X[, P.Y])` and a
+ * string-literal form `@HasPermission("custom.perm")`, plus `AUTHENTICATED` when
+ * `@IsAuthenticated` is present. Returns a de-duplicated, stable-ordered list.
+ * Pure, no I/O. These guards are the cloudsupport convention easynup uses instead
+ * of Spring's `@PreAuthorize`, which is why the Java engine's standard extraction
+ * returns [].
+ *
+ * `constMap` (opcional, de `loadPermissionConstants`): resolve `P.X` → a FUNCTION
+ * KEY que o gateway Node usa (ex.: `UPDATE_CONTRACT` → `contracts.update`), pro
+ * permission-drift casar Java × Node (sem ele, cai no nome da constante — ainda
+ * conta como protegido, mas não correlaciona cross-stack).
+ */
+export function extractWsV1Roles(content: string, constMap?: Map<string, string>): string[] {
   const roles = new Set<string>();
   let m: RegExpExecArray | null;
   HAS_PERMISSION_RE.lastIndex = 0;
@@ -143,7 +179,8 @@ export function extractWsV1Roles(content: string): string[] {
     PERMISSION_CONST_RE.lastIndex = 0;
     let matchedConst = false;
     while ((c = PERMISSION_CONST_RE.exec(args)) !== null) {
-      roles.add(c[1]);
+      const resolved = constMap?.get(c[1]);
+      roles.add(resolved ?? c[1]); // key quando resolvível, senão a constante
       matchedConst = true;
     }
     if (!matchedConst) {

@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import {
   extractWsV1Endpoints,
   extractWsV1Roles,
+  loadPermissionConstants,
   extractGatewayPrefixes,
   augmentGraphWithWsV1,
   isCoveredByGatewayPrefix,
@@ -124,6 +125,64 @@ describe("extractWsV1Roles — guards cloudsupport (não-@PreAuthorize)", () => 
   });
   it("dedup quando a mesma permissão aparece 2x", () => {
     assert.deepEqual(extractWsV1Roles("@HasPermission(P.X)\n@HasPermission(P.X)"), ["X"]);
+  });
+});
+
+describe("loadPermissionConstants — P.java (constante → function key)", () => {
+  const pjava = `
+    public final class P {
+      public static final String UPDATE_CONTRACT = "contracts.update";
+      public static final String DELETE_SLA = "sla.delete";
+      public static final String ALIAS_UPDATE = UPDATE_CONTRACT;        // alias direto
+      public static final String ALIAS_VIA_P = P.DELETE_SLA;            // alias com prefixo P.
+    }
+  `;
+  it("mapeia constante literal → chave de função", () => {
+    const m = loadPermissionConstants(pjava);
+    assert.equal(m.get("UPDATE_CONTRACT"), "contracts.update");
+    assert.equal(m.get("DELETE_SLA"), "sla.delete");
+  });
+  it("resolve aliases (CONST = OUTRA / = P.OUTRA)", () => {
+    const m = loadPermissionConstants(pjava);
+    assert.equal(m.get("ALIAS_UPDATE"), "contracts.update");
+    assert.equal(m.get("ALIAS_VIA_P"), "sla.delete");
+  });
+  it("conteúdo vazio → mapa vazio (sem erro)", () => {
+    assert.equal(loadPermissionConstants("").size, 0);
+  });
+});
+
+describe("extractWsV1Roles — resolução P.X → chave via constMap", () => {
+  const m = new Map([["UPDATE_CONTRACT", "contracts.update"]]);
+  it("com constMap: P.X vira a mesma chave que o gateway Node usa", () => {
+    assert.deepEqual(extractWsV1Roles("@HasPermission(P.UPDATE_CONTRACT)", m), ["contracts.update"]);
+  });
+  it("sem constMap: cai no nome da constante (compat, ainda protegido)", () => {
+    assert.deepEqual(extractWsV1Roles("@HasPermission(P.UPDATE_CONTRACT)"), ["UPDATE_CONTRACT"]);
+  });
+  it("constante ausente do mapa → fallback pro nome da constante", () => {
+    assert.deepEqual(extractWsV1Roles("@HasPermission(P.NAO_MAPEADA)", m), ["NAO_MAPEADA"]);
+  });
+});
+
+describe("extractWsV1Endpoints — resolve permissão quando P.java vem no payload", () => {
+  const pjavaFile = {
+    filePath: "src/main/java/easynup/persistence/enums/P.java",
+    content: 'public final class P { public static final String UPDATE_CONTRACT = "contracts.update"; }',
+  };
+  const wsFile = javaFile(
+    "src/main/java/easynup/services/web/contracts/updateContract/v1/UpdateContractWsV1.java",
+    "@Ws\n@HasPermission(P.UPDATE_CONTRACT)\npublic class UpdateContractWsV1 extends BaseWs {}",
+  );
+  it("com P.java: requiredRoles = chave de função (casa com o Node)", () => {
+    const eps = extractWsV1Endpoints([pjavaFile, wsFile]);
+    const ep = eps.find((e) => e.fullPath === "/easynup/updateContract.v1")!;
+    assert.deepEqual(ep.requiredRoles, ["contracts.update"]);
+  });
+  it("sem P.java: requiredRoles = nome da constante (fallback, segue protegido)", () => {
+    const eps = extractWsV1Endpoints([wsFile]);
+    const ep = eps.find((e) => e.fullPath === "/easynup/updateContract.v1")!;
+    assert.deepEqual(ep.requiredRoles, ["UPDATE_CONTRACT"]);
   });
 });
 
