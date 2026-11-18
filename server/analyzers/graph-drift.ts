@@ -13,7 +13,17 @@ export interface GraphDrift {
   nodes: { added: string[]; removed: string[]; byLayerDelta: Record<string, number> };
   edges: { added: number; removed: number; addedSample: string[]; removedSample: string[] };
   newServiceCycles: string[][];        // ciclos SERVICE↔SERVICE que NÃO existiam antes
-  couplingDelta: { id: string; before: number; after: number; deltaPct: number }[]; // hubs que mais mudaram
+  couplingDelta: {
+    id: string; before: number; after: number; deltaPct: number;
+    // Aterramento (grounding): o in-degree conta ARESTAS (uma classe que depende
+    // via CALLS+READS+WRITES conta 3), então um salto pode vir de um relationType
+    // novo SEM nenhum dependente novo = artefato de extrator. Estes campos expõem
+    // isso e viram a evidência do finding.
+    distinctNewSources: number;   // classes dependentes GENUINAMENTE novas (não apontavam antes)
+    newSources: string[];         // nomes dessas classes (amostra)
+    addedByRelation: Record<string, number>; // in-edges novas por relationType
+    allNewAreNewNodes: boolean;   // todos os dependentes novos são nós recém-criados
+  }[];
   isolationDelta: { before: number; after: number };
   counts: { nodesBefore: number; nodesAfter: number; edgesBefore: number; edgesAfter: number };
 }
@@ -87,6 +97,17 @@ export function computeGraphDrift(prev: RawSystemGraph, curr: RawSystemGraph, to
   const cyclesB = serviceCycles(B.nodes, B.edges);
   const newServiceCycles = Array.from(cyclesB).filter((c) => !cyclesA.has(c)).map((c) => c.split("|"));
 
+  // Origens de entrada (quem aponta pro nó) por snapshot — p/ achar dependentes
+  // GENUINAMENTE novos (classe distinta, não só um relationType novo da mesma).
+  const inSourcesOf = (edges: ShapedEdge[]) => {
+    const m = new Map<string, Set<string>>();
+    for (const e of edges) (m.get(e.toNode) ?? m.set(e.toNode, new Set()).get(e.toNode)!).add(e.fromNode);
+    return m;
+  };
+  const aInSources = inSourcesOf(A.edges);
+  const bInSources = inSourcesOf(B.edges);
+  const addedSet = new Set(added);
+
   // acoplamento = inDegree (quantos dependem do nó). Delta% sobre nós presentes nos dois.
   const couplingDelta: GraphDrift["couplingDelta"] = [];
   for (const [id, b] of Array.from(bNodes.entries())) {
@@ -94,7 +115,18 @@ export function computeGraphDrift(prev: RawSystemGraph, curr: RawSystemGraph, to
     if (a.inDegree === b.inDegree) continue;
     const before = a.inDegree, after = b.inDegree;
     const deltaPct = before > 0 ? Math.round(((after - before) / before) * 100) : (after > 0 ? 999 : 0);
-    couplingDelta.push({ id, before, after, deltaPct });
+    const prevSrc = aInSources.get(id) ?? new Set<string>();
+    const currSrc = bInSources.get(id) ?? new Set<string>();
+    const newSourcesArr = Array.from(currSrc).filter((s) => !prevSrc.has(s));
+    const addedByRelation: Record<string, number> = {};
+    for (const e of edgesAdded) if (e.toNode === id) addedByRelation[e.relationType] = (addedByRelation[e.relationType] || 0) + 1;
+    couplingDelta.push({
+      id, before, after, deltaPct,
+      distinctNewSources: newSourcesArr.length,
+      newSources: newSourcesArr.slice(0, 8),
+      addedByRelation,
+      allNewAreNewNodes: newSourcesArr.length > 0 && newSourcesArr.every((s) => addedSet.has(s)),
+    });
   }
   couplingDelta.sort((x, y) => Math.abs(y.after - y.before) - Math.abs(x.after - x.before));
 
@@ -137,11 +169,20 @@ export function driftToFindings(drift: GraphDrift, ctx: { projectId: string; org
   }
   for (const c of drift.couplingDelta) {
     if (c.after - c.before < 5 || c.deltaPct < 50) continue; // só salto relevante
+    // GUARDAS anti-artefato (aterramento):
+    // - base zero (0→N) vira deltaPct=999 e não é "crescimento de hub" — é nó novo.
+    if (c.before === 0) continue;
+    // - salto SEM nenhuma classe dependente nova = veio de relationType novo da
+    //   mesma classe / mudança de extrator entre snapshots → artefato, não erosão.
+    if (c.distinctNewSources === 0) continue;
+
+    const relBreak = Object.entries(c.addedByRelation).map(([r, n]) => `${r}×${n}`).join(", ");
+    const names = c.newSources.map(short);
     out.push({ ...base, subtype: "graph-drift-coupling-spike", severity: "low",
-      title: `Acoplamento de ${short(c.id)} subiu ${c.deltaPct}% (${c.before}→${c.after} dependentes)`,
-      description: `O nº de componentes que dependem de ${c.id} saltou entre as duas análises — hub crescendo, risco de ponto único de mudança. Determinístico (diff de grafo no tempo).`,
+      title: `Acoplamento de ${short(c.id)}: +${c.distinctNewSources} dependente(s) novo(s) (${c.before}→${c.after})`,
+      description: `Novas classes passaram a depender de ${c.id} entre as duas análises — hub crescendo, risco de ponto único de mudança. Dependentes novos: ${names.join(", ")}${c.newSources.length < c.distinctNewSources ? ` (+${c.distinctNewSources - c.newSources.length})` : ""}. Arestas novas por tipo: ${relBreak || "—"}. Determinístico (diff de grafo no tempo).`,
       symbolRef: { kind: "file", identifier: c.id },
-      evidences: [{ source: "auto_arch_conformance", observation: `graph-drift coupling: ${c.id} ${c.before}->${c.after} (+${c.deltaPct}%)` }] });
+      evidences: [{ source: "auto_arch_conformance", observation: `graph-drift coupling: ${c.id} ${c.before}->${c.after}; +${c.distinctNewSources} src novas [${names.join(", ")}]; rel: ${relBreak}` }] });
   }
   return out;
 }

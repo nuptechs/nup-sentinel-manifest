@@ -2292,6 +2292,16 @@ export async function registerRoutes(
       if (!Array.isArray(currG?.nodes) || !Array.isArray(prevG?.nodes)) {
         return res.status(404).json({ code: "GRAPH_NOT_IN_SNAPSHOT", message: "Um dos snapshots precede o system graph." });
       }
+      // SAME-VERSION guard: comparar dois snapshots de extratores/escopos DIFERENTES
+      // (bump de versão do manifest, ou um snapshot TRUNCADO vs. inteiro) produz
+      // drift ARTEFATO. Computa o drift p/ a tela, mas NÃO emite findings quando
+      // não-comparável (idioma `comparable`, como regression-diff).
+      const currM = (snaps[0].manifestJson as any) || {};
+      const prevM = (snaps[1].manifestJson as any) || {};
+      const sameVersion = String(currM.version ?? "") === String(prevM.version ?? "")
+        && String(currM.$schema ?? "") === String(prevM.$schema ?? "");
+      const truncated = currG?.truncated === true || prevG?.truncated === true;
+      const comparable = sameVersion && !truncated;
       const { computeGraphDrift, driftToFindings } = await import("./analyzers/graph-drift");
       const drift = computeGraphDrift(prevG, currG);
       res.json({
@@ -2299,7 +2309,9 @@ export async function registerRoutes(
         from: { analysisRunId: snaps[1].analysisRunId, at: snaps[1].createdAt },
         to: { analysisRunId: snaps[0].analysisRunId, at: snaps[0].createdAt },
         drift,
-        findings: driftToFindings(drift, { projectId: String(projectId) }),
+        comparable,
+        ...(comparable ? {} : { reason: !sameVersion ? "extractor-version-mismatch" : "snapshot-truncated" }),
+        findings: comparable ? driftToFindings(drift, { projectId: String(projectId) }) : [],
       });
     } catch (error) {
       console.error("Error computing graph drift:", error);

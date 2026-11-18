@@ -61,3 +61,41 @@ describe("computeGraphDrift — máquina do tempo (Obra 3)", () => {
     assert.equal(d.isolationDelta.after, 0, "os dois deixaram de ser isolados");
   });
 });
+
+describe("graph-drift coupling-spike — aterramento + guardas anti-artefato", () => {
+  // Hub com `nSrc` classes dependentes, cada uma com os relationTypes dados.
+  const mkHub = (nSrc: number, rels: string[]) => {
+    const nodes = [N("ENTITY:a.Hub", "ENTITY")];
+    const edges: any[] = [];
+    for (let i = 0; i < nSrc; i++) {
+      nodes.push(N(`SERVICE:a.S${i}`, "SERVICE"));
+      for (const r of rels) edges.push(E(`SERVICE:a.S${i}`, "ENTITY:a.Hub", r));
+    }
+    return { nodes, edges };
+  };
+
+  it("ARTEFATO: in-degree sobe por relationType NOVO das MESMAS classes → SUPRIMIDO", () => {
+    // 6 classes, antes só CALLS (inDegree 6); agora CALLS+READS (inDegree 12).
+    // Δ=+6, +100%, MAS zero dependentes novos (mesmas 6 classes) → não emite.
+    const d = computeGraphDrift(mkHub(6, ["CALLS"]), mkHub(6, ["CALLS", "READS_ENTITY"]));
+    const item = d.couplingDelta.find((c) => c.id === "ENTITY:a.Hub");
+    assert.ok(item && item.before === 6 && item.after === 12, "in-degree realmente saltou");
+    assert.equal(item.distinctNewSources, 0, "nenhuma classe dependente nova");
+    assert.equal(driftToFindings(d, { projectId: "p" }).find((x) => x.subtype === "graph-drift-coupling-spike"), undefined, "artefato não vira finding");
+  });
+
+  it("REAL: classes dependentes novas → emite com vizinhos no título/evidência", () => {
+    const d = computeGraphDrift(mkHub(6, ["CALLS"]), mkHub(12, ["CALLS"])); // 6 antigas + 6 novas classes
+    const f = driftToFindings(d, { projectId: "p" }).find((x) => x.subtype === "graph-drift-coupling-spike");
+    assert.ok(f, "salto com dependentes novos vira finding");
+    assert.match(f.title, /\+6 dependente/);
+    assert.match(f.evidences[0].observation, /S6|S7|S8/, "lista os dependentes novos");
+  });
+
+  it("BASE ZERO: 0→N não é crescimento de hub → SUPRIMIDO", () => {
+    const d = computeGraphDrift(mkHub(0, []), mkHub(6, ["CALLS"]));
+    const item = d.couplingDelta.find((c) => c.id === "ENTITY:a.Hub");
+    assert.ok(item && item.before === 0, "base era zero");
+    assert.equal(driftToFindings(d, { projectId: "p" }).find((x) => x.subtype === "graph-drift-coupling-spike"), undefined);
+  });
+});
