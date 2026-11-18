@@ -280,10 +280,25 @@ const BARE_AUTHZ_MIDDLEWARE: Record<string, string> = {
   requireSystemApiKey: "system",
   requireSystemOwnApiKey: "system",
   requireSystemCredentials: "system",
-  // NÃO inclui: requireAuth/requireOidcAuth/requireClientCert (AUTENTICAÇÃO pura,
-  // não autorização) nem requireTenant (escopo, não gate de privilégio). Middleware
-  // que recebem a role como STRING (requireRole/requireTenantRole/requireScope/…)
-  // são tratados via PERMISSION_FNS acima.
+  // --- identify (NuPIdentify) — guardas aprovadas por INV-31/ADR-0025 F.1,
+  //     enumeradas em tests/helpers/enumerate-routes.ts:APPROVED_GUARDS. identify
+  //     usa vocabulário próprio (não o do gateway easynup); sem isto ~166 rotas
+  //     mutáveis protegidas saíam "desprotegidas" (medido 2026-11-18). Todas
+  //     entram como BARE porque aparecem como referência de middleware (com ou
+  //     sem call): `router.delete(path, requireAuth, scopedInHandler, ...)`.
+  requireScopedRole: "scoped_role", // papel escopado na árvore do recurso (A.1)
+  requirePlatformReviewer: "platform_reviewer", // revisor global do marketplace
+  requireSystemOrSessionAdmin: "system_or_session_admin", // A.5
+  requireSystemOrSessionOwner: "system_or_session_owner",
+  requireOidcAuth: "oidc", // access token OIDC do resource-server (INV-31 aceita; normalmente + requireScope na rota)
+  // scopedInHandler: proteção FRACA — é um marcador no-op (next()) que declara
+  // "a alçada é checada DENTRO do handler" (auth.ts). Reconhecido p/ limpar o FP,
+  // mas com CLASSE PRÓPRIA 'handler_scope' (distinta de guarda real): downstream/
+  // humano enxerga que a prova é só o marcador, não um gate verificável aqui.
+  scopedInHandler: "handler_scope",
+  // NÃO inclui: requireAuth/requireClientCert (AUTENTICAÇÃO pura, não autorização)
+  // nem requireTenant (escopo, não gate de privilégio). Middleware que recebem a
+  // role como STRING (requireRole/requireTenantRole/requireScope/…) via PERMISSION_FNS.
 };
 
 // Guards de AUTORIZAÇÃO cuja PRESENÇA (chamados `fn(...)`) já confere a anotação de
@@ -317,8 +332,34 @@ const PRESENCE_AUTHZ_FNS: Record<string, string> = {
   requireWebhookKey: "webhook",
 };
 
+// Fábricas de guarda que retornam um middleware atribuído a uma const local:
+// `const registerAuth = requireSystemRegistrationAuth({...})` e depois
+// `router.post("/register", registerAuth, ...)`. O callsite é o ALIAS, então o
+// reconhecimento por NOME não pega — é preciso resolver o alias no nível do
+// arquivo (buildFactoryAliasMap) e passar o mapa ao extractPermission.
+const GUARD_FACTORIES: Record<string, string> = {
+  requireSystemRegistrationAuth: "system_registration", // E.1 (identify ADR-0046)
+};
+
+/**
+ * Mapeia `const <alias> = <FACTORY>(...)` → classe da guarda, por arquivo.
+ * Só fábricas conhecidas (GUARD_FACTORIES). Puro.
+ */
+function buildFactoryAliasMap(content: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const fn of Object.keys(GUARD_FACTORIES)) {
+    const re = new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*${fn}\\s*\\(`, "g");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) map.set(m[1], GUARD_FACTORIES[fn]);
+  }
+  return map;
+}
+
 /** Extrai (roles, expressão) do 1º middleware de permissão reconhecido nos args. */
-function extractPermission(args: string): { roles: string[]; expression: string | null } {
+function extractPermission(
+  args: string,
+  aliasGuards?: Map<string, string>,
+): { roles: string[]; expression: string | null } {
   for (const fn of PERMISSION_FNS) {
     const callRe = new RegExp(`\\b${fn}\\s*\\(`, "g");
     const m = callRe.exec(args);
@@ -346,6 +387,15 @@ function extractPermission(args: string): { roles: string[]; expression: string 
   for (const fn of Object.keys(PRESENCE_AUTHZ_FNS)) {
     if (new RegExp(`\\b${fn}\\s*\\(`).test(args)) {
       return { roles: [PRESENCE_AUTHZ_FNS[fn]], expression: `${fn}(...)` };
+    }
+  }
+  // Alias de fábrica de guarda (`const x = requireSystemRegistrationAuth(...)`
+  // usado como `x` na rota). Resolvido por arquivo via buildFactoryAliasMap.
+  if (aliasGuards) {
+    for (const [alias, cls] of aliasGuards) {
+      if (new RegExp(`\\b${alias}\\b`).test(args)) {
+        return { roles: [cls], expression: `${alias} (factory)` };
+      }
     }
   }
   return { roles: [], expression: null };
@@ -392,6 +442,9 @@ export function extractExpressRoutes(
     while ((d = ROUTER_DECL_RE.exec(content)) !== null) routerVars.add(d[1]);
     if (routerVars.size === 0) continue;
 
+    // Aliases de fábricas de guarda neste arquivo (resolve guard por-const).
+    const aliasGuards = buildFactoryAliasMap(content);
+
     // 2) mounts: routerVar → prefixo (um nível).
     const mountPrefix = new Map<string, string>();
     MOUNT_RE.lastIndex = 0;
@@ -413,7 +466,7 @@ export function extractExpressRoutes(
       if (!routerVars.has(uVar)) continue;
       const uOpen = content.indexOf("(", u.index);
       const uArgs = uOpen >= 0 ? readCallArgs(content, uOpen) : "";
-      const g = extractPermission(uArgs);
+      const g = extractPermission(uArgs, aliasGuards);
       if (g.roles.length > 0) {
         useGuards.push({ varName: uVar, index: u.index, roles: g.roles, expression: `router.use:${g.expression ?? ""}` });
       }
@@ -429,7 +482,7 @@ export function extractExpressRoutes(
 
       const openParenIdx = content.indexOf("(", r.index);
       const args = openParenIdx >= 0 ? readCallArgs(content, openParenIdx) : "";
-      let { roles, expression } = extractPermission(args);
+      let { roles, expression } = extractPermission(args, aliasGuards);
       // Herança do guard de mount: rota SEM guard próprio pega o `router.use(guard)`
       // ANTERIOR do mesmo router (respeita a ordem — só vale pras rotas seguintes).
       if (roles.length === 0) {

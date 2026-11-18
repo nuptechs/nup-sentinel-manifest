@@ -137,6 +137,60 @@ app.use("/api/x", router);
   });
 });
 
+describe("extractExpressRoutes — vocabulário de authz do identify (INV-31/ADR-0025)", () => {
+  // identify usa um vocabulário de guarda próprio (APPROVED_GUARDS do
+  // tests/helpers/enumerate-routes.ts). Sem reconhecê-lo, ~166 rotas mutáveis
+  // PROTEGIDAS saíam "desprotegidas" (medido 2026-11-18).
+  const mk = (body: string) => ({
+    filePath: "server/routes/x.routes.ts",
+    content: `import express, { type Router } from "express";\nconst router: Router = express.Router();\n${body}\napp.use("/api/x", router);\n`,
+  });
+
+  it("requireScopedRole (papel + escopo, arg é CONSTANTE) → protegida", () => {
+    const [r] = extractExpressRoutes([mk(`router.delete("/:id", requireAuth, requireScopedRole(ORG_ADMIN_ROLES, resolver), h);`)]);
+    assert.deepEqual(r.requiredRoles, ["scoped_role"]);
+  });
+  it("requireScopedRole também na forma BARE", () => {
+    const [r] = extractExpressRoutes([mk(`router.post("/y", requireAuth, requireScopedRole, h);`)]);
+    assert.deepEqual(r.requiredRoles, ["scoped_role"]);
+  });
+  it("requirePlatformReviewer / requireSystemOrSessionAdmin / requireSystemOrSessionOwner → protegidas", () => {
+    const a = extractExpressRoutes([mk(`router.post("/a", requireAuth, requirePlatformReviewer, h);`)])[0];
+    const b = extractExpressRoutes([mk(`router.patch("/b", requireAuth, requireSystemOrSessionAdmin, h);`)])[0];
+    const c = extractExpressRoutes([mk(`router.delete("/c", requireAuth, requireSystemOrSessionOwner, h);`)])[0];
+    assert.deepEqual(a.requiredRoles, ["platform_reviewer"]);
+    assert.deepEqual(b.requiredRoles, ["system_or_session_admin"]);
+    assert.deepEqual(c.requiredRoles, ["system_or_session_owner"]);
+  });
+  it("requireOidcAuth (resource-server) → protegida (classe 'oidc')", () => {
+    const [r] = extractExpressRoutes([mk(`router.post("/token", requireOidcAuth, h);`)]);
+    assert.deepEqual(r.requiredRoles, ["oidc"]);
+  });
+  it("scopedInHandler → proteção FRACA com CLASSE PRÓPRIA 'handler_scope' (limpa FP sem conflatar c/ guarda real)", () => {
+    const [r] = extractExpressRoutes([mk(`router.delete("/:id", requireAuth, scopedInHandler, h);`)]);
+    assert.deepEqual(r.requiredRoles, ["handler_scope"], "reconhecida, mas rotulada distinta da guarda forte");
+    assert.notDeepEqual(r.requiredRoles, ["admin"]);
+  });
+  it("alias de FACTORY: const x = requireSystemRegistrationAuth({...}); usado como x → protegida", () => {
+    const f = {
+      filePath: "server/routes/systems.routes.ts",
+      content: `import express, { type Router } from "express";
+const router: Router = express.Router();
+const registerAuth = requireSystemRegistrationAuth({ compatUntil: "2026-12-01" });
+router.post("/register", registerAuth, async (req, res) => { res.json({}); });
+app.use("/api/systems", router);
+`,
+    };
+    const [r] = extractExpressRoutes([f]);
+    assert.deepEqual(r.requiredRoles, ["system_registration"], "o alias resolve pra classe da fábrica");
+    assert.match(r.permissionExpression ?? "", /factory/);
+  });
+  it("requireAuth sozinho (sem marcador de alçada) SEGUE sinalizável — não mascara o soft spot real", () => {
+    const [r] = extractExpressRoutes([mk(`router.post("/bundle-reviews", requireAuth, h);`)]);
+    assert.deepEqual(r.requiredRoles, [], "requireAuth puro não vira proteção (bundle-reviews = alçada a definir)");
+  });
+});
+
 describe("extractExpressRoutes — cobertura de verbos, roles múltiplas e ruído", () => {
   it("reconhece todos os verbos HTTP e várias roles", () => {
     const file = {
