@@ -36,6 +36,16 @@ export interface SourceInput {
   content: string;
 }
 
+/** Opções de extração. `react` liga o IRMÃO React (.tsx/.jsx) do extractor Vue:
+ *  rotas de react-router/wouter (`<Route path component={X}|element={<X/>} />`)
+ *  resolvidas até o arquivo .tsx da tela, e .tsx/.jsx como páginas. DEFAULT OFF
+ *  — sem ela o extractor é byte-a-byte o Vue-only atual. Codelens NUNCA vira
+ *  finding (não passa pelo sentinel-emitter), então o irmão React não pode
+ *  abrir auto-PR em tenant algum; é só o mapa rota→tela do /lookup. */
+export interface CodelensOptions {
+  react?: boolean;
+}
+
 export interface ExtractionDiagnostics {
   routerFiles: string[];
   routesTotal: number;
@@ -374,6 +384,217 @@ function looksLikeRouterFile(file: SourceInput): boolean {
   );
 }
 
+// ───────────────────────────── routes (React) ─────────────────────────────
+// IRMÃO React do extractor de rotas Vue. identify usa wouter
+// (`<Route path="/x" component={X} />`, X importado de `@/pages/XPage`) —
+// o extractor Vue (vue-router object-array) não vê nada disso, então o
+// /lookup rota→tela e a âncora broken-screen do Sentinel ficavam VAZIOS pra
+// front React. Cobre JSX `<Route>` (wouter v2/3 `component={X}` e react-router
+// v6 `element={<X/>}` / `Component={X}`) e resolve o componente até o .tsx real.
+
+function isReactPage(p: string): boolean {
+  return /\.(tsx|jsx)$/i.test(p);
+}
+
+function looksLikeReactRouterFile(file: SourceInput): boolean {
+  const p = file.filePath.toLowerCase();
+  if (!/\.(tsx|jsx)$/.test(p)) return false;
+  if (p.includes("node_modules")) return false;
+  return (
+    /from\s+['"]wouter['"]/.test(file.content) ||
+    /from\s+['"]react-router(?:-dom)?['"]/.test(file.content) ||
+    /createBrowserRouter\s*\(/.test(file.content) ||
+    (/<Route\b/.test(file.content) && /\bpath\s*=/.test(file.content))
+  );
+}
+
+/** Resolve o especificador do import do componente de tela React até o .tsx REAL
+ *  do fileset (repo-rel). Diferente do Vue, o import NÃO tem extensão
+ *  (`@/pages/XPage`), então testa extensões/index. Suporta `@/`→src, `./`, `../`.
+ *  Devolve null quando é módulo npm nu ou não resolve. */
+function resolveReactComponentToFile(
+  spec: string,
+  routerPath: string,
+  fileset: Set<string>,
+): string | null {
+  const EXTS = ["", ".tsx", ".jsx", ".ts", ".js", "/index.tsx", "/index.jsx", "/index.ts", "/index.js"];
+  let base: string | null = null;
+  if (spec.startsWith("@/")) {
+    const srcIdx = routerPath.indexOf("/src/");
+    const srcRoot =
+      srcIdx >= 0 ? routerPath.slice(0, srcIdx + 5) : posixDirname(routerPath) + "/";
+    base = posixNormalize(srcRoot + spec.slice(2));
+  } else if (spec.startsWith("./") || spec.startsWith("../")) {
+    base = posixNormalize(posixDirname(routerPath) + "/" + spec);
+  } else {
+    return null; // módulo npm nu — não é uma tela do fileset
+  }
+  for (const ext of EXTS) {
+    if (fileset.has(base + ext)) return base + ext;
+  }
+  // fallback por sufixo (alias desconhecido / raiz incerta)
+  const tail = spec.replace(/^(?:@\/|\.\/|(?:\.\.\/)+)/, "");
+  for (const ext of ["", ".tsx", ".jsx"]) {
+    const hits = [...fileset].filter((f) => f === tail + ext || f.endsWith("/" + tail + ext));
+    if (hits.length === 1) return hits[0];
+  }
+  return null;
+}
+
+/** Nome do componente referenciado por `component={X}` / `element={<X/>}` /
+ *  `Component={X}` num atributo JSX. Null se não for um identificador. */
+function jsxComponentIdentifier(init: ts.JsxAttribute["initializer"]): string | null {
+  if (!init || !ts.isJsxExpression(init) || !init.expression) return null;
+  const e = init.expression;
+  if (ts.isIdentifier(e)) return e.text; // component={X} / Component={X}
+  if (ts.isJsxElement(e)) {
+    const tag = e.openingElement.tagName;
+    if (ts.isIdentifier(tag)) return tag.text; // element={<X>...</X>}
+  }
+  if (ts.isJsxSelfClosingElement(e)) {
+    if (ts.isIdentifier(e.tagName)) return e.tagName.text; // element={<X/>}
+  }
+  return null;
+}
+
+function jsxAttrStringValue(init: ts.JsxAttribute["initializer"]): string | undefined {
+  if (!init) return undefined;
+  if (ts.isStringLiteral(init)) return init.text; // path="/x"
+  if (ts.isJsxExpression(init) && init.expression) return stringLiteralValue(init.expression);
+  return undefined;
+}
+
+function extractReactRoutesFromFile(
+  file: SourceInput,
+  diag: ExtractionDiagnostics,
+  fileset: Set<string>,
+): CodelensExtractionPayload["routes"] {
+  const routes: CodelensExtractionPayload["routes"] = [];
+  let sf: ts.SourceFile;
+  try {
+    sf = parseTypeScript(file.content, file.filePath);
+  } catch {
+    return routes;
+  }
+
+  // identificador→especificador dos imports estáticos (component por nome).
+  const staticImports = new Map<string, string>();
+  sf.statements.forEach((st) => {
+    if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier)) {
+      const spec = st.moduleSpecifier.text;
+      const clause = st.importClause;
+      if (clause?.name) staticImports.set(clause.name.text, spec);
+      if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        clause.namedBindings.elements.forEach((e) => staticImports.set(e.name.text, spec));
+      }
+    }
+  });
+
+  let sawRoute = false;
+  const seenPaths = new Set<string>();
+
+  const handleRouteElement = (
+    attrs: ts.JsxAttributes,
+  ) => {
+    let routePath: string | undefined;
+    let compIdent: string | null = null;
+    for (const attr of attrs.properties) {
+      if (!ts.isJsxAttribute(attr) || !attr.name) continue;
+      const key = attr.name.getText();
+      if (key === "path") routePath = jsxAttrStringValue(attr.initializer);
+      else if (key === "component" || key === "element" || key === "Component") {
+        compIdent = compIdent ?? jsxComponentIdentifier(attr.initializer);
+      }
+    }
+    if (routePath === undefined) return;
+    const dedupKey = `${routePath}::${compIdent ?? ""}`;
+    if (seenPaths.has(dedupKey)) return;
+    seenPaths.add(dedupKey);
+    sawRoute = true;
+
+    const spec = compIdent ? staticImports.get(compIdent) ?? null : null;
+    const resolved = spec ? resolveReactComponentToFile(spec, file.filePath, fileset) : null;
+    const component = resolved ?? spec ?? compIdent ?? undefined;
+
+    diag.routesTotal += 1;
+    if (resolved && /\.(tsx|jsx)$/i.test(resolved)) {
+      diag.routesWithComponentPath += 1;
+      if (fileset.has(resolved)) diag.routesComponentResolvedToFile += 1;
+    } else {
+      diag.routesUnresolvedComponent.push({ routePath, component: component ?? null });
+    }
+
+    routes.push({
+      routePath,
+      name: compIdent ?? undefined,
+      component: component ?? undefined,
+      permissions: [],
+      hasPaletteMeta: false,
+      sourcePath: file.filePath,
+    });
+  };
+
+  const visit = (n: ts.Node) => {
+    if (ts.isJsxOpeningElement(n) || ts.isJsxSelfClosingElement(n)) {
+      const tag = n.tagName;
+      if (ts.isIdentifier(tag) && tag.text === "Route") {
+        handleRouteElement(n.attributes);
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+
+  if (sawRoute) diag.routerFiles.push(file.filePath);
+  return routes;
+}
+
+/** Página React (.tsx/.jsx): imports, hooks `useX` (equivalente aos composables
+ *  do Vue), props de `function C(props)` / `({a,b})`, e chaves i18n. */
+function extractReactPage(file: SourceInput): CodelensExtractionPayload["pages"][number] {
+  const imports: string[] = [];
+  const hooks = new Set<string>();
+  const props: string[] = [];
+  let sf: ts.SourceFile | undefined;
+  try {
+    sf = parseTypeScript(file.content, file.filePath);
+  } catch {
+    sf = undefined;
+  }
+  if (sf) {
+    const addIfHook = (id: string) => {
+      if (/^use[A-Z]/.test(id)) hooks.add(id);
+    };
+    sf.statements.forEach((st) => {
+      if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier)) {
+        imports.push(st.moduleSpecifier.text);
+        const clause = st.importClause;
+        if (clause?.name) addIfHook(clause.name.text);
+        if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+          clause.namedBindings.elements.forEach((e) => addIfHook(e.name.text));
+        }
+      }
+    });
+    const visit = (n: ts.Node) => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) addIfHook(n.expression.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+
+  const i18nKeys = Array.from(new Set(collectI18nKeys(file.content, file.filePath)));
+
+  return {
+    name: nameNoExt(file.filePath),
+    sourcePath: file.filePath,
+    imports: Array.from(new Set(imports)),
+    props: Array.from(new Set(props)),
+    emits: [],
+    composables: Array.from(hooks),
+    i18nKeys,
+  };
+}
+
 // ───────────────────────────── pages (.vue) ─────────────────────────────
 
 function extractPage(file: SourceInput): CodelensExtractionPayload["pages"][number] {
@@ -625,7 +846,7 @@ function cap<T>(arr: T[]): T[] {
  * Produz o payload Codelens (formato EXATO de `codelensExtractionSchema`) a
  * partir de uma lista de arquivos-fonte. Puro e fail-soft por-arquivo.
  */
-export function extractCodelens(files: SourceInput[]): ExtractionOutcome {
+export function extractCodelens(files: SourceInput[], options: CodelensOptions = {}): ExtractionOutcome {
   const diag: ExtractionDiagnostics = {
     routerFiles: [],
     routesTotal: 0,
@@ -650,10 +871,21 @@ export function extractCodelens(files: SourceInput[]): ExtractionOutcome {
     if (looksLikeRouterFile(f)) {
       routes.push(...extractRoutesFromFile(f, diag, fileset));
     }
+    // IRMÃO React (atrás da opção, OFF default). Só ADICIONA — o fluxo Vue acima
+    // segue intacto, então sem a opção a saída é byte-a-byte a atual.
+    if (options.react && looksLikeReactRouterFile(f)) {
+      routes.push(...extractReactRoutesFromFile(f, diag, fileset));
+    }
     if (isVue(f.filePath)) {
       diag.vueFiles += 1;
       try {
         pages.push(extractPage(f));
+      } catch {
+        /* fail-soft por-arquivo */
+      }
+    } else if (options.react && isReactPage(f.filePath)) {
+      try {
+        pages.push(extractReactPage(f));
       } catch {
         /* fail-soft por-arquivo */
       }
@@ -683,6 +915,6 @@ export function extractCodelens(files: SourceInput[]): ExtractionOutcome {
 }
 
 /** Conveniência: só o payload (p/ o ingest same-run na pipeline). */
-export function extractCodelensPayload(files: SourceInput[]): CodelensExtractionPayload {
-  return extractCodelens(files).payload;
+export function extractCodelensPayload(files: SourceInput[], options: CodelensOptions = {}): CodelensExtractionPayload {
+  return extractCodelens(files, options).payload;
 }

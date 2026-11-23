@@ -923,13 +923,19 @@ export class AnalysisPipeline {
       return;
     }
     try {
+      // IRMÃO React (ADR-044): flag própria, DEFAULT OFF. Liga a extração de
+      // rotas react-router/wouter + páginas .tsx/.jsx. OFF ⇒ comportamento
+      // Vue-only byte-a-byte (projeto React continua sem catálogo, como hoje).
+      const reactFlag = (process.env.MANIFEST_CODELENS_REACT ?? "").toLowerCase();
+      const reactOn = reactFlag === "on" || reactFlag === "true" || reactFlag === "1" || reactFlag === "yes";
       const hasVue = files.some((f) => f.filePath.toLowerCase().endsWith(".vue"));
-      if (!hasVue) return; // projeto sem frontend Vue — nada a catalogar
-      const { payload, diagnostics } = extractCodelens(files);
+      const hasReact = reactOn && files.some((f) => /\.(tsx|jsx)$/i.test(f.filePath));
+      if (!hasVue && !hasReact) return; // sem frontend Vue (nem React c/ flag) — nada a catalogar
+      const { payload, diagnostics } = extractCodelens(files, { react: reactOn });
       const result = await persistCodelensForRun(analysisRunId, projectId, payload);
       this.progress(
         "Codelens",
-        `catálogo persistido (run ${analysisRunId}): ${result.routes} rotas (${diagnostics.routesWithComponentPath} c/ .vue), ${result.pages} páginas, ${result.composables} composables, ${result.i18nKeys} i18n`,
+        `catálogo persistido (run ${analysisRunId}): ${result.routes} rotas (${diagnostics.routesWithComponentPath} c/ tela), ${result.pages} páginas, ${result.composables} composables, ${result.i18nKeys} i18n`,
       );
     } catch (err) {
       // fail-soft: a âncora ficar sem catálogo nunca pode derrubar o /analyze.
