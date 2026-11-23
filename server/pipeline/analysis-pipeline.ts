@@ -2,7 +2,7 @@ import { storage } from "../storage";
 import { analyzeFrontend } from "../analyzers/frontend-analyzer";
 import { buildApplicationGraph, analyzeGraphEndpoints, reconstructGraph } from "../analyzers/backend-java-client";
 import { interactionsToCatalogEntries, endpointImpactsToCatalogEntries, wsv1NodesToCatalogEntries } from "../analyzers/graph-connector";
-import { readMultistackFlags } from "../config/multistack";
+import { readMultistackFlags, type MultistackFlags } from "../config/multistack";
 import { extractExpressRoutes, expressRoutesToCatalogEntries, expressRoutesToImpactEndpoints } from "../analyzers/node-backend/express-routes";
 import { augmentGraphWithFullStack, linkViewsViaApiLayer, linkViewsViaComposablesAndInline, frontendInventory } from "../analyzers/full-stack-augment";
 import { classifyEntriesDeterministic } from "../analyzers/deterministic-classifier";
@@ -70,6 +70,7 @@ export interface AnalysisResult {
   cacheStatus?: string;
   securityFindings?: SecurityFinding[];
   securityMetrics?: SecurityCoverageMetrics;
+  multistackFlags?: MultistackFlags;
 }
 
 interface GraphCache {
@@ -449,7 +450,12 @@ export class AnalysisPipeline {
         analysisRun.id, projectId, frontendInteractions.length, endpointImpacts.length,
         appGraph, graphSummary, created.length, endpointImpacts, resolutionErrors, catalogEntryData
       );
-      return { ...result, cacheStatus, securityFindings, securityMetrics };
+      // Diagnóstico observável (ADR-0015): expõe os flags multistack COMO LIDOS
+      // no processo de runtime, na própria resposta da análise. Torna possível
+      // confirmar, do lado do chamador, se a flag de composição de prefixo chegou
+      // ao processo em produção (o log de runtime não é visível via `railway logs`).
+      const multistackFlags = readMultistackFlags();
+      return { ...result, cacheStatus, securityFindings, securityMetrics, multistackFlags };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "Analysis failed";
       // LOG LOUD (o catch era SILENCIOSO): uma falha ANTES da costura de runtime
