@@ -625,9 +625,17 @@ export class AnalysisPipeline {
     // Atrás da flag MANIFEST_MULTISTACK_NODE — OFF ⇒ nada muda (byte-a-byte, G2);
     // ON ⇒ superset estrito, mesmo dedup por (método, endpoint) do WsV1 (G3).
     if (readMultistackFlags().nodeBackend && frontendFiles.length > 0) {
-      addUnseen(
-        expressRoutesToCatalogEntries(extractExpressRoutes(frontendFiles, { crossFilePrefix: readMultistackFlags().nodeBackendXfilePrefix }), analysisRunId, projectId)
+      const xfilePrefix = readMultistackFlags().nodeBackendXfilePrefix;
+      const expressRoutes = extractExpressRoutes(frontendFiles, { crossFilePrefix: xfilePrefix });
+      // Diagnóstico observável (ADR-0015): torna o efeito da flag de composição
+      // de prefixo visível no log de runtime — distingue "flag false" de "flag
+      // true, zero mounts resolvidos". Uma linha por análise; sem custo em OFF.
+      const composedApi = expressRoutes.filter((r) => (r.path || "").startsWith("/api/")).length;
+      console.log(
+        `[multistack-diag] project=${projectId} xfilePrefix=${xfilePrefix} ` +
+          `frontendFiles=${frontendFiles.length} expressRoutes=${expressRoutes.length} composed(/api/)=${composedApi}`,
       );
+      addUnseen(expressRoutesToCatalogEntries(expressRoutes, analysisRunId, projectId));
     }
 
     return catalogEntryData;
