@@ -3150,6 +3150,36 @@ export async function registerRoutes(
     }
   });
 
+  // Tenancy / RLS (cross-tenant / IDOR) — detector GENÉRICO, READ-ONLY e
+  // ADVISORY. Atrás da flag MANIFEST_TENANCY_RLS (DEFAULT OFF): off ⇒ 404, nada
+  // computa. NÃO emite finding (não passa pelo sentinel-emitter nem cria
+  // security finding), logo não abre auto-PR em tenant algum. Lê os ARQUIVOS-
+  // fonte (migrations .sql/.xml + schema Drizzle) do projeto. Abstém quando não
+  // há fonte de política no fileset (ver tenancy-rls.ts).
+  app.get("/api/projects/:projectId/tenancy", async (req, res) => {
+    try {
+      const flag = (process.env.MANIFEST_TENANCY_RLS ?? "").toLowerCase();
+      const on = flag === "on" || flag === "true" || flag === "1" || flag === "yes";
+      if (!on) {
+        return res.status(404).json({ message: "Tenancy/RLS detector desligado (MANIFEST_TENANCY_RLS)" });
+      }
+      const projectId = parseInt(req.params.projectId);
+      if (isNaN(projectId)) return res.status(400).json({ message: "Invalid project ID" });
+      const files = await storage.getSourceFiles(projectId);
+      const { detectTenancyRls, renderTenancyMarkdown } = await import("./analyzers/tenancy-rls");
+      const report = detectTenancyRls(files.map((f) => ({ filePath: f.filePath, content: f.content })));
+      if (String(req.query.format || "").toLowerCase() === "md") {
+        const project = await storage.getProject(projectId);
+        res.type("text/markdown; charset=utf-8").send(renderTenancyMarkdown(report, { projectName: project?.name }));
+        return;
+      }
+      res.json({ projectId, ...report });
+    } catch (error) {
+      console.error("Error computing tenancy/RLS report:", error);
+      res.status(500).json({ message: "Failed to compute tenancy/RLS report" });
+    }
+  });
+
   // Consulta de governança: quais endpoints estão sem proteção e quais exigem
   // cada permissão — possível depois que a extração de @HasPermission passou a
   // popular requiredRoles. Advisory; vazio≠falhou (sem endpoints → zerado).
