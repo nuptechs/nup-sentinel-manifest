@@ -26,7 +26,16 @@ import {
   drizzleSymbolIndex,
   type DrizzleEntity,
 } from "./drizzle-schema";
-import { buildBackendCallChain, resolveTouches } from "./call-chain";
+import { buildBackendCallChain, resolveTouches, resolveBackendModulePath } from "./call-chain";
+
+/** Opções de extração. `crossFilePrefix` liga a composição de prefixo de mount
+ *  CROSS-FILE (ADR-0015): resolve `app.use("/api/auth", authRoutes)` em
+ *  server/index.ts até o arquivo da rota (via import) e PREPENDA o prefixo às
+ *  rotas de lá. DEFAULT OFF — sem a opção, o comportamento é byte-a-byte o
+ *  atual (só compõe prefixo de mount SAME-FILE). */
+export interface ExtractExpressRoutesOptions {
+  crossFilePrefix?: boolean;
+}
 
 export interface ExpressRoute {
   /** Verbo HTTP em maiúsculas: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, ALL. */
@@ -401,13 +410,134 @@ function extractPermission(
   return { roles: [], expression: null };
 }
 
+// ─── Composição de prefixo de mount CROSS-FILE (ADR-0015) ──────────────────
+// identify monta cada router num ARQUIVO (server/index.ts:
+// `app.use("/api/auth", authRoutes)`) enquanto as rotas vivem no arquivo
+// IMPORTADO (server/routes/auth.routes.ts: `router.post("/login")`). O parser
+// same-file nunca via o prefixo → gravava `/login`, e qualquer allowlist por
+// path cheio (/api/auth/login) nunca casava. Isto resolve o import do router
+// montado e PREPENDA o prefixo. Só liga com a opção crossFilePrefix (OFF default).
+
+interface CrossFileMount {
+  prefix: string;
+  /** Símbolo exportado montado: "default" ou nome nomeado. */
+  exportName: string;
+}
+
+// `import X from "spec"` / `import X, { ... } from "spec"` — captura o default.
+const IMPORT_DEFAULT_RE =
+  /\bimport\s+([A-Za-z_$][\w$]*)\s*(?:,\s*(?:\{[^}]*\}|\*\s+as\s+[A-Za-z_$][\w$]*))?\s*from\s*['"`]([^'"`]+)['"`]/g;
+// `import { a, b as c } from "spec"` — captura o bloco nomeado.
+const IMPORT_NAMED_RE =
+  /\bimport\s+(?:[A-Za-z_$][\w$]*\s*,\s*)?\{([^}]*)\}\s*from\s*['"`]([^'"`]+)['"`]/g;
+
+/** localName → {sourcePath, originalName} do arquivo (default + nomeados),
+ *  resolvendo o specifier via resolveBackendModulePath (relativos/index/alias). */
+function buildImportBindings(
+  content: string,
+  importerPath: string,
+  pathSet: Set<string>,
+): Map<string, { sourcePath: string; originalName: string }> {
+  const map = new Map<string, { sourcePath: string; originalName: string }>();
+  IMPORT_DEFAULT_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = IMPORT_DEFAULT_RE.exec(content)) !== null) {
+    const resolved = resolveBackendModulePath(importerPath, m[2], pathSet);
+    if (resolved) map.set(m[1], { sourcePath: resolved, originalName: "default" });
+  }
+  IMPORT_NAMED_RE.lastIndex = 0;
+  while ((m = IMPORT_NAMED_RE.exec(content)) !== null) {
+    const resolved = resolveBackendModulePath(importerPath, m[2], pathSet);
+    if (!resolved) continue;
+    for (const part of m[1].split(",")) {
+      const t = part.trim();
+      if (!t) continue;
+      const asM = t.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+      if (asM) map.set(asM[2], { sourcePath: resolved, originalName: asM[1] });
+      else if (BARE_IDENT_RE.test(t)) map.set(t, { sourcePath: resolved, originalName: t });
+    }
+  }
+  return map;
+}
+
+/** Varre TODOS os arquivos por `x.use("/prefix", ...router)` cujo router montado
+ *  é um IMPORT → targetFile. Mapeia targetFile → {prefix, exportName}. 1º vence
+ *  (determinístico). Pula middlewares entre o prefixo e o router (pega o ÚLTIMO
+ *  arg bare-ident). Mount same-file (router não importado) é ignorado aqui — ele
+ *  segue no fluxo atual (mountPrefix). Puro. */
+export function buildCrossFileMountPrefixes(
+  files: { filePath: string; content: string }[],
+): Map<string, CrossFileMount> {
+  const pathSet = new Set(files.map((f) => f.filePath));
+  const out = new Map<string, CrossFileMount>();
+  for (const file of files) {
+    if (file.filePath.endsWith(".java")) continue;
+    const content = file.content;
+    if (!/\.\s*use\s*\(\s*['"`]\//.test(content)) continue; // barata: há mount c/ path
+    const imports = buildImportBindings(content, file.filePath, pathSet);
+    if (imports.size === 0) continue;
+    USE_OPEN_RE.lastIndex = 0;
+    let u: RegExpExecArray | null;
+    while ((u = USE_OPEN_RE.exec(content)) !== null) {
+      const openIdx = content.indexOf("(", u.index);
+      if (openIdx < 0) continue;
+      const args = readCallArgs(content, openIdx);
+      const parts = splitTopLevelArgs(args);
+      if (parts.length < 2) continue;
+      const pm = parts[0].trim().match(/^['"`](\/[^'"`]*)['"`]$/);
+      if (!pm) continue; // 1º arg não é path string → não é mount sob prefixo
+      let mounted: string | null = null;
+      for (let i = parts.length - 1; i >= 1; i--) {
+        const p = parts[i].trim();
+        if (BARE_IDENT_RE.test(p)) { mounted = p; break; }
+      }
+      if (!mounted) continue;
+      const binding = imports.get(mounted);
+      if (!binding) continue; // não é import → mount same-file, fora deste mapa
+      if (!out.has(binding.sourcePath)) {
+        out.set(binding.sourcePath, { prefix: pm[1], exportName: binding.originalName });
+      }
+    }
+  }
+  return out;
+}
+
+/** Resolve o router var do arquivo que corresponde ao símbolo exportado montado.
+ *  "default" → `export default <var>`; nomeado → `export { local as nome }` (ou o
+ *  próprio nome). null só quando o default NÃO é um identificador (ex.:
+ *  `export default express.Router()` inline) — nesse caso o chamador aplica o
+ *  prefixo a TODOS os routers do arquivo (fallback seguro p/ arquivo de um router
+ *  só, o caso do identify). Puro. */
+function resolveExportedRouterVar(content: string, exportName: string): string | null {
+  if (exportName === "default") {
+    const m = content.match(/\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/);
+    return m ? m[1] : null;
+  }
+  const re = /\bexport\s*\{([^}]*)\}/g;
+  let em: RegExpExecArray | null;
+  while ((em = re.exec(content)) !== null) {
+    for (const part of em[1].split(",")) {
+      const t = part.trim();
+      const asM = t.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+      if (asM && asM[2] === exportName) return asM[1];
+      if (!asM && t === exportName) return exportName;
+    }
+  }
+  return exportName; // `export const <name> = Router()` casa pelo próprio nome
+}
+
 /**
  * Varre os arquivos (não-.java) e extrai as rotas Express. Determinístico e
  * ordenado (method, path, routerVar). Sem router/app declarado por
  * express()/Router(), o arquivo é ignorado — evita falso-positivo em TS genérico.
+ *
+ * `options.crossFilePrefix` (OFF default): quando ON, compõe o prefixo de mount
+ * CROSS-FILE (`app.use("/api/auth", authRoutes)` em outro arquivo). OFF ⇒
+ * byte-a-byte o comportamento atual (só mount same-file).
  */
 export function extractExpressRoutes(
   files: { filePath: string; content: string }[],
+  options: ExtractExpressRoutesOptions = {},
 ): ExpressRoute[] {
   const routes: ExpressRoute[] = [];
   // Índice de entidades Drizzle do backend inteiro (resolve refs de handler).
@@ -427,6 +557,12 @@ export function extractExpressRoutes(
       ? buildBackendCallChain(files, drizzle, { entryFiles: routeFiles })
       : null;
 
+  // Prefixos de mount cross-file (ADR-0015) — só quando a opção liga. OFF ⇒
+  // Map nulo e o path é composto só com o mount same-file (byte-a-byte).
+  const crossFileMounts = options.crossFilePrefix
+    ? buildCrossFileMountPrefixes(files)
+    : null;
+
   for (const file of files) {
     if (file.filePath.endsWith(".java")) continue;
     const content = file.content;
@@ -434,6 +570,12 @@ export function extractExpressRoutes(
     if (!EXPRESS_GUARD.test(content)) {
       continue;
     }
+
+    // Mount cross-file deste arquivo: prefixo + qual router var ele atinge.
+    const externalMount = crossFileMounts?.get(file.filePath);
+    const externalRouterVar = externalMount
+      ? resolveExportedRouterVar(content, externalMount.exportName)
+      : undefined;
 
     // 1) router/app declarados neste arquivo.
     const routerVars = new Set<string>();
@@ -524,9 +666,18 @@ export function extractExpressRoutes(
       }
 
       const prefix = mountPrefix.get(varName) || "";
+      let fullPath = joinPath(prefix, routePath);
+      // Prepend do prefixo de mount CROSS-FILE (ADR-0015). Só quando a opção liga
+      // (crossFileMounts != null) e a rota é do router que o mount atinge
+      // (externalRouterVar null = default não-identificável ⇒ aplica a todos,
+      // fallback seguro p/ arquivo de um router só). Compõe por cima do path
+      // same-file (`/api/auth` + `/login` = `/api/auth/login`).
+      if (externalMount && (externalRouterVar == null || externalRouterVar === varName)) {
+        fullPath = joinPath(externalMount.prefix, fullPath);
+      }
       routes.push({
         method: verb.toUpperCase(),
-        path: joinPath(prefix, routePath),
+        path: fullPath,
         routerVar: varName,
         requiredRoles: roles,
         permissionExpression: expression,

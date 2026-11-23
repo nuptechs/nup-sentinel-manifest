@@ -118,6 +118,7 @@ describe("ADR-0015 G2 — flags multistack (default OFF, byte-a-byte)", () => {
     assert.deepEqual(readMultistackFlags({}), {
       nodeBackend: false,
       frontendHttpTemplate: false,
+      nodeBackendXfilePrefix: false,
     });
   });
 
@@ -130,6 +131,12 @@ describe("ADR-0015 G2 — flags multistack (default OFF, byte-a-byte)", () => {
     }
     assert.equal(
       readMultistackFlags({ MANIFEST_MULTISTACK_HTTP_TEMPLATE: "true" }).frontendHttpTemplate,
+      true,
+    );
+    // Nova chave (ADR-0015 cross-file prefix): OFF por padrão, liga por env.
+    assert.equal(readMultistackFlags({}).nodeBackendXfilePrefix, false);
+    assert.equal(
+      readMultistackFlags({ MANIFEST_MULTISTACK_NODE_XFILE_PREFIX: "true" }).nodeBackendXfilePrefix,
       true,
     );
   });

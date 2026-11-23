@@ -22,6 +22,27 @@ export interface MultistackFlags {
   nodeBackend: boolean;
   /** Onda 1 D6: branches queryKey-como-URL e apiRequest no http-service-map. */
   frontendHttpTemplate: boolean;
+  /**
+   * Composição de prefixo de mount CROSS-FILE no parser de rotas Express
+   * (ADR-0015, correção do beco do NuPIdentify). Default OFF. Quando ON,
+   * `extractExpressRoutes` resolve `app.use("/api/auth", authRoutes)` em
+   * server/index.ts até o arquivo da rota (server/routes/auth.routes.ts, via
+   * import) e PREPENDA o prefixo — `router.post("/login")` vira
+   * `/api/auth/login`. Flag SEPARADA de nodeBackend porque a chamada
+   * `extractExpressRoutes` em `augmentGraphWithFullStack` (analysis-pipeline:236)
+   * NÃO é gated por nodeBackend e roda sempre; sem flag própria, o comportamento
+   * com flags OFF deixaria de ser byte-a-byte. MUDA PATHS (não é superset G3),
+   * por isso nasce atrás da própria chave, OFF por padrão.
+   *
+   * MEDIDO (2026-11-22, fontes reais): ON corrige 547/597 rotas do identify
+   * (ex.: POST /login → /api/auth/login). O gateway do easynup TAMBÉM tem o
+   * padrão app.use cross-file (10 rotas: /api/guest, /api/invite,
+   * /api/public-forms, /api/access-request, /api/diag) — ou seja, ligar a flag
+   * NÃO é neutro pro easynup. Por isso o DEFAULT é OFF e o deploy fica
+   * byte-a-byte nos DOIS tenants; ligar globalmente exige medir o impacto em
+   * findings do easynup antes (ou escopar por projeto).
+   */
+  nodeBackendXfilePrefix: boolean;
 }
 
 const TRUTHY = /^(1|true|on|yes)$/i;
@@ -40,6 +61,7 @@ export function readMultistackFlags(
   return {
     nodeBackend: isOn(env.MANIFEST_MULTISTACK_NODE),
     frontendHttpTemplate: isOn(env.MANIFEST_MULTISTACK_HTTP_TEMPLATE),
+    nodeBackendXfilePrefix: isOn(env.MANIFEST_MULTISTACK_NODE_XFILE_PREFIX),
   };
 }
 
