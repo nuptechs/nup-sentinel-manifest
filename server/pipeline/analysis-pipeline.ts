@@ -233,7 +233,8 @@ export class AnalysisPipeline {
       // pular a costura de runtime + o snapshot (era uma causa possível do
       // "overlay nem loga"). Cada augment é isolado; a análise segue.
       try {
-        const fsAug = augmentGraphWithFullStack(appGraph, frontendInteractions, extractExpressRoutes(frontendFiles), frontendFiles);
+        const xfilePrefix = readMultistackFlags().nodeBackendXfilePrefix;
+        const fsAug = augmentGraphWithFullStack(appGraph, frontendInteractions, extractExpressRoutes(frontendFiles, { crossFilePrefix: xfilePrefix }), frontendFiles);
         // Onda 6b: cadeia componente→api/*.ts→URL resolvida deterministicamente
         const apiAug = linkViewsViaApiLayer(appGraph, frontendFiles);
         if (apiAug.edges > 0) this.progress("Step 3/4", `API-layer: +${apiAug.views} telas, +${apiAug.edges} arestas tela→backend`);
@@ -625,7 +626,7 @@ export class AnalysisPipeline {
     // ON ⇒ superset estrito, mesmo dedup por (método, endpoint) do WsV1 (G3).
     if (readMultistackFlags().nodeBackend && frontendFiles.length > 0) {
       addUnseen(
-        expressRoutesToCatalogEntries(extractExpressRoutes(frontendFiles), analysisRunId, projectId)
+        expressRoutesToCatalogEntries(extractExpressRoutes(frontendFiles, { crossFilePrefix: readMultistackFlags().nodeBackendXfilePrefix }), analysisRunId, projectId)
       );
     }
 
@@ -731,7 +732,7 @@ export class AnalysisPipeline {
       if (readMultistackFlags().nodeBackend && Array.isArray(fileData) && fileData.length > 0) {
         try {
           const seen = new Set(impactEndpoints.map((e) => `${e.method} ${e.path}`));
-          const nodeMirror = expressRoutesToImpactEndpoints(extractExpressRoutes(fileData));
+          const nodeMirror = expressRoutesToImpactEndpoints(extractExpressRoutes(fileData, { crossFilePrefix: readMultistackFlags().nodeBackendXfilePrefix }));
           for (const ne of nodeMirror) {
             const k = `${ne.method} ${ne.path}`;
             if (!seen.has(k)) {
