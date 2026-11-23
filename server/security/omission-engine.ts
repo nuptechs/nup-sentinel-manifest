@@ -60,17 +60,84 @@ export interface SecurityCoverageMetrics {
   roleDistribution: Record<string, number>;
 }
 
+/**
+ * Opções do motor de omissão (ADR-0015 Fase 2). Default (tudo ausente) =
+ * comportamento ATUAL, byte-a-byte — o gate G2 exige isto.
+ *
+ * - `smartGrouping` (Frente B): ao agrupar "peers" para o UNPROTECTED_OUTLIER,
+ *   rotas Express (architectureType REST_CONTROLLER) agrupam por RECURSO (path),
+ *   não por `entitiesTouched[0]`. O call-chain Node super-atribui tabelas comuns
+ *   (ancestry/organizations/candidates…) a endpoints não relacionados, então
+ *   login/SCIM/billing caíam no mesmo balde de endpoints protegidos e viravam
+ *   outlier falso. O path não depende de atribuição. Java (WS_OPERATION_BASED)
+ *   segue por entidade (atribuição confiável). Genérico: sem nome de app cravado.
+ * - `publicRoutePatterns` (Frente A): rotas públicas-por-design (declaradas pelo
+ *   perfil) são excluídas da linha-base do outlier E do denominador de cobertura
+ *   — não são "desprotegidas", são intencionalmente abertas.
+ */
+export interface OmissionEngineOptions {
+  /** Frente B: rotas Express (REST_CONTROLLER) agrupam "peers" por RECURSO (path). */
+  smartGrouping?: boolean;
+  /** Frente A: padrões "METHOD /path" ou "/path" (curinga * no fim) de rotas públicas. */
+  publicRoutePatterns?: string[];
+}
+
 export class SecurityOmissionEngine {
   private entries: CatalogEntry[];
   private backendEntries: CatalogEntry[];
   private findings: SecurityFinding[];
   private findingCounter: number;
+  private opts: OmissionEngineOptions;
 
-  constructor(entries: CatalogEntry[]) {
+  constructor(entries: CatalogEntry[], opts: OmissionEngineOptions = {}) {
     this.entries = entries;
     this.backendEntries = entries.filter(e => e.endpoint && e.httpMethod);
     this.findings = [];
     this.findingCounter = 0;
+    this.opts = opts;
+  }
+
+  /**
+   * Domínio de agrupamento ESTÁVEL por RECURSO (path), para rotas Express
+   * (REST_CONTROLLER). O agrupamento por `entitiesTouched[0]` falha em Node porque
+   * o call-chain super-atribui tabelas comuns (ancestry/organizations/candidates…)
+   * a endpoints não relacionados — login/SCIM/billing caíam no mesmo balde de
+   * endpoints protegidos e viravam outlier falso. O PATH não depende de atribuição:
+   * remove segmentos-parâmetro (`:id`, `{id}`) e o verbo, agrupando o RECURSO
+   * (ex.: `GET /api/passkeys/:id` e `DELETE /api/passkeys` → `/api/passkeys`;
+   * `POST /api/auth/login` → `/api/auth/login`, peer só de rotas do MESMO recurso).
+   * Entradas Java (WS_OPERATION_BASED) seguem por entidade (atribuição confiável).
+   */
+  private pathDomain(entry: CatalogEntry): string | null {
+    const endpoint = entry.endpoint || "";
+    const segs = endpoint.split("/").filter(Boolean)
+      .filter(s => !s.startsWith(":") && !s.startsWith("{"));
+    // Exige ≥2 segmentos estáticos (ex.: /api/passkeys). Com <2 o domínio ficaria
+    // genérico demais (ex.: rota de gateway NÃO-composta "/:token/approve" viraria
+    // "/approve" e agruparia com qualquer "/approve") — nesses casos devolve null e
+    // o chamador cai no domínio por ENTIDADE (byte-a-byte ao OFF para essas rotas).
+    if (segs.length < 2) return null;
+    return "/" + segs.join("/").toLowerCase();
+  }
+
+  /** Frente A: a rota é pública-por-design declarada pelo perfil? */
+  private isDeclaredPublic(entry: CatalogEntry): boolean {
+    const patterns = this.opts.publicRoutePatterns;
+    if (!patterns || patterns.length === 0) return false;
+    const method = (entry.httpMethod || "").toUpperCase();
+    const path = entry.endpoint || "";
+    for (const raw of patterns) {
+      const p = raw.trim();
+      if (!p) continue;
+      const sp = p.indexOf(" ");
+      const patMethod = sp > 0 ? p.slice(0, sp).toUpperCase() : null;
+      const patPath = sp > 0 ? p.slice(sp + 1).trim() : p;
+      if (patMethod && patMethod !== "*" && patMethod !== method) continue;
+      const wildcard = patPath.endsWith("*");
+      const base = wildcard ? patPath.slice(0, -1) : patPath;
+      if (wildcard ? path.startsWith(base) : path === patPath) return true;
+    }
+    return false;
   }
 
   analyze(): { findings: SecurityFinding[]; metrics: SecurityCoverageMetrics } {
@@ -167,8 +234,15 @@ export class SecurityOmissionEngine {
     const groups = new Map<string, CatalogEntry[]>();
 
     for (const entry of this.backendEntries) {
+      // Frente A: rota pública-por-design não é "desprotegida" — fora do agrupamento.
+      if (this.isDeclaredPublic(entry)) continue;
       const method = (entry.httpMethod || "").toUpperCase();
-      const domain = this.extractEntityDomain(entry);
+      // Frente B: rotas Express (REST_CONTROLLER) agrupam por RECURSO (path) quando
+      // smartGrouping liga — robusto à super-atribuição de entidade do call-chain
+      // Node. Java (WS_OPERATION_BASED) e flag OFF seguem por entidade (byte-a-byte).
+      const usePath = this.opts.smartGrouping && entry.architectureType === "REST_CONTROLLER";
+      // Path quando dá (≥2 segmentos); senão cai pra entidade (byte-a-byte ao OFF).
+      const domain = (usePath ? this.pathDomain(entry) : null) ?? this.extractEntityDomain(entry);
       if (!domain) continue;
 
       const key = `${method}:${domain}`;
@@ -502,6 +576,8 @@ export class SecurityOmissionEngine {
     let protectedCount = 0;
 
     for (const entry of this.backendEntries) {
+      // Frente A: rota pública-por-design não entra no denominador de cobertura.
+      if (this.isDeclaredPublic(entry)) continue;
       const method = (entry.httpMethod || "UNKNOWN").toUpperCase();
       const controller = entry.controllerClass || "Unknown";
       const isProtected = this.isProtected(entry);
@@ -566,11 +642,11 @@ export class SecurityOmissionEngine {
   }
 }
 
-export function analyzeSecurityOmissions(entries: CatalogEntry[]): {
+export function analyzeSecurityOmissions(entries: CatalogEntry[], opts: OmissionEngineOptions = {}): {
   findings: SecurityFinding[];
   metrics: SecurityCoverageMetrics;
 } {
-  const engine = new SecurityOmissionEngine(entries);
+  const engine = new SecurityOmissionEngine(entries, opts);
   return engine.analyze();
 }
 

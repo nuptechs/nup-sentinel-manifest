@@ -331,7 +331,10 @@ export class AnalysisPipeline {
       const created = await this.persist(catalogEntryData);
 
       this.progress("Security", "Running security omission analysis...");
-      const { findings: securityFindings, metrics: securityMetrics } = analyzeSecurityOmissions(created);
+      // ADR-0015 Fase 2 — agrupamento esperto de peers (ignora entidade ubíqua
+      // super-atribuída pelo call-chain). Flag OFF ⇒ byte-a-byte. Genérico.
+      const smartGrouping = /^(1|true|on|yes)$/i.test((process.env.MANIFEST_OMISSION_SMART_GROUPING || "").trim());
+      const { findings: securityFindings, metrics: securityMetrics } = analyzeSecurityOmissions(created, { smartGrouping });
       if (securityFindings.length > 0) {
         const findingRecords = securityFindings.map(f => ({
           analysisRunId: analysisRun.id,
