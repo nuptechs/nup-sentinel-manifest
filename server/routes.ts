@@ -322,7 +322,7 @@ export async function registerRoutes(
       // conteúdos, não um checkout: só o chamador (job do Sentinel / CI) sabe.
       // Sem ele o run fica sem carimbo e o eixo de drift diz "não sei" — que é
       // a resposta honesta, e não some com o resto da análise.
-      const result = await pipeline.runFullAnalysis(project.id, fileData, { gitSha: options?.gitSha });
+      const result = await pipeline.runFullAnalysis(project.id, fileData, { gitSha: options?.gitSha, repo: options?.repo });
 
       const entries = await storage.getCatalogEntries(project.id);
       const manifest = generateManifest(project, entries);
