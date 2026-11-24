@@ -18,6 +18,13 @@
  *   SENTINEL_PROJECT_ID   — Sentinel project that owns this Manifest project's findings
  *   SENTINEL_TIMEOUT_MS   — per-request timeout (default 5000)
  *
+ * Alvo real do achado (ADR — carimbo de repo/ref/sourceFiles p/ a correção):
+ *   MANIFEST_EMIT_RESOLVED_TARGET — default OFF. ON ⇒ findings de rota saem com
+ *                           `symbolRef.repo`/`.ref` + `codeContext.endpoints[].sourceFiles`
+ *                           (o que a correção do Sentinel lê). OFF ⇒ byte-a-byte de hoje.
+ *   MANIFEST_DEFAULT_REPO_OWNER — owner usado ao derivar o repo de `<name>-cron`
+ *                           quando o payload não traz `repo` nem gitRepoUrl (default `nuptechs`).
+ *
  * Absent SENTINEL_URL or SENTINEL_API_KEY → emitter is a no-op (returns
  * `{ skipped: true, reason }`). This lets local Manifest dev work without
  * any Sentinel running.
@@ -47,7 +54,118 @@ export function parseSentinelKey(raw: string | undefined): { apiKey: string; org
 type EmitContext = {
   manifestProjectId: number;
   analysisRunId: number;
+  /**
+   * Alvo REAL do run analisado — preenchido pelo pipeline, consumido SÓ quando a
+   * flag MANIFEST_EMIT_RESOLVED_TARGET está ligada. Sem a flag (default), estes
+   * campos são ignorados e a emissão sai byte-a-byte igual à de hoje.
+   *
+   *  - `repo`: owner/name do repositório analisado (ex. `nuptechs/easynup`).
+   *  - `ref`:  gitSha analisado (o `symbolRef.ref` que a correção do Sentinel usa
+   *            para ler o arquivo no commit exato via GitHub Contents API).
+   *  - `sourceFileByRoute`: mapa `"<MÉTODO> <endpoint>"` → caminho-fonte REAL do
+   *            handler de backend daquela rota (vem de `endpointImpacts[].sourceFile`,
+   *            que é o arquivo do nó CONTROLLER — NÃO o componente de frontend que
+   *            o catálogo via interações carrega). A chave casa com o
+   *            `symbolRef.identifier` de rota (`symbolRefFor`).
+   */
+  repo?: string | null;
+  ref?: string | null;
+  sourceFileByRoute?: Record<string, string>;
 };
+
+/** Flag (default OFF): carimba alvo real (repo/ref/sourceFiles) nos findings. */
+export function emitResolvedTargetEnabled(): boolean {
+  return /^(1|true|on|yes)$/i.test((process.env.MANIFEST_EMIT_RESOLVED_TARGET || "").trim());
+}
+
+/**
+ * Deriva o slug `owner/name` do repositório analisado, FAIL-CLOSED: devolve
+ * `undefined` quando não há como saber com segurança (um repo errado é pior que
+ * um repo vazio). Precedência:
+ *   1. `optRepo` — campo explícito do payload de /api/analyze (futuro: o job do
+ *      Sentinel pode passar `options.repo`; hoje ele manda só `<name>-cron`).
+ *   2. `gitRepoUrl` do projeto — quando o projeto foi conectado via git/connect.
+ *   3. Derivação do `projectName` (`<name>-cron` → `<name>`) + owner default
+ *      (`MANIFEST_DEFAULT_REPO_OWNER`, default `nuptechs`).
+ * Valida o shape `owner/name` (via o MESMO parser do Sentinel seria ideal, mas
+ * aqui basta owner+name não-vazios, sem `/` sobrando).
+ */
+export function resolveRepoSlug(args: {
+  optRepo?: string | null;
+  gitRepoUrl?: string | null;
+  projectName?: string | null;
+  defaultOwner?: string | null;
+}): string | undefined {
+  // owner e name só com os caracteres que o GitHub aceita; nada de slug chutado.
+  const SEG = /^[A-Za-z0-9._-]+$/;
+  const asSlug = (raw: string | null | undefined): string | undefined => {
+    if (!raw) return undefined;
+    let s = String(raw).trim();
+    if (!s) return undefined;
+    // git@host:owner/name.git
+    const scp = s.match(/^[^@]+@[^:]+:(.+)$/);
+    if (scp) s = scp[1];
+    // scheme://host/owner/name(...)
+    s = s.replace(/^[a-z]+:\/\/[^/]+\//i, "");
+    s = s.replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
+    const parts = s.split("/").filter(Boolean);
+    if (parts.length < 2) return undefined;
+    const [owner, name] = parts;
+    if (!SEG.test(owner) || !SEG.test(name)) return undefined;
+    return `${owner}/${name}`;
+  };
+
+  // 1. campo explícito
+  const fromOpt = asSlug(args.optRepo);
+  if (fromOpt) return fromOpt;
+  // 2. gitRepoUrl do projeto
+  const fromUrl = asSlug(args.gitRepoUrl);
+  if (fromUrl) return fromUrl;
+  // 3. derivação FAIL-CLOSED: SÓ para o projeto do cron (`<name>-cron`), que é o
+  //    único cujo nome carrega o repositório. Qualquer outro nome (headless-<ts>,
+  //    "Customer Portal (Sample)", upload ad-hoc) NÃO vira repo — um slug errado
+  //    é pior que nenhum.
+  const pname = (args.projectName || "").trim();
+  if (!/-cron$/i.test(pname)) return undefined;
+  const owner = (args.defaultOwner || process.env.MANIFEST_DEFAULT_REPO_OWNER || "nuptechs").trim();
+  const nameRaw = pname.replace(/-cron$/i, "");
+  if (owner && nameRaw) return asSlug(`${owner}/${nameRaw}`);
+  return undefined;
+}
+
+/**
+ * Mapa `"<MÉTODO> <endpoint>"` → caminho-fonte REAL do handler de BACKEND, união
+ * das duas fontes autoritativas de backend do pipeline:
+ *   - `endpointImpacts` (nós CONTROLLER: Java/Spring/WsV1; `sourceFile` = arquivo
+ *     do controller), independente do dedup do catálogo;
+ *   - rotas Express (`extractExpressRoutes`, balde node-backend): `sourceFile` =
+ *     arquivo da rota. Necessário porque os endpoints Express NÃO viram
+ *     `endpointImpacts` (não são nós CONTROLLER) — sem isto, inquilino Node sai
+ *     com repo+ref e SEM sourceFiles.
+ * A chave casa o `symbolRef.identifier` de rota (`symbolRefFor` /
+ * `${httpMethod.toUpperCase()} ${endpoint}`). COLISÃO (mesma chave → arquivos
+ * diferentes) é DESCARTADA: melhor não carimbar do que apontar o arquivo errado.
+ */
+export function buildRouteSourceFileMap(args: {
+  endpointImpacts?: Array<{ httpMethod?: string | null; endpoint?: string | null; sourceFile?: string | null }>;
+  expressRoutes?: Array<{ method?: string | null; path?: string | null; sourceFile?: string | null }>;
+}): Record<string, string> {
+  const map: Record<string, string> = {};
+  const conflicted = new Set<string>();
+  const put = (method: string | null | undefined, endpoint: string | null | undefined, file: string | null | undefined) => {
+    const m = String(method || "").trim().toUpperCase();
+    const e = String(endpoint || "").trim();
+    const f = typeof file === "string" ? file.trim() : "";
+    if (!m || !e || !f) return;
+    const key = `${m} ${e}`;
+    if (conflicted.has(key)) return;
+    if (map[key] && map[key] !== f) { delete map[key]; conflicted.add(key); return; }
+    map[key] = f;
+  };
+  for (const i of args.endpointImpacts || []) put(i?.httpMethod, i?.endpoint, i?.sourceFile);
+  for (const r of args.expressRoutes || []) put(r?.method, r?.path, r?.sourceFile);
+  return map;
+}
 
 type EmitResult =
   | { skipped: true; reason: string }
@@ -69,11 +187,48 @@ type FindingV2Payload = {
     observation: string;
     observedAt: string;
   }>;
-  symbolRef: { kind: "route" | "entity"; identifier: string } | null;
+  symbolRef: { kind: "route" | "entity"; identifier: string; repo?: string; ref?: string } | null;
+  // Alvo de arquivo-fonte que a CORREÇÃO do Sentinel lê
+  // (`correction.service.js:_extractFilePaths` → `codeContext.endpoints[].sourceFiles`).
+  // Presente SÓ sob a flag MANIFEST_EMIT_RESOLVED_TARGET e só quando há arquivo
+  // real resolvido. Shape mínimo: só `sourceFiles` (caminhos repo-relative). NÃO
+  // preenche `controllerClass`/`serviceClass` — a correção os trata como CAMINHO,
+  // então um nome de classe nu ali viraria um path inexistente.
+  codeContext?: { endpoints: Array<{ sourceFiles: string[] }> };
   manifestProjectId: string;
   manifestRunId: string;
   organizationId?: string;
 };
+
+/**
+ * Carimba o alvo REAL num payload já montado (flag ON). FAIL-CLOSED e aditivo:
+ *   - `symbolRef.repo`/`symbolRef.ref`: só quando `ctx.repo` resolveu; `ref` só
+ *     quando há gitSha. Vale para qualquer `symbolRef` (rota ou entidade).
+ *   - `codeContext.endpoints[].sourceFiles`: só para findings de ROTA cujo
+ *     identifier casa um arquivo-fonte real no mapa `ctx.sourceFileByRoute`.
+ * Quando nada resolve, devolve o payload inalterado — então a flag ON sem alvo
+ * conhecido emite exatamente como a flag OFF.
+ */
+function withResolvedTarget(p: FindingV2Payload, ctx: EmitContext): FindingV2Payload {
+  let out = p;
+  if (out.symbolRef && ctx.repo) {
+    out = {
+      ...out,
+      symbolRef: {
+        ...out.symbolRef,
+        repo: ctx.repo,
+        ...(ctx.ref ? { ref: ctx.ref } : {}),
+      },
+    };
+  }
+  if (out.symbolRef?.kind === "route" && ctx.sourceFileByRoute) {
+    const file = ctx.sourceFileByRoute[out.symbolRef.identifier];
+    if (file) {
+      out = { ...out, codeContext: { endpoints: [{ sourceFiles: [file] }] } };
+    }
+  }
+  return out;
+}
 
 const SUBTYPE_BY_TYPE: Record<SecurityFinding["type"], string> = {
   UNPROTECTED_OUTLIER: "unprotected_handler",
@@ -383,7 +538,14 @@ async function emitToSentinel(
   // sob "16"/"19" (órfãos) em vez do projeto do sistema, e nunca convergirem no
   // Tribunal com os de outras naturezas. O `manifestProjectId` segue como campo
   // separado. Override central cobre todos os builders de uma vez.
-  const payloads = buildPayloads(sessionId, organizationId).map((p) => ({ ...p, projectId }));
+  // Carimbo de alvo real atrás da flag (default OFF). OFF ⇒ `{ ...p, projectId }`
+  // byte-a-byte como antes; ON ⇒ aditivo (repo/ref no symbolRef + codeContext com
+  // o arquivo-fonte do handler), fail-closed quando o alvo não resolve.
+  const resolveTarget = emitResolvedTargetEnabled();
+  const payloads = buildPayloads(sessionId, organizationId).map((p) => {
+    const base = { ...p, projectId };
+    return resolveTarget ? withResolvedTarget(base, ctx) : base;
+  });
   try {
     const { status, body } = await fetchJson(`${baseUrl}/api/findings/ingest`, {
       method: "POST",

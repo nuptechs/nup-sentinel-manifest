@@ -15,7 +15,7 @@ import { normalizeGitSha } from "../git/sha";
 import type { FileHash } from "./change-detector";
 import type { InsertCatalogEntry } from "@shared/schema";
 import { analyzeSecurityOmissions, type SecurityFinding, type SecurityCoverageMetrics } from "../security/omission-engine";
-import { emitSecurityFindings, emitConsistencyFindings } from "../security/sentinel-emitter";
+import { emitSecurityFindings, emitConsistencyFindings, resolveRepoSlug, buildRouteSourceFileMap, emitResolvedTargetEnabled } from "../security/sentinel-emitter";
 import { detectFrontendBackendInconsistencies } from "../analyzers/frontend-backend-consistency";
 import { enrichCatalogEntriesWithInference } from "../analyzers/frontend-inference-engine";
 import {
@@ -106,6 +106,14 @@ export interface RunAnalysisOptions {
    * eixo de drift responde honestamente "não sei", nunca um SHA aproximado.
    */
   gitSha?: string | null;
+  /**
+   * `owner/name` do repositório analisado, quando o CHAMADOR sabe (o job do
+   * Sentinel hoje manda só `<name>-cron` em projectName, perdendo o owner — este
+   * campo deixa ele passar o slug exato quando quiser). Ausente ⇒ o emitter
+   * deriva de gitRepoUrl/projectName + owner default. Só é consumido sob a flag
+   * MANIFEST_EMIT_RESOLVED_TARGET.
+   */
+  repo?: string | null;
 }
 
 export class AnalysisPipeline {
@@ -354,9 +362,52 @@ export class AnalysisPipeline {
       const highCount = securityFindings.filter(f => f.severity === "high").length;
       this.progress("Security", `Found ${securityFindings.length} findings (${criticalCount} critical, ${highCount} high). Coverage: ${securityMetrics.coveragePercent}%`);
 
+      // Alvo REAL do run para os emitters (consumido SÓ sob a flag
+      // MANIFEST_EMIT_RESOLVED_TARGET; sem a flag, o emitter ignora e emite
+      // byte-a-byte). `repo` = owner/name resolvido fail-closed; `ref` = gitSha;
+      // `sourceFileByRoute` = "<MÉTODO> <endpoint>" → arquivo-fonte do handler de
+      // BACKEND (endpointImpacts[].sourceFile, o nó CONTROLLER — NÃO o componente
+      // de frontend que o catálogo via interações carrega). Chave casa o
+      // `symbolRef.identifier` de rota. Fail-soft: um erro aqui nunca derruba o run.
+      // GATE: só computa o alvo (getProject + extração de rotas + mapa) quando a
+      // flag está ON. Com a flag OFF o caminho do pipeline é um no-op completo —
+      // nenhum custo extra (nem getProject nem extractExpressRoutes) além de hoje.
+      let targetCtx: { repo?: string | null; ref?: string | null; sourceFileByRoute?: Record<string, string> } = {};
+      if (emitResolvedTargetEnabled()) {
+        try {
+          const projectRec = await storage.getProject(projectId).catch(() => null);
+          const repo = resolveRepoSlug({
+            optRepo: opts.repo,
+            gitRepoUrl: projectRec?.gitRepoUrl,
+            projectName: projectRec?.name,
+          });
+          // Mapa route→sourceFile das fontes de BACKEND, exatamente como o
+          // connectGraph compõe os endpoints:
+          //   - endpointImpacts (nós CONTROLLER Java/Spring);
+          //   - nós WsV1 sintéticos (@Ws → /easynup/<op>.v<N>): a chave
+          //     (verbo+fullPath) difere do endpointImpacts, então entram à parte;
+          //   - rotas Express (balde node-backend ON): inquilino Node não tem
+          //     CONTROLLER, logo sem isto sairia sem sourceFiles.
+          const wsv1Triples = wsv1NodesToCatalogEntries(appGraph, analysisRun.id, projectId)
+            .map((e) => ({ httpMethod: e.httpMethod, endpoint: e.endpoint, sourceFile: e.sourceFile }));
+          const mFlags = readMultistackFlags();
+          const expressRoutes = (mFlags.nodeBackend && frontendFiles.length > 0)
+            ? extractExpressRoutes(frontendFiles, { crossFilePrefix: mFlags.nodeBackendXfilePrefix })
+            : [];
+          const sourceFileByRoute = buildRouteSourceFileMap({
+            endpointImpacts: [...endpointImpacts, ...wsv1Triples],
+            expressRoutes,
+          });
+          targetCtx = { repo, ref: gitSha, sourceFileByRoute };
+        } catch (err) {
+          this.progress("Sentinel", `resolução de alvo falhou (fail-soft, emite sem alvo): ${(err as Error)?.message || err}`);
+        }
+      }
+
       const emitResult = await emitSecurityFindings(securityFindings, {
         manifestProjectId: projectId,
         analysisRunId: analysisRun.id,
+        ...targetCtx,
       });
       if (emitResult.skipped) {
         this.progress("Sentinel", `emitter skipped: ${emitResult.reason}`);
@@ -380,6 +431,7 @@ export class AnalysisPipeline {
           const consistencyEmit = await emitConsistencyFindings(consistencyFindings, {
             manifestProjectId: projectId,
             analysisRunId: analysisRun.id,
+            ...targetCtx,
           });
           if (consistencyEmit.skipped) {
             this.progress("Sentinel", `inconsistency emitter skipped: ${consistencyEmit.reason}`);
@@ -431,7 +483,7 @@ export class AnalysisPipeline {
             import("../analyzers/completeness-detector"),
             import("../security/sentinel-emitter"),
           ]);
-          const emitCtx = { manifestProjectId: projectId, analysisRunId: analysisRun.id };
+          const emitCtx = { manifestProjectId: projectId, analysisRunId: analysisRun.id, ...targetCtx };
           const overlapEmit = await emitter.emitOverlapFindings(detectFunctionalOverlap(richManifest).overlaps, emitCtx);
           const lifecycleEmit = await emitter.emitCompletenessFindings(detectCompletenessGaps(richManifest).findings, emitCtx);
           for (const [label, r] of [["overlap", overlapEmit], ["lifecycle", lifecycleEmit]] as const) {

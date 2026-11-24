@@ -41,6 +41,12 @@ export function getOpenAPISpec() {
                       properties: {
                         format: { type: "string", enum: ["manifest", "agents-md", "openapi", "policy-matrix", "keycloak-realm", "opa-rego", "compliance-report", "all"], default: "manifest" },
                         projectName: { type: "string", default: "headless-<timestamp>" },
+                        repo: {
+                          type: "string",
+                          description:
+                            "owner/name do repositório analisado (ex. `nuptechs/easynup`). Opcional: quando presente, é o alvo exato que o emitter do Sentinel carimba em `symbolRef.repo` (sob a flag MANIFEST_EMIT_RESOLVED_TARGET). Ausente ⇒ derivado de gitRepoUrl ou de `projectName` (`<name>-cron`) + owner default.",
+                          example: "nuptechs/easynup",
+                        },
                         gitSha: {
                           type: "string",
                           pattern: "^[0-9a-fA-F]{40}$",

@@ -116,6 +116,8 @@ Docker no Railway; `preDeployCommand = npx drizzle-kit push` sincroniza o schema
 | `MANIFEST_TOKEN_ENCRYPTION_KEY` (64 hex) | cifra o token Git (AES-256-GCM) | token memória-only |
 | `MANIFEST_REPORT_HMAC_KEY` | assina o relatório de impacto | response sem assinatura (nunca fake) |
 | `SENTINEL_URL` + `SENTINEL_API_KEY` + `SENTINEL_PROJECT_ID` | emitter → Sentinel | emitter no-op (`{skipped:true}`) |
+| `MANIFEST_EMIT_RESOLVED_TARGET` (default OFF) | carimba alvo real nos findings de rota: `symbolRef.repo`/`.ref` + `codeContext.endpoints[].sourceFiles` (o que a correção do Sentinel lê) | emissão byte-a-byte de hoje (sem alvo) |
+| `MANIFEST_DEFAULT_REPO_OWNER` (default `nuptechs`) | owner ao derivar o repo de `<name>-cron` quando o payload não traz `repo`/gitRepoUrl | `nuptechs` |
 | `GITHUB_APP_ID` + `_PRIVATE_KEY` + `_WEBHOOK_SECRET` | bot de PR 1-clique | endpoint 503 |
 | `AI_INTEGRATIONS_OPENAI_API_KEY` / `_BASE_URL` | LLM (prosa/narrativa/semântica) | caminhos LLM caem no template determinístico |
 | `EVIDENCE_HEALTH_*_STALE_HOURS` | limiares de staleness (static 168, config 168, runtime 24, analysis 48) | defaults |
